@@ -1,10 +1,10 @@
 using Azure.AI.Inference;
 using cloudLLM.Interfaces;
-using Microsoft.Extensions.Configuration;
+using cloudLLM.Services;
 
 namespace cloudLLM.Agents
 {
-    public class LintAgent(ChatCompletionsClient client, IConfiguration configuration) : ILlmAgent
+    public class LintAgent(IChatClientProvider chatClientProvider) : ILlmAgent
     {
         private const string SystemPrompt =
             "You are a meticulous C linting agent. Focus on code formatting, naming conventions, " +
@@ -15,7 +15,7 @@ namespace cloudLLM.Agents
 
         public async Task<string> AnalyzeAsync(string cCode, string logs, CancellationToken cancellationToken = default)
         {
-            var deployment = configuration["AzureAIFoundry:Deployments:Lint"] ?? "gpt-4o";
+            var (client, deployment) = chatClientProvider.GetClient("Gpt4o");
 
             var requestOptions = new ChatCompletionsOptions
             {

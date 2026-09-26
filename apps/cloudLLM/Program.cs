@@ -1,21 +1,13 @@
 using cloudLLM;
 using cloudLLM.Agents;
-using Azure;
-using Azure.AI.Inference;
 using cloudLLM.Interfaces;
+using cloudLLM.Services;
 
 EnvFileLoader.Load(AppContext.BaseDirectory);
 
 var builder = Host.CreateApplicationBuilder(args);
 
-builder.Services.AddSingleton(sp =>
-{
-    var config = builder.Configuration.GetSection("AzureAIFoundry");
-    var endpoint = new Uri(config["Endpoint"]!);
-    var credential = new AzureKeyCredential(config["ApiKey"]!);
-
-    return new ChatCompletionsClient(endpoint, credential);
-});
+builder.Services.AddSingleton<IChatClientProvider, ChatClientProvider>();
 
 builder.Services.AddSingleton<ILlmAgent, CompilerAgent>();
 builder.Services.AddSingleton<ILlmAgent, LintAgent>();

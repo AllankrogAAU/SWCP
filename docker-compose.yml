@@ -44,8 +44,10 @@ services:
     environment:
       DOTNET_ENVIRONMENT: Development
       Kafka__BootstrapServers: kafka:19092
-      AzureAIFoundry__Endpoint: ${AzureAIFoundry__Endpoint}
-      AzureAIFoundry__ApiKey: ${AzureAIFoundry__ApiKey}
+      AzureAIFoundry__Models__Gpt4o__Endpoint: ${AzureAIFoundry__Models__Gpt4o__Endpoint}
+      AzureAIFoundry__Models__Gpt4o__ApiKey: ${AzureAIFoundry__Models__Gpt4o__ApiKey}
+      AzureAIFoundry__Models__Gpt6Sol__Endpoint: ${AzureAIFoundry__Models__Gpt6Sol__Endpoint}
+      AzureAIFoundry__Models__Gpt6Sol__ApiKey: ${AzureAIFoundry__Models__Gpt6Sol__ApiKey}
     depends_on:
       kafka:
         condition: service_healthy

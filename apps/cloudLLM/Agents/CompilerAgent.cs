@@ -1,10 +1,10 @@
 using Azure.AI.Inference;
 using cloudLLM.Interfaces;
-using Microsoft.Extensions.Configuration;
+using cloudLLM.Services;
 
 namespace cloudLLM.Agents
 {
-    public class CompilerAgent(ChatCompletionsClient client, IConfiguration configuration) : ILlmAgent
+    public class CompilerAgent(IChatClientProvider chatClientProvider) : ILlmAgent
     {
         private const string SystemPrompt =
             "You are an expert C compiler analysis agent. Focus on identifying C syntax errors, " +
@@ -15,7 +15,7 @@ namespace cloudLLM.Agents
 
         public async Task<string> AnalyzeAsync(string cCode, string logs, CancellationToken cancellationToken = default)
         {
-            var deployment = configuration["AzureAIFoundry:Deployments:Compiler"] ?? "gpt-4o";
+            var (client, deployment) = chatClientProvider.GetClient("Gpt4o");
 
             var requestOptions = new ChatCompletionsOptions
             {

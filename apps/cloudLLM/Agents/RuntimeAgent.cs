@@ -1,10 +1,10 @@
 using Azure.AI.Inference;
 using cloudLLM.Interfaces;
-using Microsoft.Extensions.Configuration;
+using cloudLLM.Services;
 
 namespace cloudLLM.Agents
 {
-    public class RuntimeAgent(ChatCompletionsClient client, IConfiguration configuration) : ILlmAgent
+    public class RuntimeAgent(IChatClientProvider chatClientProvider) : ILlmAgent
     {
         private const string SystemPrompt =
             "You are a deep execution-tracing agent specializing in C runtime failures. Focus on " +
@@ -16,7 +16,7 @@ namespace cloudLLM.Agents
 
         public async Task<string> AnalyzeAsync(string cCode, string logs, CancellationToken cancellationToken = default)
         {
-            var deployment = configuration["AzureAIFoundry:Deployments:Runtime"] ?? "gpt-6-sol";
+            var (client, deployment) = chatClientProvider.GetClient("Gpt6Sol");
 
             var requestOptions = new ChatCompletionsOptions
             {
