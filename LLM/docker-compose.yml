@@ -1,0 +1,40 @@
+services:
+  llm-server:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: c_code_llm
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      -m /models/qwen2.5-coder-7b-instruct-q4_k_m.gguf
+      --host 0.0.0.0
+      --port 8080
+      -c 32768
+      -ngl 99
+      --flash-attn on
+      -np 4
+      --cache-prompt
+      --metrics
+    restart: unless-stopped
+
+  llm-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llm_api
+    ports:
+      - "5000:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - LLMServerUrl=http://llm-server:8080
+    depends_on:
+      - llm-server
+    restart: unless-stopped

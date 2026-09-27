@@ -1,0 +1,5 @@
+models/
+.git/
+bin/
+obj/
+*.gguf
