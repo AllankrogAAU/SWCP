@@ -1,0 +1,11 @@
+tests/
+venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.pytest_cache/
+README.md
+SETUP.md
+runner.py
+seccomp-profile.json
