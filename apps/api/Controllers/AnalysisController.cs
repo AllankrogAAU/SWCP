@@ -1,5 +1,6 @@
 using api.Models;
 using api.Services;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
 namespace api.Controllers
@@ -8,12 +9,9 @@ namespace api.Controllers
     [Route("api/[controller]")]
     public class AnalysisController(IKafkaProducerService producer, AnalysisResultStore resultStore) : ControllerBase
     {
-        /// <summary>
-        /// THIS IS JUST A TEMPLATE ENDPOINT FOR DEMONSTRATION. DO NOT USE THIS IS PROD
-        /// Submits C code (and optional compiler/lint/runtime logs) for LLM-based analysis.
-        /// The request is published to Kafka and processed asynchronously by the cloudLLM worker.
-        /// </summary>
         [HttpPost]
+        [EndpointSummary("THIS IS JUST A TEMPLATE ENDPOINT FOR DEMONSTRATION. DO NOT USE THIS IS PROD")]
+        [EndpointDescription("Submits C code (and optional compiler/lint/runtime logs) for LLM-based analysis. The request is published to Kafka and processed asynchronously by the cloudLLM worker.")]
         [ProducesResponseType(typeof(AnalysisSubmitResponse), StatusCodes.Status202Accepted)]
         public async Task<IActionResult> Submit([FromBody] AnalysisSubmitRequest request, CancellationToken cancellationToken)
         {
@@ -32,11 +30,9 @@ namespace api.Controllers
             return AcceptedAtAction(nameof(GetStatus), new { jobId }, new AnalysisSubmitResponse { JobId = jobId });
         }
 
-        /// <summary>
-        /// THIS IS JUST A TEMPLATE ENDPOINT FOR DEMONSTRATION. DO NOT USE THIS IS PROD
-        /// Polls for the result of a previously submitted analysis job.
-        /// </summary>
         [HttpGet("{jobId:guid}")]
+        [EndpointSummary("THIS IS JUST A TEMPLATE ENDPOINT FOR DEMONSTRATION. DO NOT USE THIS IS PROD")]
+        [EndpointDescription("Polls for the result of a previously submitted analysis job.")]
         [ProducesResponseType(typeof(AnalysisStatusResponse), StatusCodes.Status200OK)]
         public IActionResult GetStatus(Guid jobId)
         {
