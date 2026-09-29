@@ -1,3 +1,4 @@
+using api.Endpoints;
 using api.Services;
 using Scalar.AspNetCore;
 using System.Text.Json.Serialization;
@@ -6,10 +7,9 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 
-builder.Services.AddControllers()
-    .AddJsonOptions(options => options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+builder.Services.ConfigureHttpJsonOptions(options =>
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddOpenApi();
-builder.Services.AddEndpointsApiExplorer();
 
 
 builder.Services.AddSingleton<IKafkaProducerService, KafkaProducerService>();
@@ -36,6 +36,6 @@ app.UseHttpsRedirection();
 
 app.UseAuthorization();
 
-app.MapControllers();
+app.MapAnalysisEndpoints();
 
 app.Run();
