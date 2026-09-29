@@ -31,7 +31,7 @@ public static class LlmEndpoints
     {
         var payload = new
         {
-            model = "qwen2.5-coder",
+            model = "qwen2.5-coder-3b-instruct-awq",
             messages = new object[]
             {
                 new
@@ -66,7 +66,7 @@ public static class LlmEndpoints
 
         var payload = new
         {
-            model = "qwen2.5-coder",
+            model = "qwen2.5-coder-3b-instruct-awq",
             messages = new[]
             {
                 new
