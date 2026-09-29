@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.pytest_cache/
+
+# Compiled test fixtures — commit the .c source, not the binary.
+tests/fixtures/**
+!tests/fixtures/**/
+!tests/fixtures/**/*.c
+
+# Compiled submissions used for manual testing
+*.o
+*.out
+
+# Editor/OS clutter
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
