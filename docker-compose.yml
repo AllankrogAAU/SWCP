@@ -25,7 +25,7 @@ services:
   api:
     build:
       context: .
-      dockerfile: apps/api/api/Dockerfile
+      dockerfile: apps/api/Dockerfile
     container_name: swcp-api
     ports:
       - "5170:8080"

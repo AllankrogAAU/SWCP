@@ -1,12 +1,12 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
-COPY ["apps/api/api/api.csproj", "apps/api/api/"]
-RUN dotnet restore "apps/api/api/api.csproj"
+COPY ["apps/api/api.csproj", "apps/api/"]
+RUN dotnet restore "apps/api/api.csproj"
 
-COPY apps/api/api/. apps/api/api/
-WORKDIR /src/apps/api/api
-RUN dotnet publish -c Release -o /app/publish --no-restore
+COPY apps/api/. apps/api/
+WORKDIR /src/apps/api
+RUN dotnet publish "api.csproj" -c Release -o /app/publish --no-restore
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 WORKDIR /app
