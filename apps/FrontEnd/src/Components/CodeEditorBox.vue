@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref } from 'vue'
 import { CodeEditor } from 'monaco-editor-vue3'
 
-const code = ref(`def hello():
-    print("Hello, Oskar!")`)
+const code = defineModel<string>({ required: true })
+
+defineProps<{ loading: boolean }>()
+defineEmits<{ submit: [] }>()
 
 function exportCode() {
   // Put the code from the editor into a JSON object
@@ -41,7 +42,7 @@ function exportCode() {
     <v-card-title> Code box </v-card-title>
 
     <v-card-text>
-      <CodeEditor v-model:value="code" language="python" theme="vs-dark" height="400px" />
+      <CodeEditor v-model:value="code" language="C" theme="vs-dark" height="400px" />
     </v-card-text>
 
     <v-card-actions>
