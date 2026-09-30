@@ -53,6 +53,7 @@ function exportCode() {
 <style scoped>
 .code-editor-card {
   width: 100%;
+  height: 100%;
 }
 
 .code-editor {
