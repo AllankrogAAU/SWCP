@@ -7,7 +7,7 @@ namespace api.Endpoints
     {
         public static RouteGroupBuilder MapAnalysisEndpoints(this IEndpointRouteBuilder app)
         {
-            var group = app.MapGroup("api/analysis").WithTags("Analysis");
+            var group = app.MapGroup("api/analysis").WithTags("Analysis").RequireAuthorization();
 
             group.MapPost("/", Submit)
                 .WithSummary("THIS IS JUST A TEMPLATE ENDPOINT FOR DEMONSTRATION. DO NOT USE THIS IS PROD")
