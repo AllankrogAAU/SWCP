@@ -27,11 +27,12 @@ public static class LlmEndpoints
 
     private static async Task<Ok<JsonNode>> HandlePromptAsync(
         GeneralPromptRequest request,
-        LlmClient llmClient)
+        LlmClient llmClient,
+        IConfiguration configuration)
     {
         var payload = new
         {
-            model = "qwen2.5-coder-3b-instruct-awq",
+            model = GetModelName(configuration),
             messages = new object[]
             {
                 new
@@ -53,7 +54,8 @@ public static class LlmEndpoints
     private static async Task<Ok<JsonNode>> HandleCodeAnalysisAsync(
         [FromForm] CodeAnalysisRequest request,
         LlmClient llmClient,
-        PromptBuilder promptBuilder)
+        PromptBuilder promptBuilder,
+        IConfiguration configuration)
     {
         var language = string.IsNullOrWhiteSpace(request.Language)
             ? "c"
@@ -66,7 +68,7 @@ public static class LlmEndpoints
 
         var payload = new
         {
-            model = "qwen2.5-coder-3b-instruct-awq",
+            model = GetModelName(configuration),
             messages = new[]
             {
                 new
@@ -83,5 +85,14 @@ public static class LlmEndpoints
 
         return TypedResults.Ok(
             await llmClient.SendChatCompletionAsync(payload));
+    }
+
+    private static string GetModelName(IConfiguration configuration)
+    {
+        var modelName = configuration["LLM_MODEL_NAME"];
+        return string.IsNullOrWhiteSpace(modelName)
+            ? throw new InvalidOperationException(
+                "Required configuration 'LLM_MODEL_NAME' is missing or empty.")
+            : modelName;
     }
 }

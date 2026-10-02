@@ -19,8 +19,8 @@ services:
               count: all
               capabilities: [gpu]
     command:
-      - "/models/Qwen2.5-Coder-3B-Instruct-AWQ"
-      - "--served-model-name=qwen2.5-coder-3b-instruct-awq"
+      - "/models/Qwen2.5-Coder-1.5B-Instruct-AWQ" # path
+      - "--served-model-name=${LLM_MODEL_NAME:?Set LLM_MODEL_NAME in LLM/.env}"
       - "--quantization=awq_marlin"      # maybe not valid for older hardware
       - "--kv-cache-dtype=auto"          #fp8"
       - "--max-model-len=8192"           # to be tuned
@@ -40,6 +40,7 @@ services:
     environment:
       - ASPNETCORE_ENVIRONMENT=Development
       - LLMServerUrl=http://llm-server:8080
+      - LLM_MODEL_NAME=${LLM_MODEL_NAME:?Set LLM_MODEL_NAME in LLM/.env}
     depends_on:
       - llm-server
     restart: unless-stopped
