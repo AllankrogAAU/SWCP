@@ -1,0 +1,14 @@
+{
+    "Servers": {
+        "1": {
+            "Name": "SWCP local",
+            "Group": "Servers",
+            "Host": "db",
+            "Port": "5432",
+            "MaintenanceDB": "swcp",
+            "Username": "swcp",
+            "SSLMode": "prefer"
+        }
+
+    }
+}
