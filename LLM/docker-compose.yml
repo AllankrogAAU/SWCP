@@ -1,11 +1,16 @@
+name: llm
 services:
   llm-server:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
-    container_name: c_code_llm
+    image: vllm/vllm-openai:v0.30.0
+    container_name: llm_server
     ports:
       - "8080:8080"
     volumes:
       - ./models:/models
+    environment:
+      # Weights are already on disk, so never let vLLM/HF hub reach out to the network.
+      - HF_HUB_OFFLINE=1
+    shm_size: "2gb" # vLLM's worker processes use /dev/shm for IPC; the tiny default (64mb) causes crashes.
     deploy:
       resources:
         reservations:
@@ -13,16 +18,16 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: >
-      -m /models/qwen2.5-coder-7b-instruct-q4_k_m.gguf
-      --host 0.0.0.0
-      --port 8080
-      -c 32768
-      -ngl 99
-      --flash-attn on
-      -np 4
-      --cache-prompt
-      --metrics
+    command:
+      - "/models/Qwen2.5-Coder-1.5B-Instruct-AWQ" # path
+      - "--served-model-name=${LLM_MODEL_NAME:?Set LLM_MODEL_NAME in LLM/.env}"
+      - "--quantization=awq_marlin"      # maybe not valid for older hardware
+      - "--kv-cache-dtype=auto"          #fp8"
+      - "--max-model-len=8192"           # to be tuned
+      - "--gpu-memory-utilization=0.80"  # to be tuned
+      - "--max-num-seqs=4"               # to be tuned
+      - "--host=0.0.0.0"
+      - "--port=8080"
     restart: unless-stopped
 
   llm-api:
@@ -35,6 +40,7 @@ services:
     environment:
       - ASPNETCORE_ENVIRONMENT=Development
       - LLMServerUrl=http://llm-server:8080
+      - LLM_MODEL_NAME=${LLM_MODEL_NAME:?Set LLM_MODEL_NAME in LLM/.env}
     depends_on:
       - llm-server
     restart: unless-stopped
