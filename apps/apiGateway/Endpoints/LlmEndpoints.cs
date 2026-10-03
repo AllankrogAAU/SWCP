@@ -1,25 +1,24 @@
 using System.Text.Json.Nodes;
-using LLM.Contracts;
-using LLM.Services;
+using api.Models;
+using api.Services;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 
-namespace LLM.Endpoints;
+namespace api.Endpoints;
 
 public static class LlmEndpoints
 {
     public static WebApplication MapLlmEndpoints(this WebApplication app)
     {
-        var llmApi = app.MapGroup("/api/llm")
-            .WithTags("LLM");
+        var llmApi = app.MapGroup("/api/local-llm").WithTags("Local LLM");
 
         llmApi.MapPost("/prompt", HandlePromptAsync)
-            .WithName("GeneratePromptResponse")
+            .WithName("GenerateLocalLlmPromptResponse")
             .Accepts<GeneralPromptRequest>("application/json")
             .Produces<JsonNode>(StatusCodes.Status200OK);
 
         llmApi.MapPost("/code-analysis", HandleCodeAnalysisAsync)
-            .WithName("AnalyzeCode")
+            .WithName("AnalyzeCodeWithLocalLlm")
             .Produces<JsonNode>(StatusCodes.Status200OK);
 
         return app;
@@ -28,7 +27,8 @@ public static class LlmEndpoints
     private static async Task<Ok<JsonNode>> HandlePromptAsync(
         GeneralPromptRequest request,
         LlmClient llmClient,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        CancellationToken cancellationToken)
     {
         var payload = new
         {
@@ -38,8 +38,7 @@ public static class LlmEndpoints
                 new
                 {
                     role = "system",
-                    content = request.SystemPrompt
-                        ?? "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+                    content = request.SystemPrompt ?? "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
                 },
                 new { role = "user", content = request.Prompt }
             },
@@ -47,35 +46,27 @@ public static class LlmEndpoints
             max_tokens = request.MaxTokens ?? 4096
         };
 
-        return TypedResults.Ok(
-            await llmClient.SendChatCompletionAsync(payload));
+        return TypedResults.Ok(await llmClient.SendChatCompletionAsync(payload, cancellationToken));
     }
 
     private static async Task<Ok<JsonNode>> HandleCodeAnalysisAsync(
         [FromForm] CodeAnalysisRequest request,
         LlmClient llmClient,
         PromptBuilder promptBuilder,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        CancellationToken cancellationToken)
     {
-        var language = string.IsNullOrWhiteSpace(request.Language)
-            ? "c"
-            : request.Language.ToLowerInvariant();
-
-        var formattedPrompt = promptBuilder.BuildCodeAnalysisPrompt(
-            request.Code,
-            request.Instruction,
-            language);
-
+        var language = string.IsNullOrWhiteSpace(request.Language) ? "c" : request.Language.ToLowerInvariant();
+        var formattedPrompt = promptBuilder.BuildCodeAnalysisPrompt(request.Code, request.Instruction, language);
         var payload = new
         {
             model = GetModelName(configuration),
-            messages = new[]
+            messages = new object[]
             {
                 new
                 {
                     role = "system",
-                    content = request.SystemPrompt
-                        ?? "You are an expert software developer and technical reviewer."
+                    content = request.SystemPrompt ?? "You are an expert software developer and technical reviewer."
                 },
                 new { role = "user", content = formattedPrompt }
             },
@@ -83,16 +74,14 @@ public static class LlmEndpoints
             max_tokens = 4096
         };
 
-        return TypedResults.Ok(
-            await llmClient.SendChatCompletionAsync(payload));
+        return TypedResults.Ok(await llmClient.SendChatCompletionAsync(payload, cancellationToken));
     }
 
     private static string GetModelName(IConfiguration configuration)
     {
         var modelName = configuration["LLM_MODEL_NAME"];
         return string.IsNullOrWhiteSpace(modelName)
-            ? throw new InvalidOperationException(
-                "Required configuration 'LLM_MODEL_NAME' is missing or empty.")
+            ? throw new InvalidOperationException("Required configuration 'LLM_MODEL_NAME' is missing or empty.")
             : modelName;
     }
 }

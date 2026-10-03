@@ -1,6 +1,6 @@
 using System.Text.Json.Nodes;
 
-namespace LLM.Services;
+namespace api.Services;
 
 public sealed class LlmClient(HttpClient httpClient, ILogger<LlmClient> logger)
 {
@@ -16,19 +16,11 @@ public sealed class LlmClient(HttpClient httpClient, ILogger<LlmClient> logger)
         if (!response.IsSuccessStatusCode)
         {
             var details = await response.Content.ReadAsStringAsync(cancellationToken);
-            logger.LogError(
-                "LLM server error ({Status}): {Details}",
-                response.StatusCode,
-                details);
-
-            throw new HttpRequestException(
-                $"LLM server returned {(int)response.StatusCode}: {details}");
+            logger.LogError("LLM server error ({Status}): {Details}", response.StatusCode, details);
+            throw new HttpRequestException($"LLM server returned {(int)response.StatusCode}: {details}");
         }
 
-        var node = await response.Content.ReadFromJsonAsync<JsonNode>(
-            cancellationToken: cancellationToken);
-
-        return node ?? throw new InvalidOperationException(
-            "LLM server returned an empty response body.");
+        var node = await response.Content.ReadFromJsonAsync<JsonNode>(cancellationToken: cancellationToken);
+        return node ?? throw new InvalidOperationException("LLM server returned an empty response body.");
     }
 }

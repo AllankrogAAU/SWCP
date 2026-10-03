@@ -42,6 +42,13 @@ builder.Services.AddAuthorization(options =>
 });
 
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
+builder.Services.AddSingleton<PromptBuilder>();
+builder.Services.AddHttpClient<LlmClient>(client =>
+{
+    var llmUrl = builder.Configuration["LLM_SERVER_URL"] ?? "http://localhost:8080";
+    client.BaseAddress = new Uri(llmUrl);
+    client.Timeout = TimeSpan.FromMinutes(5);
+});
 builder.Services.AddSingleton(_ => new NatsConnection(new NatsOpts
 {
     Url = builder.Configuration["Nats:Url"] ?? "nats://localhost:4222",
@@ -77,6 +84,8 @@ app.UseAuthorization();
 
 app.MapAuthEndpoints();
 app.MapAnalysisEndpoints();
+app.MapAgentEndpoints();
 app.MapAssignmentEndpoints();
+app.MapLlmEndpoints();
 
 app.Run();

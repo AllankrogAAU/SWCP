@@ -7,7 +7,7 @@ namespace api.Endpoints
     {
         public static RouteGroupBuilder MapAnalysisEndpoints(this IEndpointRouteBuilder app)
         {
-            var group = app.MapGroup("api/analysis").WithTags("Analysis").RequireAuthorization();
+            var group = app.MapGroup("api/cloud-llm/analysis").WithTags("Cloud LLM Analysis").RequireAuthorization();
 
             group.MapPost("/", Submit)
                 .WithSummary("THIS IS JUST A TEMPLATE ENDPOINT FOR DEMONSTRATION. DO NOT USE THIS IS PROD")
@@ -15,7 +15,7 @@ namespace api.Endpoints
                 .Produces<AnalysisSubmitResponse>(StatusCodes.Status202Accepted);
 
             group.MapGet("/{jobId:guid}", GetStatus)
-                .WithName("GetAnalysisStatus")
+                .WithName("GetCloudLlmAnalysisStatus")
                 .WithSummary("THIS IS JUST A TEMPLATE ENDPOINT FOR DEMONSTRATION. DO NOT USE THIS IS PROD")
                 .WithDescription("Polls for the result of a previously submitted analysis job.")
                 .Produces<AnalysisStatusResponse>();
@@ -28,19 +28,34 @@ namespace api.Endpoints
             IAnalysisRequestPublisher publisher,
             CancellationToken cancellationToken)
         {
-            var jobId = Guid.NewGuid();
+            return await SubmitAnalysisAsync(
+                request.Category,
+                request.CCode,
+                request.Logs,
+                publisher,
+                cancellationToken);
+        }
 
-            var message = new AnalysisRequestMessage
+        internal static async Task<IResult> SubmitAnalysisAsync(
+            ErrorCategory category,
+            string cCode,
+            string logs,
+            IAnalysisRequestPublisher publisher,
+            CancellationToken cancellationToken)
+        {
+            var jobId = Guid.NewGuid();
+            await publisher.PublishAnalysisRequestAsync(new AnalysisRequestMessage
             {
                 JobId = jobId,
-                Category = request.Category.ToString(),
-                CCode = request.CCode,
-                Logs = request.Logs
-            };
+                Category = category.ToString(),
+                CCode = cCode,
+                Logs = logs
+            }, cancellationToken);
 
-            await publisher.PublishAnalysisRequestAsync(message, cancellationToken);
-
-            return Results.AcceptedAtRoute("GetAnalysisStatus", new { jobId }, new AnalysisSubmitResponse { JobId = jobId });
+            return Results.AcceptedAtRoute(
+                "GetCloudLlmAnalysisStatus",
+                new { jobId },
+                new AnalysisSubmitResponse { JobId = jobId });
         }
 
         private static IResult GetStatus(Guid jobId, AnalysisResultStore resultStore)

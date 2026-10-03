@@ -17,13 +17,15 @@ services:
 
   api:
     build:
-      context: ./apps/api
+      context: ./apps/apiGateway
       dockerfile: Dockerfile
     ports:
       - "${API_PORT:-5170}:8080"
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       Nats__Url: nats://nats:4222
+      LLM_SERVER_URL: http://local-llm-server:8080
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-}
       Jwt__Key: "${JWT_KEY:?Set JWT_KEY in the root .env}"
       ConnectionStrings__Default: "Host=db;Port=5432;Database=${POSTGRES_DB:?Set POSTGRES_DB in the root .env};Username=${POSTGRES_USER:?Set POSTGRES_USER in the root .env};Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env}"
     depends_on:
@@ -37,8 +39,6 @@ services:
     build:
       context: ./apps/cloudLLM
       dockerfile: Dockerfile
-    ports:
-      - "${CLOUD_LLM_PORT:-5180}:8080"
     environment:
       DOTNET_ENVIRONMENT: Development
       Nats__Url: nats://nats:4222
@@ -125,22 +125,6 @@ services:
       timeout: 5s
       retries: 60
       start_period: 5m
-    restart: unless-stopped
-
-  local-llm-api:
-    profiles: [local-llm]
-    build:
-      context: ./apps/localLLM
-      dockerfile: Dockerfile
-    ports:
-      - "${LOCAL_LLM_API_PORT:-5000}:8080"
-    environment:
-      ASPNETCORE_ENVIRONMENT: Development
-      LLM_SERVER_URL: http://local-llm-server:8080
-      LLM_MODEL_NAME: ${LLM_MODEL_NAME:?Set LLM_MODEL_NAME in the root .env}
-    depends_on:
-      local-llm-server:
-        condition: service_healthy
     restart: unless-stopped
 
 volumes:

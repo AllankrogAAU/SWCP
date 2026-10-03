@@ -1,15 +1,11 @@
 using cloudLLM;
 using cloudLLM.Agents;
-using cloudLLM.Endpoints;
 using cloudLLM.Interfaces;
 using cloudLLM.Services;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
-using Scalar.AspNetCore;
 
-var builder = WebApplication.CreateBuilder(args);
-
-builder.Services.AddOpenApi();
+var builder = Host.CreateApplicationBuilder(args);
 
 builder.Services.AddSingleton<IChatClientProvider, ChatClientProvider>();
 
@@ -27,23 +23,4 @@ builder.Services.AddSingleton<INatsJSContext>(services =>
 
 builder.Services.AddHostedService<Worker>();
 
-var app = builder.Build();
-
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-    app.MapScalarApiReference(options =>
-    {
-        options
-            .WithTitle("Cloud LLM Worker API")
-            .WithTheme(ScalarTheme.DeepSpace)
-            .WithDefaultHttpClient(ScalarTarget.CSharp, ScalarClient.HttpClient);
-    });
-    app.MapGet("/", () => Results.Redirect("/scalar/v1"));
-}
-
-app.UseHttpsRedirection();
-
-app.MapAgentEndpoints();
-
-app.Run();
+await builder.Build().RunAsync();
