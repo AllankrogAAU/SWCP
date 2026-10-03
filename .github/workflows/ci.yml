@@ -35,11 +35,11 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      api: ${{ steps.filter.outputs.api }}
+      api: ${{ steps.filter.outputs.apiGateway }}
       c-sandbox: ${{ steps.filter.outputs.c-sandbox }}
       cloudllm: ${{ steps.filter.outputs.cloudllm }}
       frontend: ${{ steps.filter.outputs.frontend }}
-      images: ${{ steps.filter.outputs.matrix }}
+      images: ${{ steps.images.outputs.matrix }}
       docker: ${{ steps.filter.outputs.docker }}
     steps:
       - uses: actions/checkout@v6
@@ -48,7 +48,7 @@ jobs:
         with:
           filters: |
             frontend: 'apps/frontend/**'  
-            api: 'apps/api/**'
+            api: 'apps/apiGateway/**'
             cloudLLM: 'apps/cloudLLM/**'
             c-sandbox: 'apps/c-sandbox/**'
             docker:
@@ -58,7 +58,7 @@ jobs:
       - name: Build image matrix from changed services
         id: images
         run: |
-         matrix=$(jq -c '[.[] | select(. == "api" or . == "cloudLLM" or . == "c-sandbox" or . == "frontend")]' <<< '${{ steps.filter.outputs.changes }}')
+         matrix=$(jq -c '[.[] | select(. == "apiGateway" or . == "cloudLLM" or . == "c-sandbox" or . == "frontend")]' <<< '${{ steps.filter.outputs.changes }}')
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   api:
@@ -68,7 +68,7 @@ jobs:
     uses: ./.github/workflows/_api.yml
 
   c-sandbox:
-    name: LLM service
+    name: Sandbox service
     needs: changes
     if: needs.changes.outputs.c-sandbox == 'true'
     uses: ./.github/workflows/_c-sandbox.yml
@@ -76,7 +76,7 @@ jobs:
       contents: read
 
   cloudllm:
-    name: Backend service
+    name: CloudLLM service
     needs: changes
     if: needs.changes.outputs.cloudllm == 'true'
     uses: ./.github/workflows/_cloudllm.yml
@@ -147,7 +147,7 @@ jobs:
   
   ci-gate:
     name: CI gate
-    needs: [secret-scan, changes, c-sandbox, cloudllm, frontend, images, deploy-config]
+    needs: [secret-scan, changes, c-sandbox, cloudllm, frontend, images, deploy-config, api]
     if: always()
     runs-on: ubuntu-latest
     steps:

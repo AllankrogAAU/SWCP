@@ -43,4 +43,3 @@ pip install pytest
 #This will catch all definitions with "test" in the start of the name
 pytest -v
 ```
-test
