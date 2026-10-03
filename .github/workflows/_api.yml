@@ -1,0 +1,24 @@
+name: API service
+
+on:
+    workflow_call:
+
+permissions:
+    contents: read
+
+jobs:
+    build-test:
+        name: API (format, build, test)
+        runs-on: ubuntu-latest
+        defaults:
+            run:
+                working-directory: apps/apiGateway
+        steps:
+            - uses: actions/checkout@v6
+            - uses: actions/setup-dotnet@v5
+            - name: Restore
+              run: dotnet restore
+            - name: Format check
+              run: dotnet format --verify-no-changes --no-restore
+            - name: Build (warnings as errors)
+              run: dotnet build --no-restore -c Release -warnaserror
