@@ -4,7 +4,7 @@
 
 - Docker Desktop with Linux containers and Docker Compose.
 - Node.js 24.12+ (or 22.18+) and npm to run the frontend directly.
-- A CUDA/NVIDIA-enabled Docker runtime and the local model files only when using
+- A CUDA/NVIDIA-enabled Docker runtime and the local model files when using
 	the `local-llm` profile.
 
 ## Environment
@@ -45,7 +45,8 @@ npm run dev
 ## Local LLM
 
 The `local-llm` profile uses the existing vLLM image and local model files; it
-does not download model weights.
+does not download model weights. The CI Trivy scan explicitly ignores the
+currently unfixed upstream vLLM CVEs listed in `.trivyignore-vllm`.
 Set `LLM_MODEL_PATH` and `LLM_MODEL_NAME` in the root `.env`. The model path names a directory under
 `apps/localLLM/models`, for example `Qwen2.5-Coder-1.5B-Instruct-AWQ`. That
 directory must contain the complete Hugging Face model repository required by

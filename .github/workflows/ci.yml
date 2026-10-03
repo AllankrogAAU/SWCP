@@ -124,6 +124,7 @@ jobs:
           image-ref: swcp/${{ steps.name.outputs.name }}:ci
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          trivyignores: ${{ matrix.service == 'local-llm' && '.trivyignore-vllm' || '' }}
           exit-code: '1'   
 
   deploy-config:

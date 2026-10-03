@@ -2,11 +2,11 @@ name: swcp
 
 services:
   nats:
-    image: nats:2.11-alpine
+    image: nats:2.12-alpine@sha256:b270f5e2428354c0335612694d7dd2fb588148e567a5757fdff325ef9c9332e6
     command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
     volumes:
       - nats-data:/data
     healthcheck:
@@ -52,13 +52,16 @@ services:
     restart: unless-stopped
 
   db:
-    image: postgres:18
+    build:
+      context: ./apps/postgres
+      dockerfile: Dockerfile
+    image: swcp/postgres:18-alpine
     environment:
       POSTGRES_DB: "${POSTGRES_DB:?Set POSTGRES_DB in the root .env}"
       POSTGRES_USER: "${POSTGRES_USER:?Set POSTGRES_USER in the root .env}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env}"
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - db-data:/var/lib/postgresql
     healthcheck:
@@ -70,7 +73,7 @@ services:
   pgadmin:
     image: dpage/pgadmin4:9
     ports:
-      - "${PGADMIN_PORT:-5050}:80"
+      - "127.0.0.1:${PGADMIN_PORT:-5050}:80"
     environment:
       PGADMIN_DEFAULT_EMAIL: "${PGADMIN_DEFAULT_EMAIL:?Set PGADMIN_DEFAULT_EMAIL in the root .env}"
       PGADMIN_DEFAULT_PASSWORD: "${PGADMIN_DEFAULT_PASSWORD:?Set PGADMIN_DEFAULT_PASSWORD in the root .env}"
