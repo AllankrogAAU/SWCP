@@ -1,4 +1,4 @@
-using Azure.AI.Inference;
+using OpenAI.Chat;
 using cloudLLM.Interfaces;
 using cloudLLM.Services;
 
@@ -15,20 +15,16 @@ namespace cloudLLM.Agents
 
         public async Task<string> AnalyzeAsync(string cCode, string logs, CancellationToken cancellationToken = default)
         {
-            var (client, deployment) = chatClientProvider.GetClient("Gpt4o");
+            var (client, _) = chatClientProvider.GetClient("Gpt4o");
 
-            var requestOptions = new ChatCompletionsOptions
+            var messages = new ChatMessage[]
             {
-                Model = deployment,
-                Messages =
-                {
-                    new ChatRequestSystemMessage(SystemPrompt),
-                    new ChatRequestUserMessage($"C Code:\n{cCode}\n\nCompiler Logs:\n{logs}")
-                }
+                new SystemChatMessage(SystemPrompt),
+                new UserChatMessage($"C Code:\n{cCode}\n\nCompiler Logs:\n{logs}")
             };
 
-            var response = await client.CompleteAsync(requestOptions, cancellationToken);
-            return response.Value.Content ?? string.Empty;
+            var response = await client.CompleteChatAsync(messages, cancellationToken: cancellationToken);
+            return response.Value.Content.Count > 0 ? response.Value.Content[0].Text : string.Empty;
         }
     }
 }

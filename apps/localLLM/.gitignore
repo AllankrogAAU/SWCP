@@ -1,0 +1,34 @@
+# .NET build output
+bin/
+obj/
+artifacts/
+
+# Visual Studio / VS Code
+.vs/
+.vscode/*
+!.vscode/settings.json
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Test output
+TestResults/
+
+# NuGet
+.nuget/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local LLM model files
+models/*
+!models/.gitkeep
+
+# OS files
+.DS_Store
+Thumbs.db

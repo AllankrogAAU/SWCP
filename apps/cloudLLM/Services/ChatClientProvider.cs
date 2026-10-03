@@ -1,20 +1,21 @@
 using System.Collections.Concurrent;
 using Azure;
-using Azure.AI.Inference;
+using Azure.AI.OpenAI;
+using OpenAI.Chat;
 using Microsoft.Extensions.Configuration;
 
 namespace cloudLLM.Services
 {
     public interface IChatClientProvider
     {
-        (ChatCompletionsClient Client, string Deployment) GetClient(string modelKey);
+        (ChatClient Client, string Deployment) GetClient(string modelKey);
     }
 
     public class ChatClientProvider(IConfiguration configuration) : IChatClientProvider
     {
-        private readonly ConcurrentDictionary<string, (ChatCompletionsClient Client, string Deployment)> _clients = new();
+        private readonly ConcurrentDictionary<string, (ChatClient Client, string Deployment)> _clients = new();
 
-        public (ChatCompletionsClient Client, string Deployment) GetClient(string modelKey)
+        public (ChatClient Client, string Deployment) GetClient(string modelKey)
         {
             return _clients.GetOrAdd(modelKey, key =>
             {
@@ -31,7 +32,8 @@ namespace cloudLLM.Services
                         $"Expected 'AzureAIFoundry:Models:{key}:Endpoint', ':ApiKey' and ':Deployment' to be set.");
                 }
 
-                var client = new ChatCompletionsClient(new Uri(endpoint), new AzureKeyCredential(apiKey));
+                var azureClient = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(apiKey));
+                var client = azureClient.GetChatClient(deployment);
                 return (client, deployment);
             });
         }

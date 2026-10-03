@@ -1,69 +1,64 @@
+name: swcp
+
 services:
-  kafka:
-    image: apache/kafka:3.8.0
-    container_name: swcp-kafka
+  nats:
+    image: nats:2.11-alpine
+    command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
     ports:
-      - "9092:9092"
-    environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:19092,CONTROLLER://0.0.0.0:19093,PLAINTEXT_HOST://0.0.0.0:9092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:19092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:19093
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
-      interval: 10s
-      timeout: 10s
-      retries: 5
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
   api:
     build:
-      context: .
-      dockerfile: apps/api/Dockerfile
-    container_name: swcp-api
+      context: ./apps/apiGateway
+      dockerfile: Dockerfile
     ports:
-      - "5170:8080"
+      - "${API_PORT:-5170}:8080"
     environment:
       ASPNETCORE_ENVIRONMENT: Development
-      Kafka__BootstrapServers: kafka:19092
-      ConnectionStrings__Default: Host=db;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}
+      Nats__Url: nats://nats:4222
+      LLM_SERVER_URL: http://local-llm-server:8080
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-}
+      Jwt__Key: "${JWT_KEY:?Set JWT_KEY in the root .env}"
+      ConnectionStrings__Default: "Host=db;Port=5432;Database=${POSTGRES_DB:?Set POSTGRES_DB in the root .env};Username=${POSTGRES_USER:?Set POSTGRES_USER in the root .env};Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env}"
     depends_on:
-      kafka:
+      nats:
         condition: service_healthy
       db:
         condition: service_healthy
+    restart: unless-stopped
 
   cloudllm:
     build:
-      context: .
-      dockerfile: apps/cloudLLM/Dockerfile
-    container_name: swcp-cloudllm
+      context: ./apps/cloudLLM
+      dockerfile: Dockerfile
     environment:
       DOTNET_ENVIRONMENT: Development
-      Kafka__BootstrapServers: kafka:19092
-      AzureAIFoundry__Models__Gpt4o__Endpoint: ${AzureAIFoundry__Models__Gpt4o__Endpoint}
-      AzureAIFoundry__Models__Gpt4o__ApiKey: ${AzureAIFoundry__Models__Gpt4o__ApiKey}
-      AzureAIFoundry__Models__Gpt6Sol__Endpoint: ${AzureAIFoundry__Models__Gpt6Sol__Endpoint}
-      AzureAIFoundry__Models__Gpt6Sol__ApiKey: ${AzureAIFoundry__Models__Gpt6Sol__ApiKey}
+      Nats__Url: nats://nats:4222
+      AzureAIFoundry__Models__Gpt4o__Endpoint: ${AzureAIFoundry__Models__Gpt4o__Endpoint:-}
+      AzureAIFoundry__Models__Gpt4o__ApiKey: ${AzureAIFoundry__Models__Gpt4o__ApiKey:-}
+      AzureAIFoundry__Models__Gpt6Sol__Endpoint: ${AzureAIFoundry__Models__Gpt6Sol__Endpoint:-}
+      AzureAIFoundry__Models__Gpt6Sol__ApiKey: ${AzureAIFoundry__Models__Gpt6Sol__ApiKey:-}
     depends_on:
-      kafka:
+      nats:
         condition: service_healthy
+    restart: unless-stopped
 
   db:
     image: postgres:18
-    container_name: swcp-db
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: "${POSTGRES_DB:?Set POSTGRES_DB in the root .env}"
+      POSTGRES_USER: "${POSTGRES_USER:?Set POSTGRES_USER in the root .env}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env}"
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - db-data:/var/lib/postgresql
     healthcheck:
@@ -74,12 +69,11 @@ services:
 
   pgadmin:
     image: dpage/pgadmin4:9
-    container_name: swcp-pgadmin
     ports:
-    - "5050:80"
+      - "${PGADMIN_PORT:-5050}:80"
     environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      PGADMIN_DEFAULT_EMAIL: "${PGADMIN_DEFAULT_EMAIL:?Set PGADMIN_DEFAULT_EMAIL in the root .env}"
+      PGADMIN_DEFAULT_PASSWORD: "${PGADMIN_DEFAULT_PASSWORD:?Set PGADMIN_DEFAULT_PASSWORD in the root .env}"
       PGADMIN_CONFIG_SERVER_MODE: "False"
       PGADMIN_CONFIG_GUNICORN_ACCESS_LOGFILE: "'/dev/null'"
     volumes:
@@ -89,6 +83,51 @@ services:
       db:
         condition: service_healthy
 
+  frontend:
+    profiles: [frontend]
+    build:
+      context: ./apps/frontend
+      dockerfile: Dockerfile
+    ports:
+      - "${FRONTEND_PORT:-5174}:80"
+    restart: unless-stopped
+
+  local-llm-server:
+    profiles: [local-llm]
+    image: vllm/vllm-openai:v0.30.0
+    ports:
+      - "${LOCAL_LLM_PORT:-8080}:8080"
+    volumes:
+      - ./apps/localLLM/models:/models:ro
+    environment:
+      HF_HUB_OFFLINE: "1"
+    shm_size: "2gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command:
+      - "/models/${LLM_MODEL_PATH:?Set LLM_MODEL_PATH in the root .env}"
+      - "--served-model-name=${LLM_MODEL_NAME:?Set LLM_MODEL_NAME in the root .env}"
+      - "--quantization=${VLLM_QUANTIZATION:-awq_marlin}"
+      - "--kv-cache-dtype=${VLLM_KV_CACHE_DTYPE:-auto}"
+      - "--max-model-len=${VLLM_MAX_MODEL_LEN:-8192}"
+      - "--gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.80}"
+      - "--max-num-seqs=${VLLM_MAX_NUM_SEQS:-4}"
+      - "--host=0.0.0.0"
+      - "--port=8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 60
+      start_period: 5m
+    restart: unless-stopped
+
 volumes:
   db-data:
+  nats-data:
   pgadmin-data:
