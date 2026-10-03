@@ -11,7 +11,7 @@ namespace api.Endpoints
 
             group.MapPost("/", Submit)
                 .WithSummary("THIS IS JUST A TEMPLATE ENDPOINT FOR DEMONSTRATION. DO NOT USE THIS IS PROD")
-                .WithDescription("Submits C code (and optional compiler/lint/runtime logs) for LLM-based analysis. The request is published to Kafka and processed asynchronously by the cloudLLM worker.")
+                .WithDescription("Submits C code (and optional compiler/lint/runtime logs) for LLM-based analysis. The request is published to NATS JetStream and processed asynchronously by the cloud LLM worker.")
                 .Produces<AnalysisSubmitResponse>(StatusCodes.Status202Accepted);
 
             group.MapGet("/{jobId:guid}", GetStatus)
@@ -25,7 +25,7 @@ namespace api.Endpoints
 
         private static async Task<IResult> Submit(
             AnalysisSubmitRequest request,
-            IKafkaProducerService producer,
+            IAnalysisRequestPublisher publisher,
             CancellationToken cancellationToken)
         {
             var jobId = Guid.NewGuid();
@@ -38,7 +38,7 @@ namespace api.Endpoints
                 Logs = request.Logs
             };
 
-            await producer.PublishAnalysisRequestAsync(message, cancellationToken);
+            await publisher.PublishAnalysisRequestAsync(message, cancellationToken);
 
             return Results.AcceptedAtRoute("GetAnalysisStatus", new { jobId }, new AnalysisSubmitResponse { JobId = jobId });
         }

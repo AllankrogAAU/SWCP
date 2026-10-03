@@ -3,7 +3,7 @@ import { ref, computed} from 'vue'
 import CodeEditorBox from './Components/CodeEditorBox.vue'
 import AiFeedbackpanel from './Components/AiFeedbackpanel.vue'
 import AssignmentList from './Components/AssignmentList.vue'
-import { assignments } from './data/assignments.ts'
+import { assignments } from './data/assignments.js'
 
 const selectedId = ref(assignments[0]?.id ?? 0)
 const selected = computed(() => assignments.find((a) => a.id == selectedId.value))

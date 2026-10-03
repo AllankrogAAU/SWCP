@@ -11,8 +11,8 @@ namespace cloudLLM.Endpoints
 
             group.MapPost("/{category}/analyze", Analyze)
                 .WithName("AnalyzeWithAgent")
-                .WithSummary("Directly invokes an LLM agent for synchronous testing, bypassing Kafka.")
-                .WithDescription("Intended for manual testing/debugging of agent prompts. The normal production flow goes through Kafka via the Worker.")
+                .WithSummary("Directly invokes an LLM agent for synchronous testing, bypassing JetStream.")
+                .WithDescription("Intended for manual testing/debugging of agent prompts. The normal analysis flow goes through JetStream via the worker.")
                 .Produces<AgentAnalyzeResponse>()
                 .Produces(StatusCodes.Status400BadRequest);
 

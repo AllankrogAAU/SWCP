@@ -2,6 +2,8 @@ using api.Endpoints;
 using api.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using NATS.Client.Core;
+using NATS.Client.JetStream;
 using Scalar.AspNetCore;
 using System.Text;
 using System.Text.Json.Serialization;
@@ -40,10 +42,17 @@ builder.Services.AddAuthorization(options =>
 });
 
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
-builder.Services.AddSingleton<IKafkaProducerService, KafkaProducerService>();
+builder.Services.AddSingleton(_ => new NatsConnection(new NatsOpts
+{
+    Url = builder.Configuration["Nats:Url"] ?? "nats://localhost:4222",
+    RetryOnInitialConnect = true
+}));
+builder.Services.AddSingleton<INatsJSContext>(services =>
+    new NatsJSContext(services.GetRequiredService<NatsConnection>()));
+builder.Services.AddSingleton<IAnalysisRequestPublisher, NatsAnalysisRequestPublisher>();
 builder.Services.AddSingleton<AnalysisResultStore>();
 builder.Services.AddSingleton<AssignmentStore>();
-builder.Services.AddHostedService<KafkaResultConsumerService>();
+builder.Services.AddHostedService<NatsResultConsumerService>();
 
 var app = builder.Build();
 

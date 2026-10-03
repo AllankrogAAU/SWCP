@@ -1,130 +1,123 @@
-using System.Text.Json;
 using cloudLLM.Agents;
 using cloudLLM.Interfaces;
 using cloudLLM.Models;
-using Confluent.Kafka;
+using NATS.Client.JetStream;
+using NATS.Client.JetStream.Models;
 
-namespace cloudLLM
+namespace cloudLLM;
+
+public sealed class Worker(
+    ILogger<Worker> logger,
+    AgentFactory agentFactory,
+    INatsJSContext jetStream) : BackgroundService
 {
-    public class Worker(ILogger<Worker> logger, AgentFactory agentFactory, IConfiguration configuration) : BackgroundService
+    private const string RequestStream = "ANALYSIS_REQUESTS";
+    private const string RequestSubject = "analysis.requests";
+    private const string ResultStream = "ANALYSIS_RESULTS";
+    private const string ResultSubject = "analysis.results";
+    private const string ConsumerName = "cloudllm-worker";
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-        {
-            var kafkaSection = configuration.GetSection("Kafka");
-            var bootstrapServers = kafkaSection["BootstrapServers"] ?? "localhost:9092";
-            var requestTopic = kafkaSection["RequestTopic"] ?? "code-analysis-requests";
-            var resultTopic = kafkaSection["ResultTopic"] ?? "code-analysis-results";
-            var groupId = kafkaSection["ConsumerGroupId"] ?? "cloudllm-worker";
-
-            var consumerConfig = new ConsumerConfig
+        await jetStream.CreateOrUpdateStreamAsync(
+            new StreamConfig(RequestStream, [RequestSubject])
             {
-                BootstrapServers = bootstrapServers,
-                GroupId = groupId,
-                AutoOffsetReset = AutoOffsetReset.Earliest
-            };
-
-            var producerConfig = new ProducerConfig
+                Retention = StreamConfigRetention.Workqueue
+            },
+            stoppingToken);
+        await jetStream.CreateOrUpdateStreamAsync(
+            new StreamConfig(ResultStream, [ResultSubject])
             {
-                BootstrapServers = bootstrapServers
-            };
+                Retention = StreamConfigRetention.Limits,
+                MaxAge = TimeSpan.FromDays(1)
+            },
+            stoppingToken);
 
-            using var consumer = new ConsumerBuilder<string, string>(consumerConfig).Build();
-            using var producer = new ProducerBuilder<string, string>(producerConfig).Build();
-
-            consumer.Subscribe(requestTopic);
-            logger.LogInformation("Subscribed to Kafka topic '{Topic}' as group '{GroupId}'", requestTopic, groupId);
-
-            try
+        var consumer = await jetStream.CreateOrUpdateConsumerAsync(
+            RequestStream,
+            new ConsumerConfig(ConsumerName)
             {
-                while (!stoppingToken.IsCancellationRequested)
-                {
-                    ConsumeResult<string, string>? consumeResult;
-                    try
-                    {
-                        consumeResult = consumer.Consume(stoppingToken);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
-                    catch (ConsumeException ex)
-                    {
-                        logger.LogError(ex, "Error consuming message from Kafka");
-                        continue;
-                    }
+                AckWait = TimeSpan.FromMinutes(10)
+            },
+            stoppingToken);
 
-                    if (consumeResult?.Message is null)
-                    {
-                        continue;
-                    }
+        logger.LogInformation("Consuming JetStream subject '{Subject}'", RequestSubject);
 
-                    await HandleRequestAsync(consumeResult.Message.Value, producer, resultTopic, stoppingToken);
-                }
-            }
-            finally
-            {
-                consumer.Close();
-            }
-        }
-
-        private async Task HandleRequestAsync(string rawMessage, IProducer<string, string> producer, string resultTopic, CancellationToken stoppingToken)
+        await foreach (var message in consumer.ConsumeAsync<AnalysisRequestMessage>(
+            cancellationToken: stoppingToken))
         {
             AnalysisRequestMessage? request;
             try
             {
-                request = JsonSerializer.Deserialize<AnalysisRequestMessage>(rawMessage);
+                message.EnsureSuccess();
+                request = message.Data;
             }
-            catch (JsonException ex)
+            catch (Exception exception)
             {
-                logger.LogError(ex, "Failed to deserialize analysis request message: {Raw}", rawMessage);
-                return;
+                logger.LogError(exception, "Could not deserialize an analysis request; acknowledging the invalid message");
+                await message.AckAsync(cancellationToken: stoppingToken);
+                continue;
             }
 
             if (request is null)
             {
-                logger.LogWarning("Received empty analysis request message");
-                return;
+                await message.AckAsync(cancellationToken: stoppingToken);
+                continue;
             }
 
-            logger.LogInformation("Processing job {JobId} for category {Category}", request.JobId, request.Category);
-
-            AnalysisResultMessage result;
+            var result = await AnalyzeAsync(request, stoppingToken);
             try
             {
-                if (!Enum.TryParse<ErrorCategory>(request.Category, ignoreCase: true, out var category))
-                {
-                    throw new InvalidOperationException($"Unknown error category '{request.Category}'.");
-                }
-
-                ILlmAgent agent = agentFactory.GetAgent(category);
-                var response = await agent.AnalyzeAsync(request.CCode, request.Logs, stoppingToken);
-
-                result = new AnalysisResultMessage
-                {
-                    JobId = request.JobId,
-                    Success = true,
-                    Response = response
-                };
+                await jetStream.PublishAsync(ResultSubject, result, cancellationToken: stoppingToken);
+                await message.AckAsync(cancellationToken: stoppingToken);
+                logger.LogInformation("Published result for job {JobId}", request.JobId);
             }
-            catch (Exception ex)
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
-                logger.LogError(ex, "Failed to analyze job {JobId}", request.JobId);
-                result = new AnalysisResultMessage
-                {
-                    JobId = request.JobId,
-                    Success = false,
-                    Error = ex.Message
-                };
+                break;
+            }
+            catch (Exception exception)
+            {
+                logger.LogError(exception, "Could not publish the result for job {JobId}; requesting redelivery", request.JobId);
+                await message.NakAsync(cancellationToken: stoppingToken);
+            }
+        }
+    }
+
+    private async Task<AnalysisResultMessage> AnalyzeAsync(
+        AnalysisRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        logger.LogInformation("Processing job {JobId} for category {Category}", request.JobId, request.Category);
+        try
+        {
+            if (!Enum.TryParse<ErrorCategory>(request.Category, ignoreCase: true, out var category))
+            {
+                throw new InvalidOperationException($"Unknown error category '{request.Category}'.");
             }
 
-            var payload = JsonSerializer.Serialize(result);
-            await producer.ProduceAsync(resultTopic, new Message<string, string>
+            ILlmAgent agent = agentFactory.GetAgent(category);
+            var response = await agent.AnalyzeAsync(request.CCode, request.Logs, cancellationToken);
+            return new AnalysisResultMessage
             {
-                Key = request.JobId.ToString(),
-                Value = payload
-            }, stoppingToken);
-
-            logger.LogInformation("Published result for job {JobId} to '{Topic}'", request.JobId, resultTopic);
+                JobId = request.JobId,
+                Success = true,
+                Response = response
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "Failed to analyze job {JobId}", request.JobId);
+            return new AnalysisResultMessage
+            {
+                JobId = request.JobId,
+                Success = false,
+                Error = exception.Message
+            };
         }
     }
 }
