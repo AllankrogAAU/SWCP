@@ -7,7 +7,7 @@ namespace api.Endpoints
     {
         public static RouteGroupBuilder MapAnalysisEndpoints(this IEndpointRouteBuilder app)
         {
-            var group = app.MapGroup("api/cloud-llm/analysis").WithTags("Cloud LLM Analysis").RequireAuthorization();
+            var group = app.MapGroup("api/cloud-llm/analysis").WithTags("Cloud LLM Analysis");
 
             group.MapPost("/", Submit)
                 .WithSummary("THIS IS JUST A TEMPLATE ENDPOINT FOR DEMONSTRATION. DO NOT USE THIS IS PROD")

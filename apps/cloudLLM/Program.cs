@@ -3,6 +3,7 @@ using cloudLLM.Agents;
 using cloudLLM.Interfaces;
 using cloudLLM.Services;
 using NATS.Client.Core;
+using NATS.Client.Serializers.Json;
 using NATS.Client.JetStream;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -16,7 +17,8 @@ builder.Services.AddSingleton<AgentFactory>();
 builder.Services.AddSingleton(_ => new NatsConnection(new NatsOpts
 {
     Url = builder.Configuration["Nats:Url"] ?? "nats://localhost:4222",
-    RetryOnInitialConnect = true
+    RetryOnInitialConnect = true,
+    SerializerRegistry = NatsJsonSerializerRegistry.Default
 }));
 builder.Services.AddSingleton<INatsJSContext>(services =>
     new NatsJSContext(services.GetRequiredService<NatsConnection>()));
