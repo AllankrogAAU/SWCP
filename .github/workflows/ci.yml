@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   secret-scan:
@@ -39,6 +40,7 @@ jobs:
       c-sandbox: ${{ steps.filter.outputs.c-sandbox }}
       cloudllm: ${{ steps.filter.outputs.cloudllm }}
       frontend: ${{ steps.filter.outputs.frontend }}
+      postgres: ${{ steps.filter.outputs.postgres }}
       images: ${{ steps.images.outputs.matrix }}
       docker: ${{ steps.filter.outputs.docker }}
     steps:
@@ -51,10 +53,12 @@ jobs:
             api: 'apps/apiGateway/**'
             cloudllm: 'apps/cloudLLM/**'
             c-sandbox: 'apps/c-sandbox/**'
+            postgres: 'apps/postgres/**'
             docker:
               - '**/Dockerfile'
               - '**/.dockerignore'
               - 'docker-compose.yml'
+              - 'docker-compose.staging.yml'
       - name: Build image matrix from changed services
         id: images
         env:
@@ -62,17 +66,20 @@ jobs:
           CLOUDLLM_CHANGED: ${{ steps.filter.outputs.cloudllm }}
           C_SANDBOX_CHANGED: ${{ steps.filter.outputs.c-sandbox }}
           FRONTEND_CHANGED: ${{ steps.filter.outputs.frontend }}
+          POSTGRES_CHANGED: ${{ steps.filter.outputs.postgres }}
         run: |
           matrix=$(jq -cn \
             --arg api "$API_CHANGED" \
             --arg cloudllm "$CLOUDLLM_CHANGED" \
             --arg c_sandbox "$C_SANDBOX_CHANGED" \
             --arg frontend "$FRONTEND_CHANGED" \
+            --arg postgres "$POSTGRES_CHANGED" \
             '[
               {name: "apiGateway", changed: $api},
               {name: "cloudLLM", changed: $cloudllm},
               {name: "c-sandbox", changed: $c_sandbox},
-              {name: "frontend", changed: $frontend}
+              {name: "frontend", changed: $frontend},
+              {name: "postgres", changed: $postgres}
             ] | map(select(.changed == "true") | .name)')
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
@@ -106,41 +113,21 @@ jobs:
     permissions:
       contents: read
 
-  images: 
+  images:
     needs: changes
     if: needs.changes.outputs.images != '[]'
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix: 
         service: ${{ fromJSON(needs.changes.outputs.images) }}
-    steps:
-      - uses: actions/checkout@v5
-    
-      - name: Lowercase image name
-        id: name
-        run: echo "name=$(echo '${{ matrix.service }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-buildx-action@v3
-      
-      - name: Build image (no push)
-        uses: docker/build-push-action@v6
-        with: 
-          context: apps/${{ matrix.service }}
-          push: false
-          load: true
-          tags: swcp/${{ steps.name.outputs.name }}:ci
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
-
-      - name: Scan image for CVEs
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: swcp/${{ steps.name.outputs.name }}:ci
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          trivyignores: ${{ matrix.service == 'local-llm' && '.trivyignore-vllm' || '' }}
-          exit-code: '1'   
+    uses: ./.github/workflows/_image.yml
+    with:
+      service: ${{ matrix.service }}
+      image_tag: ci
+      push: false
+    permissions:
+      contents: read
+      packages: read
 
   deploy-config:
     needs: changes
@@ -180,3 +167,14 @@ jobs:
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
       - run: echo "All required jobs passed or were skipped."
+
+  delivery:
+    name: Continuous delivery
+    needs: ci-gate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/cd.yml
+    with:
+      sha: ${{ github.sha }}
+    permissions:
+      contents: read
+      packages: write
