@@ -19,6 +19,6 @@ jobs:
             - name: Restore
               run: dotnet restore
             - name: Format check
-              run: dotnet format --verify-no-changes --no-restore
+              run: dotnet format api.csproj --verify-no-changes --no-restore
             - name: Build (warnings as errors)
               run: dotnet build --no-restore -c Release -warnaserror
