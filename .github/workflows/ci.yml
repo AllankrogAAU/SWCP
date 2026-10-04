@@ -170,7 +170,7 @@ jobs:
   delivery:
     name: Continuous delivery
     needs: ci-gate
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push'
     uses: ./.github/workflows/cd.yml
     with:
       sha: ${{ github.sha }}
