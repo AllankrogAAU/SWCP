@@ -39,6 +39,9 @@ jobs:
     name: Deploy and verify staging
     needs: publish
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     environment:
       name: staging
     outputs:
