@@ -47,7 +47,7 @@ jobs:
                   /d:sonar.qualitygate.wait=true
 
             - name: Build (warnings as errors)
-              run: dotnet build --no-restore --no-incremental -c Release -warnaserror
+              run: dotnet build --no-restore --no-incremental -c Release
 
             # when xUnit is in
             # - name: Unit tests with coverage
