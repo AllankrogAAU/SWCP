@@ -39,12 +39,13 @@ jobs:
                   SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
               run: >
                   "$RUNNER_TEMP/sonar/dotnet-sonarscanner" begin
-                  /k:"AllankrogAAU_SWCP_cloudllm"
-                  /o:"magnuselholm"
+                  /k:"AllankrogAAU_SWCP_apigateway"
+                  /o:"allankrogaau"
                   /d:sonar.token="$SONAR_TOKEN"
                   /d:sonar.host.url="https://sonarcloud.io"
                   /d:sonar.cs.opencover.reportsPaths="**/coverage.opencover.xml"
                   /d:sonar.qualitygate.wait=true
+                  /d:sonar.projectBaseDir="${{ github.workspace }}/apps/apiGateway"
 
             - name: Build (warnings as errors)
               run: dotnet build --no-restore --no-incremental -c Release
