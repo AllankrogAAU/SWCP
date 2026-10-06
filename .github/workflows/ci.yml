@@ -86,12 +86,14 @@ jobs:
   api:
     name: API gateway
     needs: changes
+    secrets: inherit
     if: needs.changes.outputs.api == 'true'
     uses: ./.github/workflows/_api.yml
 
   c-sandbox:
     name: Sandbox service
     needs: changes
+    secrets: inherit
     if: needs.changes.outputs.c-sandbox == 'true'
     uses: ./.github/workflows/_c-sandbox.yml
     permissions:
@@ -100,6 +102,7 @@ jobs:
   cloudllm:
     name: CloudLLM service
     needs: changes
+    secrets: inherit
     if: needs.changes.outputs.cloudllm == 'true'
     uses: ./.github/workflows/_cloudllm.yml
     permissions:
