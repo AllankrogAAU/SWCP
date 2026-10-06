@@ -208,7 +208,8 @@ jobs:
   delivery:
     name: Continuous delivery
     needs: ci-gate
-    if: ${{ always() && needs.ci-gate.result == 'success' && github.event_name == 'push' }}
+    if: >-
+      ${{ always() && needs.ci-gate.result == 'success' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     uses: ./.github/workflows/cd.yml
     with:
       sha: ${{ github.sha }}

@@ -68,4 +68,21 @@ CI validates the Compose service graph and runs a deterministic smoke test for
 the API and frontend. The optional local LLM profile is not required for CI;
 it needs a locally available model and a CUDA-capable runtime.
 
+## Delivery validation
+
+The delivery workflow is called after the `ci-gate` job
+passes on pushes to `main` or after a manual workflow dispatch. It:
+
+1. Builds immutable images tagged with the commit SHA and publishes them to
+   GHCR.
+2. Starts an  Compose staging environment using those exact images.
+3. Runs API/frontend smoke tests, Playwright, and a ZAP baseline scan.
+4. Uploads the Playwright and ZAP reports.
+5. Adds `staging-verified-<sha>` tags to the images only after all staging
+   verification succeeds.
+
+This is delivery to an ephemeral staging environment, not deployment to a
+persistent production host. The production target remains intentionally
+provider-neutral for this project.
+
 test addition
