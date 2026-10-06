@@ -2,6 +2,9 @@ name: Frontend service
 
 on:
     workflow_call:
+      secrets:
+        SONAR_TOKEN:
+          required: true
 
 permissions:
     contents: read
@@ -33,3 +36,8 @@ jobs:
               run: npm run build-only
             - name: Unit tests
               run: npm run test:unit -- --run --coverage
+            - uses: SonarSource/sonarqube-scan-action@v5
+              env: 
+                SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+              with:
+                projectBaseDir: apps/frontend

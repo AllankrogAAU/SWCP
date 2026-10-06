@@ -107,6 +107,7 @@ jobs:
   frontend:
     name: Frontend service
     needs: changes
+    secrets: inherit
     if: needs.changes.outputs.frontend == 'true'
     uses: ./.github/workflows/_frontend.yml
     permissions:
