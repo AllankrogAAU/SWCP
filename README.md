@@ -32,6 +32,16 @@ docker compose --profile frontend --profile local-llm up -d --build
 `docker compose down` preserves database and JetStream data volumes. Avoid
 `docker compose down -v` unless you intend to delete that data.
 
+The sandbox runtime is available as an opt-in service for Compose validation:
+
+```powershell
+docker compose --profile sandbox up -d --build
+```
+
+It stays out of the default stack because it is a runtime image for
+pre-compiled binaries rather than a long-running application service. The
+runner applies the isolation settings required for executing submissions.
+
 ## Frontend Development
 
 For Vite hot reload, run the frontend outside Docker:
@@ -54,6 +64,8 @@ vLLM. Adjust the `VLLM_*` settings in `.env` for your GPU and workload.
 
 ## Test And Validate Containers
 
-TBD
+CI validates the Compose service graph and runs a deterministic smoke test for
+the API and frontend. The optional local LLM profile is not required for CI;
+it needs a locally available model and a CUDA-capable runtime.
 
 test addition

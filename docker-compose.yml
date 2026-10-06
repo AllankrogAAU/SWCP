@@ -95,6 +95,22 @@ services:
       - "${FRONTEND_PORT:-5174}:80"
     restart: unless-stopped
 
+  c-sandbox:
+    profiles: [sandbox]
+    build:
+      context: ./apps/c-sandbox
+      dockerfile: Dockerfile
+    image: swcp/c-sandbox:latest
+    entrypoint: ["/bin/sleep"]
+    command: ["infinity"]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,size=8m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
   local-llm-server:
     profiles: [local-llm]
     image: vllm/vllm-openai:v0.30.0

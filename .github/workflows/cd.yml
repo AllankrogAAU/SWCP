@@ -81,10 +81,10 @@ jobs:
           EOF
 
       - name: Validate staging Compose
-        run: docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile frontend config --quiet
+        run: docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile frontend --profile sandbox config --quiet
 
       - name: Start staging
-        run: docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile frontend up -d --wait
+        run: docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile frontend --profile sandbox up -d --wait
 
       - name: Set staging URL
         id: staging-url
@@ -129,7 +129,7 @@ jobs:
 
       - name: Stop staging
         if: always()
-        run: docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile frontend down -v
+        run: docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile frontend --profile sandbox down -v
 
   mark-staging-verified:
     name: Mark SHA staging-verified

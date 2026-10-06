@@ -23,7 +23,11 @@ jobs:
               with:
                   python-version: '3.12'
             - name: Install test dependencies
-              run: python -m pip install --upgrade pip pytest pytest-cov
+              run: python -m pip install --upgrade pip pytest pytest-cov ruff==0.13.0 mypy==1.18.2
+            - name: Ruff check
+              run: ruff check .
+            - name: Mypy check
+              run: mypy runner.py tests
             - name: Build sandbox runtime image
               run: docker build -t c-sandbox-runtime:latest .
             - name: Build test fixture

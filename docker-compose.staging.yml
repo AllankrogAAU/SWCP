@@ -14,3 +14,7 @@ services:
   frontend:
     build: null
     image: ghcr.io/${GHCR_OWNER}/swcp-frontend:${IMAGE_TAG}
+
+  c-sandbox:
+    build: null
+    image: ghcr.io/${GHCR_OWNER}/swcp-c-sandbox:${IMAGE_TAG}

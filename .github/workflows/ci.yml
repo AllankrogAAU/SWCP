@@ -59,6 +59,7 @@ jobs:
               - '**/.dockerignore'
               - 'docker-compose.yml'
               - 'docker-compose.staging.yml'
+              - '.github/workflows/ci.yml'
       - name: Build image matrix from changed services
         id: images
         env:
@@ -160,10 +161,42 @@ jobs:
         severity: CRITICAL
         exit-code: '1'
 
-  
+  integration:
+    name: Compose integration smoke test
+    needs: changes
+    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.api == 'true' || needs.changes.outputs.cloudllm == 'true' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.c-sandbox == 'true' || needs.changes.outputs.postgres == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Write CI environment
+        run: |
+          cat > .env <<'EOF'
+          POSTGRES_DB=ci
+          POSTGRES_USER=ci
+          POSTGRES_PASSWORD=ci-password
+          JWT_KEY=ci-only-jwt-key-with-at-least-32-characters
+          PGADMIN_DEFAULT_EMAIL=ci@example.com
+          PGADMIN_DEFAULT_PASSWORD=ci-password
+          LLM_MODEL_PATH=ci-model
+          LLM_MODEL_NAME=ci-model
+          EOF
+      - name: Start deterministic Compose stack
+        run: docker compose --profile frontend --profile sandbox up --build -d --wait
+      - name: Check API and frontend
+        run: |
+          curl --fail --retry 12 --retry-delay 5 http://127.0.0.1:5170/health
+          curl --fail --retry 12 --retry-delay 5 http://127.0.0.1:5174/
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Stop Compose stack
+        if: always()
+        run: docker compose --profile frontend --profile sandbox down -v
+
+
   ci-gate:
     name: CI gate
-    needs: [secret-scan, changes, c-sandbox, cloudllm, frontend, images, deploy-config, api]
+    needs: [secret-scan, changes, c-sandbox, cloudllm, frontend, images, deploy-config, integration, api]
     if: always()
     runs-on: ubuntu-latest
     steps:
