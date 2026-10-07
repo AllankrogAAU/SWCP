@@ -1,0 +1,31 @@
+DebugBench: Evaluating Debugging Capability of Large Language Models
+
+https://arxiv.org/abs/2401.04621
+
+CodeEduBench: A Multidimensional Benchmark for Evaluating AI-Driven Code Generation Models in C Programming Education
+
+https://dl.acm.org/doi/10.1145/3744367.3744402#sec-4
+
+CodeEduBench: A Multidimensional Benchmark for Evaluating AI-Driven Code Generation Models in C Programming Education
+
+https://arxiv.org/html/2503.01245v1#abstract1
+
+
+Fixing Large Language Models’ Specification
+Misunderstanding for Better Code Generation
+
+https://arxiv.org/pdf/2309.16120
+
+Evaluating Language Models for Generating and Judging Programming Feedback
+
+https://arxiv.org/pdf/2407.04873
+
+Evaluating the Application of Large Language Models to Generate Feedback in Programming Education
+
+https://arxiv.org/pdf/2403.09744
+
+
+SWE-BENCH: CAN LANGUAGE MODELS RESOLVE
+REAL-WORLD GITHUB ISSUES?
+
+https://www.swebench.com/original.html
