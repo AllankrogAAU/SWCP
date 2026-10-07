@@ -1,0 +1,9 @@
+{
+  "id": "linked_list_001",
+  "title": "Linked List Insert at Head",
+  "difficulty": "medium",
+  "category": "data_structures",
+  "language": "c",
+  "description": "Implement a function that inserts a new node at the beginning of a singly linked list and returns the new head of the list.",
+  "function_signature": "struct Node* insert_at_head(struct Node* head, int value)"
+}

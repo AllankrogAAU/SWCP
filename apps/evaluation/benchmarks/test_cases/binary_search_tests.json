@@ -1,0 +1,64 @@
+{
+  "task_id": "binary_search_001",
+  "tests": [
+    {
+      "name": "Find middle element",
+      "input": {
+        "array": [1, 2, 3, 4, 5],
+        "target": 3
+      },
+      "expected": 2
+    },
+    {
+      "name": "Find first element",
+      "input": {
+        "array": [1, 2, 3, 4, 5],
+        "target": 1
+      },
+      "expected": 0
+    },
+    {
+      "name": "Find last element",
+      "input": {
+        "array": [1, 2, 3, 4, 5],
+        "target": 5
+      },
+      "expected": 4
+    },
+    {
+      "name": "Target does not exist",
+      "input": {
+        "array": [1, 2, 3, 4, 5],
+        "target": 8
+      },
+      "expected": -1
+    }
+  ],
+  
+  "edge_cases": [
+    {
+      "name": "Empty array",
+      "input": {
+        "array": [],
+        "target": 1
+      },
+      "expected": -1
+    },
+    {
+      "name": "Single element found",
+      "input": {
+        "array": [5],
+        "target": 5
+      },
+      "expected": 0
+    },
+    {
+      "name": "Single element not found",
+      "input": {
+        "array": [5],
+        "target": 1
+      },
+      "expected": -1
+    }
+  ] 
+}

@@ -1,0 +1,14 @@
+You are an expert C programmer.
+
+Task:
+{{description}}
+
+Required function signature:
+{{function_signature}}
+
+Requirements:
+- Implement exactly the function above.
+- Use standard C99.
+- Return only valid C code.
+- Do not include explanations.
+- The code must compile with gcc.

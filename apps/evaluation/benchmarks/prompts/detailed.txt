@@ -1,0 +1,16 @@
+You are an experienced software engineer writing production-quality C code.
+
+Task:
+{{description}}
+
+Required function signature:
+{{function_signature}}
+
+Requirements:
+- Implement exactly the specified function.
+- Use standard C99.
+- Handle edge cases.
+- Avoid undefined behavior.
+- Avoid memory leaks.
+- Include necessary headers.
+- Return only compilable C code.

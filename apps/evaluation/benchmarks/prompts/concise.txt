@@ -1,0 +1,5 @@
+Write a C implementation.
+
+{{description}}
+
+Return code only.

@@ -1,0 +1,83 @@
+Recommended Evaluation Matrix
+Category ------	Metric
+-----------------------------
+(primary)
+Correctness ------	Test Pass Rate/ Evaluation Accuracy
+Falste positive rate
+
+Bug Analysis ------	Detection Rate
+Compilation Errors, Runtime errors, Logical Errors. 
+
+
+
+Reliability ------	Consistency Score
+
+
+Robustness ----- Hallucination Rate
+Performance ------	Latency
+Economics ------ Cost per Evaluation
+Security -----	Prompt Injection Resistance
+
+
+A strong evaluation framework could be:
+
+1. Functional Accuracy (Weight: High)
+
+Can the model correctly analyze student C code?
+
+Metrics:
+
+Test Case Pass Rate (%)
+Correct Bug Identification Rate (%)
+Correct Feedback Rate (%)
+
+
+2. Explanation Quality
+
+
+Rubric (1-5)
+Score	Description1	Incorrect explanation
+2	Mostly incorrect
+3	Correct but unclear
+4	Correct and understandable
+5	Correct, clear, educational
+
+3. Bug Detection Capability
+
+If students submit faulty code:
+
+Plain Text
+Detected Bugs / Total Bugs
+
+
+
+Primary Metrics
+-------------------
+
+a. Correctness
+Can the LLM correctly determine whether the submitted solution satisfies the assignment requirements and passes the test cases?
+
+ - Evaluation Accuracy
+
+b.  Bug Analysis
+Can the LLM identify and classify compilation, runtime, and logical errors?
+
+ - Compilation Error Detection Rate
+ - Runtime Error Detection Rate
+ - Logical Error Detection Rate
+
+c. Robustness
+Does the LLM avoid reporting non-existent issues (false positives/hallucinations)?
+ - False Positive Rate
+
+ Metric                         
+ ------------------------------ 
+ Root Cause Identification Rate 
+ Logical Error Detection Rate   
+ Error Explanation Accuracy     
+ Fix Suggestion Accurac
+ False Positive Rate            
+ Cost                           
+ Consistency                    
+ Latency                        
+ Security                       

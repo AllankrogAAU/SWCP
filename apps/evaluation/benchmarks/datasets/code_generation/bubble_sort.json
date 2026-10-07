@@ -1,0 +1,9 @@
+{
+  "id": "bubble_sort_001",
+  "title": "Bubble Sort",
+  "difficulty": "easy",
+  "category": "sorting",
+  "language": "c",
+  "description": "Implement bubble sort for an integer array.",
+  "function_signature": "void bubble_sort(int arr[], int size)"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "binary_search_001",
+  "title": "Binary Search",
+  "difficulty": "easy",
+  "category": "searching",
+  "language": "c",
+  "description": "Implement a binary search function that returns the index of the target value in a sorted integer array. Return -1 if not found.",
+  "function_signature": "int binary_search(int arr[], int size, int target)"
+}

@@ -1,0 +1,63 @@
+{
+  "task_id": "linked_list_001",
+  "tests": [
+    {
+      "name": "Insert into empty list",
+      "input": {
+        "initial_list": [],
+        "value": 10
+      },
+      "expected": [10]
+    },
+    {
+      "name": "Insert at head of single-node list",
+      "input": {
+        "initial_list": [5],
+        "value": 10
+      },
+      "expected": [10, 5]
+    },
+    {
+      "name": "Insert at head of multi-node list",
+      "input": {
+        "initial_list": [1, 2, 3],
+        "value": 0
+      },
+      "expected": [0, 1, 2, 3]
+    },
+    {
+      "name": "Insert duplicate value",
+      "input": {
+        "initial_list": [1, 2, 3],
+        "value": 2
+      },
+      "expected": [2, 1, 2, 3]
+    }
+  ],
+  "edge_cases": [
+    {
+      "name": "Insert zero",
+      "input": {
+        "initial_list": [1, 2, 3],
+        "value": 0
+      },
+      "expected": [0, 1, 2, 3]
+    },
+    {
+      "name": "Insert negative number",
+      "input": {
+        "initial_list": [1, 2, 3],
+        "value": -5
+      },
+      "expected": [-5, 1, 2, 3]
+    },
+    {
+      "name": "Insert into long list",
+      "input": {
+        "initial_list": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "value": 99
+      },
+      "expected": [99, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    }
+  ]
+}
