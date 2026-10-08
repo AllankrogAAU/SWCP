@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://swcp.local/contracts/llm-task.schema.json",
+  "title": "LlmTask",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["submissionId", "backend", "systemPrompt", "userPrompt", "parameters", "traceParent"],
+  "properties": {
+    "submissionId": { "type": "string", "format": "uuid" },
+    "backend": { "enum": ["azure", "local"] },
+    "systemPrompt": { "type": "string" },
+    "userPrompt": { "type": "string" },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["temperature", "maxTokens", "topP"],
+      "properties": {
+        "temperature": { "type": "number", "minimum": 0 },
+        "maxTokens": { "type": "integer", "minimum": 1 },
+        "topP": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
+      }
+    },
+    "traceParent": { "type": ["string", "null"] }
+  }
+}

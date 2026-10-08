@@ -3,58 +3,71 @@ import { CodeEditor } from 'monaco-editor-vue3'
 
 const code = defineModel<string>({ required: true })
 
-defineProps<{ loading: boolean }>()
-defineEmits<{ submit: [] }>()
-
-function exportCode() {
-  // Put the code from the editor into a JSON object
-  const data = {
-    code: code.value,
-  }
-
-  // Convert the object to JSON
-  const json = JSON.stringify(data, null, 2)
-
-  // Create a JSON file
-  const blob = new Blob([json], {
-    type: 'application/json',
-  })
-
-  // Create a temporary URL for the file
-  const url = URL.createObjectURL(blob)
-
-  // Create a download link
-  const link = document.createElement('a')
-  link.href = url
-  link.download = 'code.json'
-
-  // Download the file
-  link.click()
-
-  // Clean up
-  URL.revokeObjectURL(url)
-}
+defineProps<{
+  busyAction: 'hint' | 'run' | 'submit' | null
+  terminalOutput: string
+}>()
+defineEmits<{ submit: []; hint: []; run: [] }>()
 </script>
 
 <template>
-  <v-card class="code-editor-card" elevation="4"
-    >¨
-    <v-card-title> Code box </v-card-title>
+  <div class="editor-stack">
+    <v-card class="code-editor-card" elevation="4">
+      <v-card-title>Code box</v-card-title>
 
-    <v-card-text>
-      <CodeEditor v-model:value="code" language="C" theme="vs-dark" height="400px" />
-    </v-card-text>
+      <v-card-text>
+        <CodeEditor v-model:value="code" language="C" theme="vs-dark" height="400px" />
+      </v-card-text>
 
-    <v-card-actions>
-      <v-btn color="primary" @click="exportCode"> Show payload </v-btn>
-    </v-card-actions>
-  </v-card>
+      <v-card-actions class="action-row">
+        <v-btn variant="outlined" :loading="busyAction === 'hint'" :disabled="busyAction !== null" @click="$emit('hint')">
+          Hint
+        </v-btn>
+        <v-btn variant="outlined" :loading="busyAction === 'run'" :disabled="busyAction !== null" @click="$emit('run')">
+          Run
+        </v-btn>
+        <v-spacer />
+        <v-btn color="primary" :loading="busyAction === 'submit'" :disabled="busyAction !== null" @click="$emit('submit')">
+          Submit
+        </v-btn>
+      </v-card-actions>
+    </v-card>
+
+    <v-card class="terminal-card" elevation="2">
+      <v-card-title>Terminal feedback</v-card-title>
+      <v-card-text>
+        <pre v-if="terminalOutput" class="terminal-output">{{ terminalOutput }}</pre>
+        <span v-else class="text-medium-emphasis">Run output will appear here.</span>
+      </v-card-text>
+    </v-card>
+  </div>
 </template>
 
 <style scoped>
+.editor-stack {
+  display: grid;
+  gap: 12px;
+}
+
 .code-editor-card {
   width: 100%;
-  height: 100%;
+}
+
+.action-row {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.terminal-card {
+  min-height: 128px;
+}
+
+.terminal-output {
+  min-height: 48px;
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-family: monospace;
 }
 
 .code-editor {

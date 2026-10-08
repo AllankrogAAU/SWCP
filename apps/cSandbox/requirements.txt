@@ -6,6 +6,7 @@ charset-normalizer==3.5.2
 click==8.5.0
 fastapi==0.142.2
 h11==0.16.0
+nats-py==2.11.0
 httpcore2==2.13.1
 httpx2==2.13.1
 idna==3.20

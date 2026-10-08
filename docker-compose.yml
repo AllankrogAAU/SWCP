@@ -17,31 +17,70 @@ services:
 
   api:
     build:
-      context: ./apps/apiGateway
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: apps/apiGateway/Dockerfile
     ports:
       - "${API_PORT:-5170}:8080"
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       Nats__Url: nats://nats:4222
-      LLM_SERVER_URL: http://local-llm-server:8080
-      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-}
-      Jwt__Key: "${JWT_KEY:?Set JWT_KEY in the root .env}"
+      Jwt__PublicKeyPath: /public/jwt-public.pem
+      Jwt__Issuer: SWCP.CoreApi
+      Jwt__Audience: SWCP.Client
+      CoreApi__Url: http://core-api:8080
+      ReverseProxy__Clusters__coreApi__Destinations__primary__Address: http://core-api:8080/
+      Cors__AllowedOrigins__0: http://localhost:5173
+      Cors__AllowedOrigins__1: http://localhost:5174
+    volumes:
+      - jwt-public:/public:ro
+    depends_on:
+      nats:
+        condition: service_healthy
+      core-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  core-api:
+    build:
+      context: .
+      dockerfile: apps/coreApi/Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      Nats__Url: nats://nats:4222
       ConnectionStrings__Default: "Host=db;Port=5432;Database=${POSTGRES_DB:?Set POSTGRES_DB in the root .env};Username=${POSTGRES_USER:?Set POSTGRES_USER in the root .env};Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env}"
+      Jwt__KeyDirectory: /private
+      Jwt__PublicKeyDirectory: /public
+      Jwt__Issuer: SWCP.CoreApi
+      Jwt__Audience: SWCP.Client
+      SeedDevelopmentUsers: ${SEED_DEVELOPMENT_USERS:-false}
+      DevelopmentUsers__TeacherUsername: ${DEV_TEACHER_USERNAME:-${DEV_TEACHER_EMAIL:-}}
+      DevelopmentUsers__TeacherPassword: ${DEV_TEACHER_PASSWORD:-}
+    volumes:
+      - jwt-private:/private
+      - jwt-public:/public
     depends_on:
       nats:
         condition: service_healthy
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
     restart: unless-stopped
 
-  cloudllm:
+  llm-worker:
     build:
-      context: ./apps/cloudLLM
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: apps/llmWorker/Dockerfile
     environment:
       DOTNET_ENVIRONMENT: Development
       Nats__Url: nats://nats:4222
+      LocalLlm__BaseUrl: http://local-llm-server:8080
+      LocalLlm__ModelName: ${LLM_MODEL_NAME:-}
+      AzureAIFoundry__DefaultModel: ${AzureAIFoundry__DefaultModel:-Gpt6Sol}
       AzureAIFoundry__Models__Gpt4o__Endpoint: ${AzureAIFoundry__Models__Gpt4o__Endpoint:-}
       AzureAIFoundry__Models__Gpt4o__ApiKey: ${AzureAIFoundry__Models__Gpt4o__ApiKey:-}
       AzureAIFoundry__Models__Gpt6Sol__Endpoint: ${AzureAIFoundry__Models__Gpt6Sol__Endpoint:-}
@@ -49,6 +88,29 @@ services:
     depends_on:
       nats:
         condition: service_healthy
+    restart: unless-stopped
+
+  sandbox-runtime-image:
+    image: c-sandbox-runtime:latest
+    build:
+      context: ./apps/cSandbox
+      dockerfile: Dockerfile
+    entrypoint: ["/bin/sh", "-c", "true"]
+
+  c-sandbox-worker:
+    build:
+      context: ./apps/cSandbox
+      dockerfile: Dockerfile.worker
+    environment:
+      NATS_URL: nats://nats:4222
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      nats:
+        condition: service_healthy
+      sandbox-runtime-image:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   db:
@@ -90,6 +152,9 @@ services:
       dockerfile: Dockerfile
     ports:
       - "${FRONTEND_PORT:-5174}:80"
+    depends_on:
+      api:
+        condition: service_started
     restart: unless-stopped
 
   local-llm-server:
@@ -120,7 +185,7 @@ services:
       - "--host=0.0.0.0"
       - "--port=8080"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
       interval: 15s
       timeout: 5s
       retries: 60
@@ -129,5 +194,7 @@ services:
 
 volumes:
   db-data:
+  jwt-private:
+  jwt-public:
   nats-data:
   pgadmin-data:

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://swcp.local/contracts/notification.schema.json",
+  "title": "SubmissionNotification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["submissionId", "eventType", "stage", "message", "percentComplete", "timestampUtc"],
+  "properties": {
+    "submissionId": { "type": "string", "format": "uuid" },
+    "eventType": { "type": "string" },
+    "stage": { "type": "string" },
+    "message": { "type": "string" },
+    "percentComplete": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "timestampUtc": { "type": "string", "format": "date-time" }
+  }
+}

@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import type {Assignment} from '@/data/assignments'
+import type { Assignment } from '../services/api'
 
 defineProps<{
     assignments: Assignment[]
-    selectedId: number
+    selectedId: string
 }>()
 
 defineEmits<{
-    select: [id:number]
+    select: [id: string]
 }>()
 </script>
 

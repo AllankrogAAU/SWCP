@@ -1,4 +1,6 @@
 <Solution>
-  <Project Path="../cloudLLM/cloudLLM.csproj" Id="ce460394-5e14-4156-bea4-a84bb41a8c77" />
+  <Project Path="../llmWorker/llmWorker.csproj" />
+  <Project Path="../coreApi/coreApi.csproj" />
+  <Project Path="../SWCP.Contracts/SWCP.Contracts.csproj" />
   <Project Path="api.csproj" />
 </Solution>

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://swcp.local/contracts/llm-result.schema.json",
+  "title": "LlmResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["submissionId", "status"],
+  "properties": {
+    "submissionId": { "type": "string", "format": "uuid" },
+    "status": { "enum": ["success", "error"] },
+    "feedbackMarkdown": { "type": ["string", "null"] },
+    "tokenUsage": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["promptTokens", "completionTokens", "totalTokens"],
+      "properties": {
+        "promptTokens": { "type": "integer", "minimum": 0 },
+        "completionTokens": { "type": "integer", "minimum": 0 },
+        "totalTokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "error": { "type": ["string", "null"] }
+  }
+}

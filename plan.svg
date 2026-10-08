@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 1080" width="100%" height="100%" style="background-color: #0d1117; font-family: system-ui, -apple-system, sans-serif;">
+  <defs>
+    <!-- Arrow Markers -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#58a6ff" />
+    </marker>
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2ea043" />
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#a371f7" />
+    </marker>
+    <marker id="arrow-orange" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#d29922" />
+    </marker>
+  </defs>
+
+  <!-- Title / System Scope -->
+  <text x="40" y="40" fill="#8b949e" font-size="16" font-weight="bold" letter-spacing="1">C-code LLM Platform (Production-Hardened Option C Architecture)</text>
+
+  <!-- 1. FRONTEND -->
+  <g transform="translate(390, 60)">
+    <rect width="340" height="80" rx="10" fill="#0d2d48" stroke="#1f6feb" stroke-width="2" />
+    <text x="170" y="28" fill="#ffffff" font-size="15" font-weight="bold" text-anchor="middle">Frontend Tier</text>
+    <text x="170" y="46" fill="#8b949e" font-size="12" text-anchor="middle">[Container: Vue SPA]</text>
+    <text x="170" y="64" fill="#c9d1d9" font-size="11" text-anchor="middle">Async 202 ACK, WS Auto-Reconnect, &amp; Polling Fallback</text>
+  </g>
+
+  <!-- Line: Frontend <-> Gateway -->
+  <path d="M 560, 140 L 560, 190" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)" marker-start="url(#arrow)" />
+  <rect x="370" y="148" width="380" height="24" rx="4" fill="#161b22" stroke="#30363d" />
+  <text x="560" y="164" fill="#c9d1d9" font-size="10" text-anchor="middle">1. POST Code [HTTP 202] | 2. Real-Time Updates [WebSocket / SSE]</text>
+
+  <!-- 2. API GATEWAY -->
+  <g transform="translate(390, 190)">
+    <rect width="340" height="85" rx="10" fill="#0d2d48" stroke="#1f6feb" stroke-width="2" />
+    <text x="170" y="28" fill="#ffffff" font-size="15" font-weight="bold" text-anchor="middle">API Gateway Layer</text>
+    <text x="170" y="46" fill="#8b949e" font-size="12" text-anchor="middle">[Container Replicas: ASP.NET Core]</text>
+    <text x="170" y="62" fill="#c9d1d9" font-size="11" text-anchor="middle">Stateless Edge: RAM JWT validation (public key),</text>
+    <text x="170" y="74" fill="#c9d1d9" font-size="10" text-anchor="middle">stdout logging, &amp; NATS Core WS subscriptions. Zero DB.</text>
+  </g>
+
+  <!-- Line: Gateway -> Core API (Direct REST/Auth) -->
+  <path d="M 490, 275 L 490, 330" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)" />
+  <rect x="350" y="288" width="180" height="24" rx="4" fill="#161b22" stroke="#30363d" />
+  <text x="440" y="304" fill="#c9d1d9" font-size="9" text-anchor="middle">Direct REST (Auth &amp; Ingestion)</text>
+
+  <!-- Curved Line: Gateway <-> NATS (Pub/Sub WS Broadcast) -->
+  <path d="M 680, 275 C 680, 380 680, 390 680, 480" stroke="#d29922" stroke-width="2" stroke-dasharray="4,4" marker-end="url(#arrow-orange)" marker-start="url(#arrow-orange)" />
+  <rect x="620" y="360" width="180" height="24" rx="4" fill="#161b22" stroke="#30363d" />
+  <text x="710" y="376" fill="#d29922" font-size="9" text-anchor="middle">Core Pub/Sub (notifications.*)</text>
+
+  <!-- 3. RELATIONAL DATABASE (Left Side) -->
+  <g transform="translate(40, 325)">
+    <path d="M 0,15 C 0,0 230,0 230,15 L 230,85 C 230,100 0,100 0,85 Z" fill="#102a43" stroke="#2b6cb0" stroke-width="2" />
+    <path d="M 0,15 C 0,30 230,30 230,15" fill="none" stroke="#2b6cb0" stroke-width="2" />
+    <path d="M 0,35 C 0,50 230,50 230,35" fill="none" stroke="#2b6cb0" stroke-width="2" />
+    <text x="115" y="45" fill="#ffffff" font-size="14" font-weight="bold" text-anchor="middle">PostgreSQL &amp; PgBouncer</text>
+    <text x="115" y="62" fill="#8b949e" font-size="11" text-anchor="middle">[Container / Managed HA DB]</text>
+    <text x="115" y="78" fill="#c9d1d9" font-size="10" text-anchor="middle">Single DB Owner: Accounts, Rubrics,</text>
+    <text x="115" y="90" fill="#c9d1d9" font-size="10" text-anchor="middle">State Machine, &amp; Final Outputs.</text>
+  </g>
+
+  <!-- Line: Database <-> Orchestrator -->
+  <path d="M 270, 375 L 390, 375" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)" marker-start="url(#arrow)" />
+  <rect x="280" y="357" width="100" height="36" rx="4" fill="#161b22" stroke="#30363d" />
+  <text x="330" y="371" fill="#c9d1d9" font-size="9" text-anchor="middle">Pooled Connections</text>
+  <text x="330" y="383" fill="#8b949e" font-size="8" text-anchor="middle">[PgBouncer / TCP]</text>
+
+  <!-- 4. CORE API & ORCHESTRATOR -->
+  <g transform="translate(390, 330)">
+    <rect width="340" height="90" rx="10" fill="#1f4270" stroke="#388bfd" stroke-width="2.5" />
+    <text x="170" y="26" fill="#ffffff" font-size="15" font-weight="bold" text-anchor="middle">Core API &amp; Orchestrator</text>
+    <text x="170" y="44" fill="#8b949e" font-size="12" text-anchor="middle">[Container Replicas: ASP.NET Core]</text>
+    <text x="170" y="62" fill="#c9d1d9" font-size="11" text-anchor="middle">Domain control plane, DB owner, login/JWT issuer,</text>
+    <text x="170" y="76" fill="#c9d1d9" font-size="11" text-anchor="middle">state machine, &amp; reconciler loop for stuck jobs.</text>
+  </g>
+
+  <!-- Line: Orchestrator <-> NATS Broker -->
+  <path d="M 560, 420 L 560, 480" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)" marker-start="url(#arrow)" />
+  <rect x="380" y="432" width="360" height="28" rx="4" fill="#161b22" stroke="#30363d" />
+  <text x="560" y="444" fill="#c9d1d9" font-size="10" text-anchor="middle">1. Pub/Sub sandbox &amp; llm tasks | 2. Pub notifications.*</text>
+  <text x="560" y="455" fill="#8b949e" font-size="9" text-anchor="middle">[NATS JetStream &amp; Core Pub/Sub]</text>
+
+  <!-- 5. NATS CLUSTER -->
+  <g transform="translate(390, 480)">
+    <rect width="340" height="95" rx="10" fill="#083c3e" stroke="#2ea043" stroke-width="2" />
+    <text x="170" y="26" fill="#ffffff" font-size="15" font-weight="bold" text-anchor="middle">NATS Cluster (3-Node HA)</text>
+    <text x="170" y="44" fill="#8b949e" font-size="12" text-anchor="middle">[Single Cluster: JetStream + Core Pub/Sub]</text>
+    <text x="170" y="62" fill="#c9d1d9" font-size="10" text-anchor="middle">• JetStream WorkQueues (sandbox.tasks, llm.tasks.*)</text>
+    <text x="170" y="74" fill="#c9d1d9" font-size="10" text-anchor="middle">• Core Pub/Sub (notifications.* for WS fan-out)</text>
+    <text x="170" y="86" fill="#c9d1d9" font-size="9" text-anchor="middle">• Poison Pill Defense (max_deliver: 3 + DLQ)</text>
+  </g>
+
+  <!-- Left Queue Line: NATS -> Sandbox Worker -->
+  <path d="M 450, 575 L 240, 640" stroke="#2ea043" stroke-width="2" marker-end="url(#arrow-teal)" marker-start="url(#arrow-teal)" />
+  <rect x="180" y="585" width="200" height="32" rx="4" fill="#161b22" stroke="#30363d" />
+  <text x="280" y="598" fill="#c9d1d9" font-size="9" text-anchor="middle">Consume sandbox.tasks</text>
+  <text x="280" y="610" fill="#c9d1d9" font-size="9" text-anchor="middle">Publish sandbox.results [NATS]</text>
+
+  <!-- Right Queue Line: NATS -> LLM Worker Pool -->
+  <path d="M 670, 575 L 860, 640" stroke="#2ea043" stroke-width="2" marker-end="url(#arrow-teal)" marker-start="url(#arrow-teal)" />
+  <rect x="680" y="585" width="220" height="32" rx="4" fill="#161b22" stroke="#30363d" />
+  <text x="790" y="598" fill="#c9d1d9" font-size="9" text-anchor="middle">Consume llm.tasks.local / azure</text>
+  <text x="790" y="610" fill="#c9d1d9" font-size="9" text-anchor="middle">Publish llm.results [NATS]</text>
+
+  <!-- 6. C-SANDBOX WORKER POOL (Left Branch) -->
+  <g transform="translate(70, 640)">
+    <rect width="340" height="95" rx="10" fill="#0d2d48" stroke="#1f6feb" stroke-width="2" />
+    <text x="170" y="28" fill="#ffffff" font-size="15" font-weight="bold" text-anchor="middle">C-Sandbox Worker Pool</text>
+    <text x="170" y="46" fill="#8b949e" font-size="12" text-anchor="middle">[Stateless Worker Pods / gVisor K8s Runtime]</text>
+    <text x="170" y="64" fill="#c9d1d9" font-size="11" text-anchor="middle">Compiles code &amp; executes binaries inside isolated</text>
+    <text x="170" y="78" fill="#c9d1d9" font-size="11" text-anchor="middle">sandboxes with deny-all NetworkPolicies.</text>
+  </g>
+
+  <!-- 7. LLM WORKER POOL (Right Branch) -->
+  <g transform="translate(690, 640)">
+    <rect width="340" height="95" rx="10" fill="#0d2d48" stroke="#1f6feb" stroke-width="2" />
+    <text x="170" y="28" fill="#ffffff" font-size="15" font-weight="bold" text-anchor="middle">LLM Worker Pool</text>
+    <text x="170" y="46" fill="#8b949e" font-size="12" text-anchor="middle">[Stateless Queue Adapter Pods]</text>
+    <text x="170" y="64" fill="#c9d1d9" font-size="11" text-anchor="middle">Formats REST payloads, offloads socket I/O waits,</text>
+    <text x="170" y="78" fill="#c9d1d9" font-size="11" text-anchor="middle">&amp; executes backoff on HTTP 429 quota limits.</text>
+  </g>
+
+  <!-- Line: LLM Worker -> Azure AI Foundry -->
+  <path d="M 800, 735 L 550, 830" stroke="#a371f7" stroke-width="2" stroke-dasharray="4,4" marker-end="url(#arrow-purple)" />
+  <rect x="620" y="765" width="160" height="28" rx="4" fill="#161b22" stroke="#30363d" />
+  <text x="700" y="777" fill="#c9d1d9" font-size="9" text-anchor="middle">HTTPS REST (Azure Header)</text>
+  <text x="700" y="788" fill="#8b949e" font-size="8" text-anchor="middle">[Retry-After Backoff]</text>
+
+  <!-- Line: LLM Worker -> Local GPU Server -->
+  <path d="M 910, 735 L 910, 830" stroke="#a371f7" stroke-width="2" stroke-dasharray="4,4" marker-end="url(#arrow-purple)" />
+  <rect x="830" y="765" width="160" height="28" rx="4" fill="#161b22" stroke="#30363d" />
+  <text x="910" y="777" fill="#c9d1d9" font-size="9" text-anchor="middle">HTTP REST (OpenAI Spec)</text>
+  <text x="910" y="788" fill="#8b949e" font-size="8" text-anchor="middle">[VRAM Max Concurrency]</text>
+
+  <!-- 8. OBSERVABILITY TIER (Bottom Left) -->
+  <g transform="translate(70, 830)">
+    <rect width="280" height="85" rx="10" fill="#161b22" stroke="#484f58" stroke-width="2" />
+    <text x="140" y="28" fill="#ffffff" font-size="14" font-weight="bold" text-anchor="middle">Logging &amp; Telemetry Pipeline</text>
+    <text x="140" y="46" fill="#8b949e" font-size="11" text-anchor="middle">[Grafana Loki &amp; OpenTelemetry]</text>
+    <text x="140" y="64" fill="#c9d1d9" font-size="10" text-anchor="middle">FluentBit/Promtail harvests stdout JSON.</text>
+    <text x="140" y="76" fill="#c9d1d9" font-size="10" text-anchor="middle">OTel traceparent headers across NATS.</text>
+  </g>
+
+  <!-- 9. AZURE FOUNDRY AI (Bottom Middle) -->
+  <g transform="translate(410, 830)">
+    <rect width="280" height="85" rx="10" fill="#161b22" stroke="#484f58" stroke-width="2" stroke-dasharray="5,5" />
+    <text x="140" y="28" fill="#ffffff" font-size="14" font-weight="bold" text-anchor="middle">Azure AI Foundry</text>
+    <text x="140" y="46" fill="#8b949e" font-size="11" text-anchor="middle">[External Cloud System]</text>
+    <text x="140" y="64" fill="#c9d1d9" font-size="10" text-anchor="middle">Cloud LLM Endpoint (GPT-4o / GPT-6)</text>
+  </g>
+
+  <!-- 10. LOCAL GPU SERVER (Bottom Right) -->
+  <g transform="translate(770, 830)">
+    <rect width="280" height="85" rx="10" fill="#161b22" stroke="#484f58" stroke-width="2" stroke-dasharray="5,5" />
+    <text x="140" y="28" fill="#ffffff" font-size="14" font-weight="bold" text-anchor="middle">Local GPU Server</text>
+    <text x="140" y="46" fill="#8b949e" font-size="11" text-anchor="middle">[External Infrastructure]</text>
+    <text x="140" y="64" fill="#c9d1d9" font-size="10" text-anchor="middle">vLLM Inference (Qwen Coder)</text>
+  </g>
+
+</svg>

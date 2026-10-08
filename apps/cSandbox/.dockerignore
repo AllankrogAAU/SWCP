@@ -9,3 +9,4 @@ README.md
 SETUP.md
 runner.py
 seccomp-profile.json
+!seccomp-profile.json

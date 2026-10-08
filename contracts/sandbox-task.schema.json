@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://swcp.local/contracts/sandbox-task.schema.json",
+  "title": "SandboxTask",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["submissionId", "assignmentId", "source", "compilerFlags", "testCases", "traceParent"],
+  "properties": {
+    "submissionId": { "type": "string", "format": "uuid" },
+    "assignmentId": { "type": "string", "format": "uuid" },
+    "source": { "type": "string" },
+    "compilerFlags": { "type": "array", "items": { "type": "string" } },
+    "testCases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stdin", "expectedStdout", "timeoutMilliseconds", "memoryLimitMegabytes"],
+        "properties": {
+          "stdin": { "type": "string" },
+          "expectedStdout": { "type": "string" },
+          "timeoutMilliseconds": { "type": "integer", "minimum": 1 },
+          "memoryLimitMegabytes": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "traceParent": { "type": ["string", "null"] }
+  }
+}
