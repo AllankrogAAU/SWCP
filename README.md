@@ -108,3 +108,7 @@ docker compose --profile frontend --profile local-llm build
 
 The local vLLM model files are bind-mounted and excluded from application image
 build contexts.
+
+
+
+.\scripts\Show-PipelineTimings.ps1

@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import socket
+import time
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -33,6 +34,14 @@ class JsonLogFormatter(logging.Formatter):
             "trace_id": trace_parts[1] if len(trace_parts) == 4 else None,
             "span_id": trace_parts[2] if len(trace_parts) == 4 else None,
             "submission_id": getattr(record, "submission_id", None),
+            "event_name": getattr(record, "event_name", None),
+            "stage": getattr(record, "stage", None),
+            "duration_ms": getattr(record, "duration_ms", None),
+            "queue_wait_ms": getattr(record, "queue_wait_ms", None),
+            "attempt": getattr(record, "attempt", None),
+            "status": getattr(record, "status", None),
+            "outcome": getattr(record, "outcome", None),
+            "error_type": getattr(record, "error_type", None),
             "message": record.getMessage(),
         }, default=str)
 
@@ -97,6 +106,19 @@ async def handle_message(message, connection, jetstream) -> None:
 
     try:
         trace_parent = task.traceParent or (message.headers or {}).get("traceparent")
+        attempt = getattr(getattr(message, "metadata", None), "num_delivered", 1)
+        stage_started = time.perf_counter()
+        logger.info(
+            "Sandbox evaluation started",
+            extra={
+                "event_name": "pipeline.stage.started",
+                "stage": "sandbox",
+                "submission_id": str(task.submissionId),
+                "traceparent": trace_parent,
+                "attempt": attempt,
+                "status": "processing",
+            },
+        )
         start_headers = {"traceparent": trace_parent} if trace_parent else None
         await connection.publish(
             "submissions.work.started",
@@ -109,6 +131,7 @@ async def handle_message(message, connection, jetstream) -> None:
             headers=start_headers,
         )
         result = await asyncio.to_thread(evaluate_task, task)
+        duration_ms = round((time.perf_counter() - stage_started) * 1000)
         result_headers = {"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"}
         if trace_parent:
             result_headers["traceparent"] = trace_parent
@@ -118,11 +141,36 @@ async def handle_message(message, connection, jetstream) -> None:
             headers=result_headers,
         )
         await message.ack()
-        logger.info("Published sandbox result", extra={"submission_id": str(task.submissionId), "traceparent": trace_parent})
+        logger.info(
+            "Sandbox evaluation completed",
+            extra={
+                "event_name": "pipeline.stage.completed",
+                "stage": "sandbox",
+                "submission_id": str(task.submissionId),
+                "traceparent": trace_parent,
+                "duration_ms": duration_ms,
+                "attempt": attempt,
+                "status": "completed",
+                "outcome": result.errorClassification,
+            },
+        )
     except Exception:
         delivered = getattr(getattr(message, "metadata", None), "num_delivered", 1)
         if delivered >= 3:
             error_text = "sandbox worker retries exhausted"
+            logger.exception(
+                "Sandbox evaluation retries exhausted",
+                extra={
+                    "event_name": "pipeline.stage.failed",
+                    "stage": "sandbox",
+                    "submission_id": str(task.submissionId),
+                    "traceparent": trace_parent,
+                    "duration_ms": round((time.perf_counter() - stage_started) * 1000),
+                    "attempt": delivered,
+                    "status": "failed",
+                    "error_type": "RetriesExhausted",
+                },
+            )
             await jetstream.publish(
                 "sandbox.tasks.dlq",
                 message.data,
@@ -145,7 +193,20 @@ async def handle_message(message, connection, jetstream) -> None:
             return
 
         delay = min(30.0, 2.0 ** min(delivered, 5)) + random.random()
-        logger.exception("Sandbox task failed; retrying after %.1f seconds", delay)
+        logger.exception(
+            "Sandbox task failed; retrying after %.1f seconds",
+            delay,
+            extra={
+                "event_name": "pipeline.stage.retrying",
+                "stage": "sandbox",
+                "submission_id": str(task.submissionId),
+                "traceparent": trace_parent,
+                "duration_ms": round((time.perf_counter() - stage_started) * 1000),
+                "attempt": delivered,
+                "status": "retrying",
+                "error_type": "WorkerError",
+            },
+        )
         await message.nak(delay=delay)
 
 

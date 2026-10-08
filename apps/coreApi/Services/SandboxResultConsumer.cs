@@ -69,6 +69,12 @@ public sealed class SandboxResultConsumer(
             return;
         }
 
+        logger.LogInformation(
+            "Pipeline stage result received {event_name} {stage} {submission_id} {trace_id} {status} {outcome}",
+            "pipeline.stage.result_received", "sandbox", submission.Id,
+            traceParent?.Split('-') is { Length: 4 } traceParts ? traceParts[1] : null,
+            result.Compilation.Success ? "completed" : "compile_failed", result.ErrorClassification);
+
         submission.SandboxOutputJson = JsonSerializer.Serialize(result);
         submission.UpdatedAtUtc = DateTimeOffset.UtcNow;
         if (result.ErrorClassification?.StartsWith("worker-error:", StringComparison.Ordinal) == true)
@@ -76,6 +82,12 @@ public sealed class SandboxResultConsumer(
             submission.Status = SubmissionStatus.FAILED;
             submission.ErrorMessage = result.ErrorClassification["worker-error:".Length..];
             await database.SaveChangesAsync(cancellationToken);
+            logger.LogError(
+                "Pipeline completed {event_name} {submission_id} {trace_id} {duration_ms} {status} {backend} {outcome}",
+                "pipeline.completed", submission.Id,
+                traceParent?.Split('-') is { Length: 4 } workerTraceParts ? workerTraceParts[1] : null,
+                (long)(DateTimeOffset.UtcNow - submission.CreatedAtUtc).TotalMilliseconds,
+                "failed", submission.LlmBackend, "sandbox_worker_error");
             await events.PublishAsync(submission, "failed", "Sandbox worker exhausted its retries", 100, cancellationToken, traceParent);
             return;
         }
@@ -84,6 +96,12 @@ public sealed class SandboxResultConsumer(
         {
             submission.Status = SubmissionStatus.COMPLETED;
             await database.SaveChangesAsync(cancellationToken);
+            logger.LogInformation(
+                "Pipeline completed {event_name} {submission_id} {trace_id} {duration_ms} {status} {backend} {outcome}",
+                "pipeline.completed", submission.Id,
+                traceParent?.Split('-') is { Length: 4 } compileTraceParts ? compileTraceParts[1] : null,
+                (long)(DateTimeOffset.UtcNow - submission.CreatedAtUtc).TotalMilliseconds,
+                "completed", submission.LlmBackend, "compile_failed");
             await events.PublishAsync(submission, "completed", "Compilation failed; LLM feedback skipped", 100, cancellationToken, traceParent);
             return;
         }
@@ -98,9 +116,15 @@ public sealed class SandboxResultConsumer(
             ? "You are a programming tutor. Give concise, actionable feedback about the student's C submission."
             : assignment.SystemPromptTemplate;
         var userPrompt = $"Assignment:\n{assignment.Description}\n\nC source:\n```c\n{submission.SourceCode}\n```\n\nSandbox output:\n{JsonSerializer.Serialize(result)}";
+        var queueTimer = System.Diagnostics.Stopwatch.StartNew();
         await publisher.PublishLlmTaskAsync(
             new LlmTask(submission.Id, submission.LlmBackend, systemPrompt, userPrompt,
                 new LlmInferenceParameters(0.2, 2048, 1.0), traceParent),
             cancellationToken);
+        logger.LogInformation(
+            "Pipeline stage queued {event_name} {stage} {submission_id} {trace_id} {queue_publish_ms} {status} {backend}",
+            "pipeline.stage.queued", "llm", submission.Id,
+            traceParent?.Split('-') is { Length: 4 } llmTraceParts ? llmTraceParts[1] : null,
+            queueTimer.ElapsedMilliseconds, "queued", submission.LlmBackend);
     }
 }

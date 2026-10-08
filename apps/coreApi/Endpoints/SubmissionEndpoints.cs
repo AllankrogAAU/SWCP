@@ -28,12 +28,17 @@ public static class SubmissionEndpoints
         CoreDbContext database,
         NatsTaskPublisher publisher,
         SubmissionEvents events,
+        ILoggerFactory loggerFactory,
         CancellationToken cancellationToken)
     {
         if (!Guid.TryParse(principal.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
         {
             return Results.Unauthorized();
         }
+
+        var requestTimer = Stopwatch.StartNew();
+        var traceParent = Activity.Current?.Id ?? Messaging.CurrentOrNewTraceParent();
+        var logger = loggerFactory.CreateLogger("coreApi.SubmissionEndpoints");
 
         if (request.SourceCode.Length == 0 || System.Text.Encoding.UTF8.GetByteCount(request.SourceCode) > 1_000_000)
         {
@@ -98,7 +103,8 @@ public static class SubmissionEndpoints
             await transaction.CommitAsync(cancellationToken);
         }
 
-        await events.PublishAsync(submission, "stage", "Queued for sandbox evaluation", 5, cancellationToken);
+        var queueTimer = Stopwatch.StartNew();
+        await events.PublishAsync(submission, "stage", "Queued for sandbox evaluation", 5, cancellationToken, traceParent);
 
         try
         {
@@ -109,7 +115,11 @@ public static class SubmissionEndpoints
                 submission.SourceCode,
                 ["-Wall", "-Wextra", "-O2", "-std=c11"],
                 testCases,
-                Activity.Current?.Id ?? Messaging.CurrentOrNewTraceParent()), cancellationToken);
+                traceParent), cancellationToken);
+            logger.LogInformation(
+                "Pipeline stage completed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {queue_publish_ms} {status} {backend} {attempt}",
+                "pipeline.stage.completed", "submission_enqueue", submission.Id, TraceId(traceParent), requestTimer.ElapsedMilliseconds,
+                queueTimer.ElapsedMilliseconds, "queued", backend, 0);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -117,6 +127,10 @@ public static class SubmissionEndpoints
             submission.ErrorMessage = exception.Message;
             submission.UpdatedAtUtc = DateTimeOffset.UtcNow;
             await database.SaveChangesAsync(cancellationToken);
+            logger.LogError(exception,
+                "Pipeline stage failed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {status} {backend} {attempt} {error_type}",
+                "pipeline.stage.failed", "submission_enqueue", submission.Id, TraceId(traceParent), requestTimer.ElapsedMilliseconds,
+                "failed", backend, 0, exception.GetType().Name);
             throw;
         }
 
@@ -215,6 +229,9 @@ public static class SubmissionEndpoints
         item.ErrorMessage,
         item.CreatedAtUtc,
         item.UpdatedAtUtc);
+
+    private static string? TraceId(string? traceParent) =>
+        traceParent?.Split('-') is { Length: 4 } parts ? parts[1] : null;
 }
 
 public sealed record SubmissionListResponse(Guid SubmissionId, Guid AssignmentId, SubmissionStatus Status, DateTimeOffset CreatedAtUtc);

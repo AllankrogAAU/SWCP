@@ -53,6 +53,13 @@ public sealed class LlmResultConsumer(
                     submission.ErrorMessage = result.Error;
                     submission.UpdatedAtUtc = DateTimeOffset.UtcNow;
                     await database.SaveChangesAsync(stoppingToken);
+                    logger.LogInformation(
+                        "Pipeline completed {event_name} {submission_id} {trace_id} {duration_ms} {status} {backend} {outcome}",
+                        "pipeline.completed", submission.Id,
+                        traceParent?.Split('-') is { Length: 4 } traceParts ? traceParts[1] : null,
+                        (long)(submission.UpdatedAtUtc - submission.CreatedAtUtc).TotalMilliseconds,
+                        submission.Status.ToString().ToLowerInvariant(), submission.LlmBackend,
+                        result.Status == "success" ? "feedback_ready" : "llm_failed");
                     await events.PublishAsync(submission, submission.Status.ToString().ToLowerInvariant(),
                         result.Status == "success" ? "Feedback is ready" : "LLM feedback failed", 100, stoppingToken, traceParent);
                 }

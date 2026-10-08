@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
 using NATS.Client.JetStream.Models;
@@ -94,8 +95,14 @@ public sealed class Worker(
                 continue;
             }
 
+            var stageTimer = Stopwatch.StartNew();
+            var attempt = message.Metadata?.NumDelivered ?? 1UL;
+            var traceId = task.TraceParent?.Split('-') is { Length: 4 } traceParts ? traceParts[1] : null;
             try
             {
+                logger.LogInformation(
+                    "Pipeline stage started {event_name} {stage} {submission_id} {trace_id} {backend} {attempt} {status}",
+                    "pipeline.stage.started", "llm", task.SubmissionId, traceId, task.Backend, attempt, "processing");
                 var headers = new NatsHeaders();
                 if (!string.IsNullOrWhiteSpace(task.TraceParent))
                 {
@@ -104,6 +111,11 @@ public sealed class Worker(
                 await nats.PublishAsync(Messaging.WorkStartedSubject, new SubmissionWorkStarted(
                     task.SubmissionId, "llm-worker", "llm", DateTimeOffset.UtcNow), headers: headers, cancellationToken: stoppingToken);
                 var completion = await processor.CompleteAsync(task, stoppingToken);
+                stageTimer.Stop();
+                logger.LogInformation(
+                    "Pipeline stage completed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {backend} {attempt} {status}",
+                    "pipeline.stage.completed", "llm", task.SubmissionId, traceId, stageTimer.ElapsedMilliseconds,
+                    task.Backend, attempt, "completed");
                 await PublishResultAsync(new LlmResult(
                     task.SubmissionId,
                     "success",
@@ -111,7 +123,6 @@ public sealed class Worker(
                     completion.TokenUsage,
                     null), stoppingToken, task.TraceParent);
                 await message.AckAsync(cancellationToken: stoppingToken);
-                logger.LogInformation("Completed {Backend} LLM task for submission {SubmissionId}", task.Backend, task.SubmissionId);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -122,6 +133,11 @@ public sealed class Worker(
                 var deliveryCount = message.Metadata?.NumDelivered ?? 1UL;
                 if (deliveryCount >= 3)
                 {
+                    logger.LogError(exception,
+                        "Pipeline stage failed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {backend} {attempt} {status} {error_type}",
+                        "pipeline.stage.failed", "llm", task.SubmissionId,
+                        task.TraceParent?.Split('-') is { Length: 4 } failedTraceParts ? failedTraceParts[1] : null,
+                        stageTimer.ElapsedMilliseconds, task.Backend, deliveryCount, "failed", exception.GetType().Name);
                     await jetStream.PublishAsync(Messaging.LlmTasksDlqSubject, task, cancellationToken: stoppingToken);
                     await PublishResultAsync(new LlmResult(task.SubmissionId, "error", null, null,
                         $"LLM retries exhausted: {exception.Message}"), stoppingToken, task.TraceParent);
@@ -130,13 +146,22 @@ public sealed class Worker(
                 }
                 else
                 {
-                    logger.LogWarning(exception, "Retrying LLM task for submission {SubmissionId} after {Delay}", task.SubmissionId, exception.RetryDelay);
+                    logger.LogWarning(exception,
+                        "Pipeline stage retrying {event_name} {stage} {submission_id} {trace_id} {duration_ms} {backend} {attempt} {status} {retry_delay_ms} {error_type}",
+                        "pipeline.stage.retrying", "llm", task.SubmissionId,
+                        task.TraceParent?.Split('-') is { Length: 4 } retryTraceParts ? retryTraceParts[1] : null,
+                        stageTimer.ElapsedMilliseconds, task.Backend, deliveryCount, "retrying",
+                        exception.RetryDelay.TotalMilliseconds, exception.GetType().Name);
                     await message.NakAsync(exception.RetryDelay, stoppingToken);
                 }
             }
             catch (Exception exception)
             {
-                logger.LogError(exception, "LLM task failed for submission {SubmissionId}", task.SubmissionId);
+                logger.LogError(exception,
+                    "Pipeline stage failed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {backend} {attempt} {status} {error_type}",
+                    "pipeline.stage.failed", "llm", task.SubmissionId,
+                    task.TraceParent?.Split('-') is { Length: 4 } errorTraceParts ? errorTraceParts[1] : null,
+                    stageTimer.ElapsedMilliseconds, task.Backend, attempt, "failed", exception.GetType().Name);
                 try
                 {
                     await PublishResultAsync(new LlmResult(task.SubmissionId, "error", null, null, exception.Message), stoppingToken, task.TraceParent);
