@@ -62,6 +62,13 @@ namespace coreApi.Data.Migrations
                     b.Property<Guid>("AssignmentId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("Action")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasDefaultValue("submit")
+                        .HasColumnType("character varying(16)");
+
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
@@ -74,6 +81,9 @@ namespace coreApi.Data.Migrations
 
                     b.Property<string>("LlmFeedback")
                         .HasColumnType("text");
+
+                    b.Property<bool?>("TaskSolved")
+                        .HasColumnType("boolean");
 
                     b.Property<int>("RetryCount")
                         .HasColumnType("integer");

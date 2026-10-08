@@ -50,6 +50,7 @@ public sealed class LlmResultConsumer(
                         ? SubmissionStatus.COMPLETED
                         : SubmissionStatus.FAILED;
                     submission.LlmFeedback = result.FeedbackMarkdown;
+                    submission.TaskSolved = result.TaskSolved;
                     submission.ErrorMessage = result.Error;
                     submission.UpdatedAtUtc = DateTimeOffset.UtcNow;
                     await database.SaveChangesAsync(stoppingToken);

@@ -7,6 +7,7 @@ import {
   clearAccessToken,
   getAccessToken,
   getAssignments,
+  getSubmissionHistory,
   getSubmission,
   login,
   openSubmissionSocket,
@@ -17,11 +18,13 @@ import {
   submitSource,
   type Assignment,
   type LlmBackend,
+  type SubmissionAction,
   type SubmissionNotification,
   type SubmissionStatus,
 } from './services/api'
 
 const assignments = ref<Assignment[]>([])
+const solvedByAssignmentId = ref<Record<string, boolean | null>>({})
 const selectedId = ref('')
 const selected = computed(() => assignments.value.find(assignment => assignment.id === selectedId.value))
 const code = ref('#include <stdio.h>\n\nint main(void) {\n    return 0;\n}')
@@ -39,7 +42,8 @@ const authenticated = ref(Boolean(getAccessToken()))
 const authLoading = ref(false)
 const authError = ref('')
 const submissionId = ref('')
-const loading = computed(() => busyAction.value === 'submit')
+const loading = computed(() => busyAction.value === 'submit' || busyAction.value === 'hint')
+const waitingForAction = computed(() => busyAction.value !== null)
 let socket: WebSocket | undefined
 let reconnectTimer: number | undefined
 let reconnectAttempts = 0
@@ -54,7 +58,15 @@ function selectAssignment(id: string) {
 }
 
 async function loadAssignments() {
-  assignments.value = await getAssignments()
+  const [assignmentRows, submissions] = await Promise.all([getAssignments(), getSubmissionHistory()])
+  assignments.value = assignmentRows
+  const latestSubmitByAssignment: Record<string, boolean | null> = {}
+  for (const submission of submissions) {
+    if (submission.action === 'submit' && !(submission.assignmentId in latestSubmitByAssignment)) {
+      latestSubmitByAssignment[submission.assignmentId] = submission.taskSolved
+    }
+  }
+  solvedByAssignmentId.value = latestSubmitByAssignment
   if (!assignments.value.some(assignment => assignment.id === selectedId.value)) {
     selectedId.value = assignments.value[0]?.id ?? ''
   }
@@ -94,7 +106,7 @@ function onProgress(notification: SubmissionNotification) {
 
 function connectSocket(id: string, generation: number) {
   socket = openSubmissionSocket(id, onProgress, () => {
-    if (generation !== pollGeneration || !loading.value || reconnectAttempts >= 5) return
+    if (generation !== pollGeneration || !waitingForAction.value || reconnectAttempts >= 5) return
     const delay = Math.min(1000 * 2 ** reconnectAttempts, 10000)
     reconnectAttempts++
     progress.value = 'Reconnecting to live updates; status polling remains active'
@@ -111,7 +123,12 @@ async function pollSubmission(id: string, generation: number) {
       const result = await getSubmission(id)
       status.value = result.status
       if (result.status === 'COMPLETED') {
-        feedback.value = result.llmFeedback ?? JSON.stringify(result.sandboxOutput, null, 2)
+        if (result.action === 'submit') {
+          solvedByAssignmentId.value[result.assignmentId] = result.taskSolved
+        }
+        feedback.value = result.action === 'run'
+          ? ''
+          : result.llmFeedback ?? JSON.stringify(result.sandboxOutput, null, 2)
         terminalOutput.value = formatTerminalOutput(result.sandboxOutput)
         progress.value = 'Completed'
         busyAction.value = null
@@ -121,6 +138,9 @@ async function pollSubmission(id: string, generation: number) {
       if (result.status === 'FAILED') {
         error.value = result.errorMessage ?? 'The submission failed.'
         terminalOutput.value = error.value
+        if (result.action === 'submit') {
+          solvedByAssignmentId.value[result.assignmentId] = result.taskSolved
+        }
         progress.value = 'Failed'
         busyAction.value = null
         socket?.close()
@@ -136,24 +156,33 @@ async function pollSubmission(id: string, generation: number) {
   }
 }
 
+function trackSubmission(accepted: { submissionId: string; status: SubmissionStatus }, action: SubmissionAction) {
+  submissionId.value = accepted.submissionId
+  status.value = accepted.status
+  progress.value = action === 'run'
+    ? 'Queued for sandbox run'
+    : action === 'hint'
+      ? 'Queued for a hint'
+      : 'Queued for sandbox evaluation'
+  reconnectAttempts = 0
+  const generation = ++pollGeneration
+  socket?.close()
+  connectSocket(accepted.submissionId, generation)
+  void pollSubmission(accepted.submissionId, generation)
+}
+
 async function requestFeedback() {
   if (!selected.value || busyAction.value !== null) return
   busyAction.value = 'submit'
   error.value = ''
   feedback.value = ''
+  solvedByAssignmentId.value[selected.value.id] = null
   progress.value = 'Submitting code'
   terminalOutput.value = ''
   status.value = 'PENDING'
   try {
     const accepted = await submitSource(selected.value.id, code.value, backend.value)
-    submissionId.value = accepted.submissionId
-    status.value = accepted.status
-    progress.value = 'Queued for sandbox evaluation'
-    reconnectAttempts = 0
-    const generation = ++pollGeneration
-    socket?.close()
-    connectSocket(accepted.submissionId, generation)
-    void pollSubmission(accepted.submissionId, generation)
+    trackSubmission(accepted, 'submit')
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Could not submit code.'
     busyAction.value = null
@@ -166,11 +195,10 @@ async function requestCodeHint() {
   error.value = ''
   feedback.value = ''
   try {
-    await requestHint(selected.value.id, code.value)
-    feedback.value = 'Hint request completed.'
+    const accepted = await requestHint(selected.value.id, code.value, backend.value)
+    trackSubmission(accepted, 'hint')
   } catch (cause) {
-    feedback.value = cause instanceof Error ? cause.message : 'Hint is not available yet.'
-  } finally {
+    error.value = cause instanceof Error ? cause.message : 'Could not request a hint.'
     busyAction.value = null
   }
 }
@@ -180,14 +208,29 @@ async function runCode() {
   busyAction.value = 'run'
   error.value = ''
   terminalOutput.value = ''
+  feedback.value = ''
   try {
-    await runSource(selected.value.id, code.value)
-    terminalOutput.value = 'Run request completed.'
+    const accepted = await runSource(selected.value.id, code.value, backend.value)
+    trackSubmission(accepted, 'run')
   } catch (cause) {
     terminalOutput.value = cause instanceof Error ? cause.message : 'Run is not available yet.'
-  } finally {
     busyAction.value = null
   }
+}
+
+function verdictIcon(assignmentId: string): string {
+  const verdict = solvedByAssignmentId.value[assignmentId]
+  return verdict === true ? 'mdi-check-circle' : verdict === false ? 'mdi-close-circle' : 'mdi-circle-outline'
+}
+
+function verdictColor(assignmentId: string): string {
+  const verdict = solvedByAssignmentId.value[assignmentId]
+  return verdict === true ? 'success' : verdict === false ? 'error' : 'grey'
+}
+
+function verdictLabel(assignmentId: string): string {
+  const verdict = solvedByAssignmentId.value[assignmentId]
+  return verdict === true ? 'Task judged correctly solved' : verdict === false ? 'Task judged not solved' : 'Task has not been judged yet'
 }
 
 function formatTerminalOutput(output: unknown): string {
@@ -267,7 +310,19 @@ onBeforeUnmount(() => {
             <v-col cols="12" md="9">
               <v-card v-if="selected" class="mb-2">
                 <v-card-title>{{ selected.title }}</v-card-title>
-                <v-card-text>{{ selected.description }}</v-card-text>
+                <v-card-text class="d-flex align-center ga-2">
+                  <span>{{ selected.description }}</span>
+                  <v-tooltip :text="verdictLabel(selected.id)">
+                    <template #activator="{ props }">
+                      <v-icon
+                        v-bind="props"
+                        :icon="verdictIcon(selected.id)"
+                        :color="verdictColor(selected.id)"
+                        :aria-label="verdictLabel(selected.id)"
+                      />
+                    </template>
+                  </v-tooltip>
+                </v-card-text>
               </v-card>
 
               <v-select

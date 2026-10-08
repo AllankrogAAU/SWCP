@@ -34,8 +34,10 @@ public sealed class CoreDbContext(DbContextOptions<CoreDbContext> options) : DbC
             entity.HasKey(submission => submission.Id);
             entity.Property(submission => submission.Status).HasConversion<string>().HasMaxLength(32);
             entity.Property(submission => submission.SourceCode).IsRequired();
+            entity.Property(submission => submission.Action).HasMaxLength(16).HasDefaultValue("submit").IsRequired();
             entity.Property(submission => submission.SandboxOutputJson).HasColumnType("jsonb");
             entity.Property(submission => submission.LlmFeedback).HasColumnType("text");
+            entity.Property(submission => submission.TaskSolved);
             entity.Property(submission => submission.ErrorMessage).HasColumnType("text");
             entity.HasOne(submission => submission.User)
                 .WithMany()

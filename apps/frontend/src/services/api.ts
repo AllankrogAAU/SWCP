@@ -1,4 +1,5 @@
 export type LlmBackend = 'azure' | 'local'
+export type SubmissionAction = 'run' | 'hint' | 'submit'
 export type SubmissionStatus =
   | 'PENDING'
   | 'SANDBOX_QUEUED'
@@ -25,14 +26,25 @@ export interface SubmissionAccepted {
   status: SubmissionStatus
 }
 
+export interface SubmissionListItem {
+  submissionId: string
+  assignmentId: string
+  action: SubmissionAction
+  status: SubmissionStatus
+  taskSolved: boolean | null
+  createdAtUtc: string
+}
+
 export interface SubmissionResponse {
   submissionId: string
   assignmentId: string
   llmBackend: LlmBackend
+  action: SubmissionAction
   status: SubmissionStatus
   retryCount: number
   sandboxOutput: unknown | null
   llmFeedback: string | null
+  taskSolved: boolean | null
   errorMessage: string | null
   createdAtUtc: string
   updatedAtUtc: string
@@ -113,6 +125,10 @@ export function getAssignments() {
   return request<Assignment[]>('/api/assignments/')
 }
 
+export function getSubmissionHistory() {
+  return request<SubmissionListItem[]>('/api/submissions/')
+}
+
 export function submitSource(assignmentId: string, sourceCode: string, llmBackend: LlmBackend) {
   return request<SubmissionAccepted>('/api/submissions/', {
     method: 'POST',
@@ -120,17 +136,17 @@ export function submitSource(assignmentId: string, sourceCode: string, llmBacken
   })
 }
 
-export function requestHint(assignmentId: string, sourceCode: string) {
-  return request<void>('/api/submissions/hint', {
+export function requestHint(assignmentId: string, sourceCode: string, llmBackend: LlmBackend) {
+  return request<SubmissionAccepted>('/api/submissions/hint', {
     method: 'POST',
-    body: JSON.stringify({ assignmentId, sourceCode }),
+    body: JSON.stringify({ assignmentId, sourceCode, llmBackend }),
   })
 }
 
-export function runSource(assignmentId: string, sourceCode: string) {
-  return request<void>('/api/submissions/run', {
+export function runSource(assignmentId: string, sourceCode: string, llmBackend: LlmBackend) {
+  return request<SubmissionAccepted>('/api/submissions/run', {
     method: 'POST',
-    body: JSON.stringify({ assignmentId, sourceCode }),
+    body: JSON.stringify({ assignmentId, sourceCode, llmBackend }),
   })
 }
 

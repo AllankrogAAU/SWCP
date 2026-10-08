@@ -22,17 +22,20 @@ public sealed record AssignmentResponse(
 public sealed record CreateSubmissionRequest(
     Guid AssignmentId,
     string SourceCode,
-    string LlmBackend = "azure");
-public sealed record CodeActionRequest(Guid AssignmentId, string SourceCode);
+    string LlmBackend = "azure",
+    string Action = "submit");
+public sealed record CodeActionRequest(Guid AssignmentId, string SourceCode, string LlmBackend = "azure");
 public sealed record SubmissionAcceptedResponse(Guid SubmissionId, SubmissionStatus Status);
 public sealed record SubmissionResponse(
     Guid SubmissionId,
     Guid AssignmentId,
+    string Action,
     string LlmBackend,
     SubmissionStatus Status,
     int RetryCount,
     JsonElement? SandboxOutput,
     string? LlmFeedback,
+    bool? TaskSolved,
     string? ErrorMessage,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);

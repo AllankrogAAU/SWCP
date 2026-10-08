@@ -9,6 +9,7 @@
     "submissionId": { "type": "string", "format": "uuid" },
     "status": { "enum": ["success", "error"] },
     "feedbackMarkdown": { "type": ["string", "null"] },
+    "taskSolved": { "type": ["boolean", "null"] },
     "tokenUsage": {
       "type": ["object", "null"],
       "additionalProperties": false,

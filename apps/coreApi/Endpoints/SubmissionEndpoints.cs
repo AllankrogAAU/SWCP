@@ -51,6 +51,12 @@ public static class SubmissionEndpoints
             return Results.BadRequest(new { error = "LlmBackend must be 'azure' or 'local'." });
         }
 
+        var action = request.Action.Trim().ToLowerInvariant();
+        if (action is not ("submit" or "hint" or "run"))
+        {
+            return Results.BadRequest(new { error = "Action must be 'submit', 'hint', or 'run'." });
+        }
+
         var assignment = await database.Assignments
             .SingleOrDefaultAsync(item => item.Id == request.AssignmentId, cancellationToken);
         if (assignment is null)
@@ -64,6 +70,7 @@ public static class SubmissionEndpoints
             UserId = userId,
             AssignmentId = assignment.Id,
             SourceCode = request.SourceCode,
+            Action = action,
             LlmBackend = backend,
             Status = SubmissionStatus.PENDING,
             CreatedAtUtc = DateTimeOffset.UtcNow,
@@ -137,46 +144,27 @@ public static class SubmissionEndpoints
         return Results.Accepted($"/api/submissions/{submission.Id}", new SubmissionAcceptedResponse(submission.Id, submission.Status));
     }
 
-    private static async Task<IResult> Hint(
+    private static Task<IResult> Hint(
         CodeActionRequest request,
         ClaimsPrincipal principal,
         CoreDbContext database,
+        NatsTaskPublisher publisher,
+        SubmissionEvents events,
+        ILoggerFactory loggerFactory,
         CancellationToken cancellationToken) =>
-        await UnavailableActionAsync("hint", request, principal, database, cancellationToken);
+        Create(new CreateSubmissionRequest(request.AssignmentId, request.SourceCode, request.LlmBackend, "hint"),
+            principal, database, publisher, events, loggerFactory, cancellationToken);
 
-    private static async Task<IResult> Run(
+    private static Task<IResult> Run(
         CodeActionRequest request,
         ClaimsPrincipal principal,
         CoreDbContext database,
+        NatsTaskPublisher publisher,
+        SubmissionEvents events,
+        ILoggerFactory loggerFactory,
         CancellationToken cancellationToken) =>
-        await UnavailableActionAsync("run", request, principal, database, cancellationToken);
-
-    private static async Task<IResult> UnavailableActionAsync(
-        string action,
-        CodeActionRequest request,
-        ClaimsPrincipal principal,
-        CoreDbContext database,
-        CancellationToken cancellationToken)
-    {
-        if (!Guid.TryParse(principal.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
-        {
-            return Results.Unauthorized();
-        }
-
-        var activeSubmission = await database.Submissions
-            .AnyAsync(item => item.UserId == userId &&
-                item.Status != SubmissionStatus.COMPLETED && item.Status != SubmissionStatus.FAILED,
-                cancellationToken);
-        if (activeSubmission)
-        {
-            return Results.Conflict(new { error = "Wait for your current code action to finish before starting another." });
-        }
-
-        return Results.Problem(
-            title: $"The {action} action is not available yet.",
-            detail: "This action is not connected to the sandbox or LLM workers yet.",
-            statusCode: StatusCodes.Status501NotImplemented);
-    }
+        Create(new CreateSubmissionRequest(request.AssignmentId, request.SourceCode, request.LlmBackend, "run"),
+            principal, database, publisher, events, loggerFactory, cancellationToken);
 
     private static async Task<IResult> Get(
         Guid id,
@@ -213,7 +201,8 @@ public static class SubmissionEndpoints
         var submissions = await database.Submissions.AsNoTracking()
             .Where(item => item.UserId == userId)
             .OrderByDescending(item => item.CreatedAtUtc)
-            .Select(item => new SubmissionListResponse(item.Id, item.AssignmentId, item.Status, item.CreatedAtUtc))
+            .Select(item => new SubmissionListResponse(
+                item.Id, item.AssignmentId, item.Action, item.Status, item.TaskSolved, item.CreatedAtUtc))
             .ToListAsync(cancellationToken);
         return Results.Ok(submissions);
     }
@@ -221,11 +210,13 @@ public static class SubmissionEndpoints
     private static SubmissionResponse ToResponse(Submission item) => new(
         item.Id,
         item.AssignmentId,
+        item.Action,
         item.LlmBackend,
         item.Status,
         item.RetryCount,
         item.GetSandboxOutput(),
         item.LlmFeedback,
+        item.TaskSolved,
         item.ErrorMessage,
         item.CreatedAtUtc,
         item.UpdatedAtUtc);
@@ -234,4 +225,10 @@ public static class SubmissionEndpoints
         traceParent?.Split('-') is { Length: 4 } parts ? parts[1] : null;
 }
 
-public sealed record SubmissionListResponse(Guid SubmissionId, Guid AssignmentId, SubmissionStatus Status, DateTimeOffset CreatedAtUtc);
+public sealed record SubmissionListResponse(
+    Guid SubmissionId,
+    Guid AssignmentId,
+    string Action,
+    SubmissionStatus Status,
+    bool? TaskSolved,
+    DateTimeOffset CreatedAtUtc);

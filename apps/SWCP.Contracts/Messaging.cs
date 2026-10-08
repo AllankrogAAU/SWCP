@@ -91,7 +91,9 @@ public sealed record LlmTask(
     [property: JsonPropertyName("systemPrompt")] string SystemPrompt,
     [property: JsonPropertyName("userPrompt")] string UserPrompt,
     [property: JsonPropertyName("parameters")] LlmInferenceParameters Parameters,
-    [property: JsonPropertyName("traceParent")] string? TraceParent = null);
+    [property: JsonPropertyName("traceParent")] string? TraceParent = null,
+    [property: JsonPropertyName("evaluationMode")] string EvaluationMode = "submit",
+    [property: JsonPropertyName("sandboxFailed")] bool SandboxFailed = false);
 
 public sealed record LlmInferenceParameters(
     [property: JsonPropertyName("temperature")] double Temperature,
@@ -103,7 +105,8 @@ public sealed record LlmResult(
     [property: JsonPropertyName("status")] string Status,
     [property: JsonPropertyName("feedbackMarkdown")] string? FeedbackMarkdown,
     [property: JsonPropertyName("tokenUsage")] LlmTokenUsage? TokenUsage,
-    [property: JsonPropertyName("error")] string? Error);
+    [property: JsonPropertyName("error")] string? Error,
+    [property: JsonPropertyName("taskSolved")] bool? TaskSolved = null);
 
 public sealed record LlmTokenUsage(
     [property: JsonPropertyName("promptTokens")] int PromptTokens,

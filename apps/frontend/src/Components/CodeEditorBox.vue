@@ -27,7 +27,7 @@ defineEmits<{ submit: []; hint: []; run: [] }>()
           Run
         </v-btn>
         <v-spacer />
-        <v-btn color="primary" :loading="busyAction === 'submit'" :disabled="busyAction !== null" @click="$emit('submit')">
+        <v-btn variant="outlined" :loading="busyAction === 'submit'" :disabled="busyAction !== null" @click="$emit('submit')">
           Submit
         </v-btn>
       </v-card-actions>

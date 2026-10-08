@@ -4,7 +4,7 @@
   "title": "LlmTask",
   "type": "object",
   "additionalProperties": false,
-  "required": ["submissionId", "backend", "systemPrompt", "userPrompt", "parameters", "traceParent"],
+  "required": ["submissionId", "backend", "systemPrompt", "userPrompt", "parameters", "traceParent", "evaluationMode", "sandboxFailed"],
   "properties": {
     "submissionId": { "type": "string", "format": "uuid" },
     "backend": { "enum": ["azure", "local"] },
@@ -20,6 +20,8 @@
         "topP": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
       }
     },
-    "traceParent": { "type": ["string", "null"] }
+    "traceParent": { "type": ["string", "null"] },
+    "evaluationMode": { "enum": ["submit", "hint"] },
+    "sandboxFailed": { "type": "boolean" }
   }
 }

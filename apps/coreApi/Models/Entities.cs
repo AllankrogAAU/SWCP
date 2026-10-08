@@ -44,11 +44,13 @@ public sealed class Submission
     public Guid UserId { get; set; }
     public Guid AssignmentId { get; set; }
     public string SourceCode { get; set; } = string.Empty;
+    public string Action { get; set; } = "submit";
     public string LlmBackend { get; set; } = "azure";
     public SubmissionStatus Status { get; set; }
     public int RetryCount { get; set; }
     public string? SandboxOutputJson { get; set; }
     public string? LlmFeedback { get; set; }
+    public bool? TaskSolved { get; set; }
     public string? ErrorMessage { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }

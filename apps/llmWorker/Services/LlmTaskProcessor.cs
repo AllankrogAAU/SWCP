@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using Azure;
 using Azure.AI.Inference;
@@ -11,7 +12,7 @@ using SWCP.Contracts;
 
 namespace llmWorker.Services;
 
-public sealed record LlmCompletion(string FeedbackMarkdown, LlmTokenUsage? TokenUsage);
+public sealed record LlmCompletion(string FeedbackMarkdown, LlmTokenUsage? TokenUsage, bool? TaskSolved);
 
 public sealed class RetryableLlmException(TimeSpan retryDelay, Exception innerException)
     : Exception(innerException.Message, innerException)
@@ -21,6 +22,9 @@ public sealed class RetryableLlmException(TimeSpan retryDelay, Exception innerEx
 
 public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFactory httpClientFactory)
 {
+    private static readonly Regex TaskVerdictMarker = new(
+        @"(?:^|\r?\n)SWCP_TASK_SOLVED:\s*(true|false|not_evaluated)\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private readonly ConcurrentDictionary<string, (ChatCompletionsClient Client, string Deployment)> _azureClients = new();
 
     public Task<LlmCompletion> CompleteAsync(LlmTask task, CancellationToken cancellationToken) =>
@@ -68,7 +72,7 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             var usage = result.Usage is null
                 ? null
                 : new LlmTokenUsage(result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens);
-            return new LlmCompletion(result.Content ?? string.Empty, usage);
+            return ParseCompletion(result.Content ?? string.Empty, usage, task);
         }
         catch (RequestFailedException exception) when (exception.Status == (int)HttpStatusCode.TooManyRequests)
         {
@@ -145,6 +149,23 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                 tokenUsage.GetProperty("total_tokens").GetInt32());
         }
 
-        return new LlmCompletion(content, usage);
+        return ParseCompletion(content, usage, task);
+    }
+
+    private static LlmCompletion ParseCompletion(string content, LlmTokenUsage? usage, LlmTask task)
+    {
+        var match = TaskVerdictMarker.Match(content);
+        bool? taskSolved = null;
+        if (match.Success && task.EvaluationMode == "submit" && !task.SandboxFailed)
+        {
+            taskSolved = match.Groups[1].Value.Equals("true", StringComparison.OrdinalIgnoreCase)
+                ? true
+                : match.Groups[1].Value.Equals("false", StringComparison.OrdinalIgnoreCase)
+                    ? false
+                    : null;
+        }
+
+        var feedback = match.Success ? content[..match.Index].TrimEnd() : content.TrimEnd();
+        return new LlmCompletion(feedback, usage, taskSolved);
     }
 }

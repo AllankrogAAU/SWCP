@@ -121,7 +121,8 @@ public sealed class Worker(
                     "success",
                     completion.FeedbackMarkdown,
                     completion.TokenUsage,
-                    null), stoppingToken, task.TraceParent);
+                    null,
+                    completion.TaskSolved), stoppingToken, task.TraceParent);
                 await message.AckAsync(cancellationToken: stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
