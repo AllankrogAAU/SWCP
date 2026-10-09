@@ -35,7 +35,7 @@ namespace coreApi.Data.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<string>("SystemPromptTemplate")
+                    b.Property<string>("TaskFocus")
                         .IsRequired()
                         .HasColumnType("text");
 

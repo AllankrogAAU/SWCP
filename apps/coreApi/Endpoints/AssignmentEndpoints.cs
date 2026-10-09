@@ -49,7 +49,7 @@ public static class AssignmentEndpoints
             Id = Guid.NewGuid(),
             Title = request.Title.Trim(),
             Description = request.Description,
-            SystemPromptTemplate = request.SystemPromptTemplate,
+            TaskFocus = request.TaskFocus,
             TestCasesJson = testCases,
             CreatedAtUtc = DateTimeOffset.UtcNow
         };
@@ -62,7 +62,7 @@ public static class AssignmentEndpoints
         assignment.Id,
         assignment.Title,
         assignment.Description,
-        assignment.SystemPromptTemplate,
+        assignment.TaskFocus,
         JsonDocument.Parse(assignment.TestCasesJson).RootElement.Clone(),
         assignment.CreatedAtUtc);
 }

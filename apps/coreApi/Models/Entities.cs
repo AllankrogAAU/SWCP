@@ -33,7 +33,7 @@ public sealed class Assignment
     public Guid Id { get; set; }
     public string Title { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
-    public string SystemPromptTemplate { get; set; } = string.Empty;
+    public string TaskFocus { get; set; } = string.Empty;
     public string TestCasesJson { get; set; } = "[]";
     public DateTimeOffset CreatedAtUtc { get; set; }
 }

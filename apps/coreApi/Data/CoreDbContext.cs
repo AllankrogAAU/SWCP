@@ -25,7 +25,7 @@ public sealed class CoreDbContext(DbContextOptions<CoreDbContext> options) : DbC
             entity.HasKey(assignment => assignment.Id);
             entity.Property(assignment => assignment.Title).HasMaxLength(240).IsRequired();
             entity.Property(assignment => assignment.Description).IsRequired();
-            entity.Property(assignment => assignment.SystemPromptTemplate).IsRequired();
+            entity.Property(assignment => assignment.TaskFocus).IsRequired();
             entity.Property(assignment => assignment.TestCasesJson).HasColumnType("jsonb").IsRequired();
         });
 

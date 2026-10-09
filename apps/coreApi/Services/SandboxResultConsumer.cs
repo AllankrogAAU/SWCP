@@ -113,22 +113,11 @@ public sealed class SandboxResultConsumer(
 
         var assignment = submission.Assignment
             ?? throw new InvalidOperationException($"Assignment {submission.AssignmentId} was not found.");
-        var baseSystemPrompt = string.IsNullOrWhiteSpace(assignment.SystemPromptTemplate)
-            ? "You are a programming tutor. Give concise, actionable feedback about the student's C submission."
-            : assignment.SystemPromptTemplate;
-        var sandboxFailed = !result.Compilation.Success || result.TestResults.Any(test => !test.Passed);
-        var evaluationMode = submission.Action == "hint" ? "hint" : "submit";
-        var actionInstructions = evaluationMode == "hint"
-            ? "The student requested a hint. Explain the most useful next step without giving away a complete solution. Do not judge whether the assignment is solved. End with exactly this metadata line: SWCP_TASK_SOLVED: not_evaluated"
-            : sandboxFailed
-                ? "The sandbox reported a compilation or runtime failure. Focus on explaining the failure and how the student can debug it educationally. Do not judge whether the assignment is solved. End with exactly this metadata line: SWCP_TASK_SOLVED: not_evaluated"
-                : "Review the code for significant non-crashing quality issues first. If significant issues exist, explain them and do not judge task completion. If no significant issues exist, compare the program with the assignment description and decide whether it is correctly solved. End with exactly one metadata line: SWCP_TASK_SOLVED: true or SWCP_TASK_SOLVED: false. Do not include that line in the user-facing explanation.";
-        var systemPrompt = $"{baseSystemPrompt}\n\n{actionInstructions}";
-        var userPrompt = $"Assignment:\n{assignment.Description}\n\nC source:\n```c\n{submission.SourceCode}\n```\n\nSandbox output:\n{JsonSerializer.Serialize(result)}";
+        var prompt = SubmissionPromptBuilder.Build(assignment, submission, result);
         var queueTimer = System.Diagnostics.Stopwatch.StartNew();
         await publisher.PublishLlmTaskAsync(
-            new LlmTask(submission.Id, submission.LlmBackend, systemPrompt, userPrompt,
-                new LlmInferenceParameters(0.2, 2048, 1.0), traceParent, evaluationMode, sandboxFailed),
+            new LlmTask(submission.Id, submission.LlmBackend, prompt.SystemPrompt, prompt.UserPrompt,
+                prompt.Parameters, traceParent, prompt.EvaluationMode, prompt.SandboxFailed),
             cancellationToken);
         logger.LogInformation(
             "Pipeline stage queued {event_name} {stage} {submission_id} {trace_id} {queue_publish_ms} {status} {backend}",

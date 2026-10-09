@@ -10,13 +10,13 @@ public sealed record RegisterRequest(string Username, string Password);
 public sealed record CreateAssignmentRequest(
     string Title,
     string Description,
-    string SystemPromptTemplate,
+    string TaskFocus,
     JsonElement TestCases);
 public sealed record AssignmentResponse(
     Guid Id,
     string Title,
     string Description,
-    string SystemPromptTemplate,
+    string TaskFocus,
     JsonElement TestCases,
     DateTimeOffset CreatedAtUtc);
 public sealed record CreateSubmissionRequest(
