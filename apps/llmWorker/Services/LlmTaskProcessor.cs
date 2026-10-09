@@ -6,8 +6,11 @@ using System.Net.Http.Json;
 using System.Text.RegularExpressions;
 using System.Text.Json;
 using Azure;
-using Azure.AI.Inference;
+using Azure.AI.OpenAI;
+using Azure.AI.OpenAI.Chat;
 using Microsoft.Extensions.Http;
+using OpenAI.Chat;
+using System.ClientModel;
 using SWCP.Contracts;
 
 namespace llmWorker.Services;
@@ -25,7 +28,7 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
     private static readonly Regex TaskVerdictMarker = new(
         @"(?:^|\r?\n)SWCP_TASK_SOLVED:\s*(true|false|not_evaluated)\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
-    private readonly ConcurrentDictionary<string, (ChatCompletionsClient Client, string Deployment)> _azureClients = new();
+    private readonly ConcurrentDictionary<string, (ChatClient Client, string Deployment)> _azureClients = new();
 
     public Task<LlmCompletion> CompleteAsync(LlmTask task, CancellationToken cancellationToken) =>
         task.Backend switch
@@ -43,63 +46,48 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             var settings = configuration.GetSection($"AzureAIFoundry:Models:{key}");
             var endpoint = settings["Endpoint"];
             var apiKey = settings["ApiKey"];
-            var configuredDeployment = settings["Deployment"] ?? key;
-            if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(apiKey))
+            var configuredDeployment = settings["Deployment"];
+            if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(apiKey) || string.IsNullOrWhiteSpace(configuredDeployment))
             {
-                throw new InvalidOperationException($"Azure AI Foundry configuration for '{key}' is incomplete.");
+                throw new InvalidOperationException(
+                    $"Azure AI Foundry configuration for '{key}' must include Endpoint, ApiKey, and Deployment.");
             }
 
-            return (new ChatCompletionsClient(new Uri(endpoint), new AzureKeyCredential(apiKey)), configuredDeployment);
+            var azureClient = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(apiKey));
+            return (azureClient.GetChatClient(configuredDeployment), configuredDeployment);
         });
 
-        var options = new ChatCompletionsOptions
+        var options = new ChatCompletionOptions
         {
-            Model = deployment,
-            Temperature = (float)task.Parameters.Temperature,
-            NucleusSamplingFactor = (float)task.Parameters.TopP,
-            MaxTokens = task.Parameters.MaxTokens,
-            Messages =
-            {
-                new ChatRequestSystemMessage(task.SystemPrompt),
-                new ChatRequestUserMessage(task.UserPrompt)
-            }
+            MaxOutputTokenCount = task.Parameters.MaxTokens
         };
+    #pragma warning disable AOAI001
+        options.SetNewMaxCompletionTokensPropertyEnabled();
+    #pragma warning restore AOAI001
+        ChatMessage[] messages =
+        [
+            new SystemChatMessage(task.SystemPrompt),
+            new UserChatMessage(task.UserPrompt)
+        ];
 
         try
         {
-            var response = await client.CompleteAsync(options, cancellationToken);
+            var response = await client.CompleteChatAsync(messages, options, cancellationToken);
             var result = response.Value;
             var usage = result.Usage is null
                 ? null
-                : new LlmTokenUsage(result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens);
-            return ParseCompletion(result.Content ?? string.Empty, usage, task);
+                : new LlmTokenUsage(result.Usage.InputTokenCount, result.Usage.OutputTokenCount, result.Usage.TotalTokenCount);
+            var content = result.Content.Count > 0 ? result.Content[0].Text : string.Empty;
+            return ParseCompletion(content, usage, task);
         }
-        catch (RequestFailedException exception) when (exception.Status == (int)HttpStatusCode.TooManyRequests)
+        catch (ClientResultException exception) when (exception.Status == (int)HttpStatusCode.TooManyRequests)
         {
-            throw new RetryableLlmException(GetAzureRetryDelay(exception), exception);
+            throw new RetryableLlmException(TimeSpan.FromSeconds(30), exception);
         }
-        catch (RequestFailedException exception) when (exception.Status >= 500)
+        catch (ClientResultException exception) when (exception.Status >= 500)
         {
             throw new RetryableLlmException(TimeSpan.FromSeconds(5), exception);
         }
-    }
-
-    private static TimeSpan GetAzureRetryDelay(RequestFailedException exception)
-    {
-        if (exception.GetRawResponse()?.Headers.TryGetValue("Retry-After", out var retryAfter) == true)
-        {
-            if (double.TryParse(retryAfter, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds))
-            {
-                return TimeSpan.FromSeconds(Math.Clamp(seconds, 1, 300));
-            }
-
-            if (DateTimeOffset.TryParse(retryAfter, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var retryAt))
-            {
-                return TimeSpan.FromSeconds(Math.Clamp((retryAt - DateTimeOffset.UtcNow).TotalSeconds, 1, 300));
-            }
-        }
-
-        return TimeSpan.FromSeconds(30);
     }
 
     private async Task<LlmCompletion> CompleteLocalAsync(LlmTask task, CancellationToken cancellationToken)
