@@ -3,7 +3,6 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
-using System.Text.RegularExpressions;
 using System.Text.Json;
 using Azure;
 using Azure.AI.OpenAI;
@@ -25,9 +24,29 @@ public sealed class RetryableLlmException(TimeSpan retryDelay, Exception innerEx
 
 public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFactory httpClientFactory)
 {
-    private static readonly Regex TaskVerdictMarker = new(
-        @"(?:^|\r?\n)SWCP_TASK_SOLVED:\s*(true|false|not_evaluated)\s*$",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private const string StructuredResponseFormatName = "submission_feedback";
+        private const string StructuredResponseSchema = """
+                {
+                    "type": "object",
+                    "properties": {
+                        "feedback": { "type": "string" },
+                        "taskSolved": { "type": ["boolean", "null"] }
+                    },
+                    "required": ["feedback", "taskSolved"],
+                    "additionalProperties": false
+                }
+                """;
+        private const string HintStructuredResponseSchema = """
+                {
+                    "type": "object",
+                    "properties": {
+                        "feedback": { "type": "string", "maxLength": 300 },
+                        "taskSolved": { "type": ["boolean", "null"] }
+                    },
+                    "required": ["feedback", "taskSolved"],
+                    "additionalProperties": false
+                }
+                """;
     private readonly ConcurrentDictionary<string, (ChatClient Client, string Deployment)> _azureClients = new();
 
     public Task<LlmCompletion> CompleteAsync(LlmTask task, CancellationToken cancellationToken) =>
@@ -59,7 +78,11 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
 
         var options = new ChatCompletionOptions
         {
-            MaxOutputTokenCount = task.Parameters.MaxTokens
+            MaxOutputTokenCount = task.Parameters.MaxTokens,
+            ResponseFormat = ChatResponseFormat.CreateJsonSchemaFormat(
+                StructuredResponseFormatName,
+                BinaryData.FromString(GetStructuredResponseSchema(task, constrainHintFeedback: false)),
+                jsonSchemaIsStrict: true)
         };
     #pragma warning disable AOAI001
         options.SetNewMaxCompletionTokensPropertyEnabled();
@@ -109,7 +132,16 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             },
             temperature = task.Parameters.Temperature,
             max_tokens = task.Parameters.MaxTokens,
-            top_p = task.Parameters.TopP
+            top_p = task.Parameters.TopP,
+            response_format = new
+            {
+                type = "json_schema",
+                json_schema = new
+                {
+                    name = StructuredResponseFormatName,
+                    schema = ParseStructuredResponseSchema(task)
+                }
+            }
         }, cancellationToken);
 
         if ((int)response.StatusCode == 429)
@@ -127,7 +159,13 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
         using var document = await response.Content.ReadFromJsonAsync<JsonDocument>(cancellationToken: cancellationToken)
             ?? throw new InvalidOperationException("Local LLM returned an empty response.");
         var root = document.RootElement;
-        var content = root.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? string.Empty;
+        var choice = root.GetProperty("choices")[0];
+        if (choice.TryGetProperty("finish_reason", out var finishReason) && finishReason.GetString() == "length")
+        {
+            throw new JsonException("The local LLM reached its output token limit before completing the structured response.");
+        }
+
+        var content = choice.GetProperty("message").GetProperty("content").GetString() ?? string.Empty;
         LlmTokenUsage? usage = null;
         if (root.TryGetProperty("usage", out var tokenUsage))
         {
@@ -142,18 +180,39 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
 
     private static LlmCompletion ParseCompletion(string content, LlmTokenUsage? usage, LlmTask task)
     {
-        var match = TaskVerdictMarker.Match(content);
-        bool? taskSolved = null;
-        if (match.Success && task.EvaluationMode == "submit" && !task.SandboxFailed)
+        using var document = JsonDocument.Parse(content);
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty("feedback", out var feedbackElement) ||
+            feedbackElement.ValueKind != JsonValueKind.String ||
+            !root.TryGetProperty("taskSolved", out var taskSolvedElement) ||
+            taskSolvedElement.ValueKind is not (JsonValueKind.True or JsonValueKind.False or JsonValueKind.Null))
         {
-            taskSolved = match.Groups[1].Value.Equals("true", StringComparison.OrdinalIgnoreCase)
-                ? true
-                : match.Groups[1].Value.Equals("false", StringComparison.OrdinalIgnoreCase)
-                    ? false
-                    : null;
+            throw new JsonException("The LLM response must contain string feedback and a boolean-or-null taskSolved field.");
         }
 
-        var feedback = match.Success ? content[..match.Index].TrimEnd() : content.TrimEnd();
-        return new LlmCompletion(feedback, usage, taskSolved);
+        bool? taskSolved = taskSolvedElement.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            _ => null
+        };
+        if (task.EvaluationMode != "submit" || task.SandboxFailed)
+        {
+            taskSolved = null;
+        }
+
+        return new LlmCompletion(feedbackElement.GetString()!, usage, taskSolved);
+    }
+
+    private static string GetStructuredResponseSchema(LlmTask task, bool constrainHintFeedback) =>
+        constrainHintFeedback && task.EvaluationMode == "hint"
+            ? HintStructuredResponseSchema
+            : StructuredResponseSchema;
+
+    private static JsonElement ParseStructuredResponseSchema(LlmTask task)
+    {
+        using var document = JsonDocument.Parse(GetStructuredResponseSchema(task, constrainHintFeedback: true));
+        return document.RootElement.Clone();
     }
 }

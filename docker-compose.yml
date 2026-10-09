@@ -182,6 +182,7 @@ services:
       - "--max-model-len=${VLLM_MAX_MODEL_LEN:-8192}"
       - "--gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.80}"
       - "--max-num-seqs=${VLLM_MAX_NUM_SEQS:-4}"
+      - '--structured-outputs-config={"backend":"xgrammar","disable_any_whitespace":true}'
       - "--host=0.0.0.0"
       - "--port=8080"
     healthcheck:
