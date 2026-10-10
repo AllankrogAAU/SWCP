@@ -1,0 +1,7 @@
+# These vulnerabilities are currently unfixed in the upstream vLLM image.
+# Keep this exception limited to scans of the optional local-llm image.
+CVE-2026-53398
+CVE-2026-63940
+CVE-2026-64535
+CVE-2026-64564
+CVE-2026-74394

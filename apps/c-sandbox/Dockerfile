@@ -1,11 +1,13 @@
 # Minimal runtime image for executing pre-compiled student C binaries.
 # Compilation happens OUTSIDE this container, on the host/build service —
 # this image never sees source code or a compiler, only a binary.
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Remove package manager metadata and anything not needed at runtime,
 # so a shell escape has as little to work with as possible.
-RUN rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
     && useradd -M -u 10001 -s /usr/sbin/nologin sandboxuser
 
 # The binary is bind-mounted in at container start (read-only), not baked

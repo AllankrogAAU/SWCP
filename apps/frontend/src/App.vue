@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed} from 'vue'
+import { ref, computed } from 'vue'
 import CodeEditorBox from './Components/CodeEditorBox.vue'
 import AiFeedbackpanel from './Components/AiFeedbackpanel.vue'
 import AssignmentList from './Components/AssignmentList.vue'

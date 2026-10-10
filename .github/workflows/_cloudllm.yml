@@ -1,0 +1,61 @@
+name: CloudLLM workflow
+
+on:
+    workflow_call:
+        secrets:
+            SONAR_TOKEN:
+                required: true
+
+permissions:
+    contents: read
+
+jobs:
+    build-test:
+        runs-on: ubuntu-latest
+        defaults:
+            run:
+                working-directory: apps/cloudLLM
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+            - uses: actions/setup-dotnet@v5
+            - uses: actions/setup-java@v4
+              with:
+                  distribution: temurin
+                  java-version: '17'
+
+            - name: Restore
+              run: dotnet restore
+            - name: Format check
+              run: dotnet format --verify-no-changes --no-restore
+
+            - name: Install SonarScanner for .NET
+              run: dotnet tool install dotnet-sonarscanner --tool-path "$RUNNER_TEMP/sonar"
+
+            - name: Sonar begin
+              env:
+                  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+              run: >
+                  "$RUNNER_TEMP/sonar/dotnet-sonarscanner" begin
+                  /k:"AllankrogAAU_SWCP_cloudllm"
+                  /o:"magnuselholm"
+                  /d:sonar.token="$SONAR_TOKEN"
+                  /d:sonar.host.url="https://sonarcloud.io"
+                  /d:sonar.cs.opencover.reportsPaths="**/coverage.opencover.xml"
+                  /d:sonar.qualitygate.wait=true
+                  /d:sonar.projectBaseDir="${{ github.workspace }}/apps/cloudLLM"
+
+            - name: Build (compile + analyzers)
+              run: dotnet build --no-restore --no-incremental -c Release
+
+            - name: Unit tests with coverage
+              run: >
+                  dotnet test --no-build -c Release
+                  --collect:"XPlat Code Coverage"
+                  -- DataCollectionRunSettings.DataCollector.Configuration.Format=opencover
+
+            - name: Sonar end
+              env:
+                  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+              run: '"$RUNNER_TEMP/sonar/dotnet-sonarscanner" end /d:sonar.token="$SONAR_TOKEN"'

@@ -1,0 +1,168 @@
+name: Continuous delivery
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-deploy
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish immutable images
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - apiGateway
+          - cloudLLM
+          - c-sandbox
+          - frontend
+          - postgres
+    uses: ./.github/workflows/_image.yml
+    with:
+      service: ${{ matrix.service }}
+      image_tag: ${{ inputs.sha }}
+      push: true
+    permissions:
+      contents: read
+      packages: write
+
+  deploy-staging:
+    name: Deploy and verify staging
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    environment:
+      name: staging
+    outputs:
+      url: ${{ steps.staging-url.outputs.url }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Lowercase registry owner
+        id: owner
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "name=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Write staging environment
+        env:
+          GHCR_OWNER: ${{ steps.owner.outputs.name }}
+          IMAGE_TAG: ${{ inputs.sha }}
+        run: |
+          cat > .env <<EOF
+          GHCR_OWNER=$GHCR_OWNER
+          IMAGE_TAG=$IMAGE_TAG
+          POSTGRES_DB=staging
+          POSTGRES_USER=staging
+          POSTGRES_PASSWORD=staging-password
+          JWT_KEY=staging-only-jwt-key-with-at-least-32-characters
+          PGADMIN_DEFAULT_EMAIL=staging@example.com
+          PGADMIN_DEFAULT_PASSWORD=staging-password
+          LLM_MODEL_PATH=staging-model
+          LLM_MODEL_NAME=staging-model
+          EOF
+
+      - name: Validate staging Compose
+        run: docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile frontend --profile sandbox config --quiet
+
+      - name: Start staging
+        run: docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile frontend --profile sandbox up -d --wait
+
+      - name: Set staging URL
+        id: staging-url
+        run: echo "url=http://127.0.0.1:5174" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test API and frontend
+        run: |
+          curl --fail --retry 12 --retry-delay 5 http://127.0.0.1:5170/health
+          curl --fail --retry 12 --retry-delay 5 http://127.0.0.1:5174/
+
+      - name: Install frontend E2E dependencies
+        working-directory: apps/frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps
+
+      - name: Run frontend E2E against staging
+        working-directory: apps/frontend
+        env:
+          CI: true
+          STAGING_URL: http://127.0.0.1:5174
+        run: npm run test:e2e
+
+      - name: Run ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: http://127.0.0.1:5174
+          fail_action: false
+          allow_issue_writing: false
+
+      - name: Upload staging reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-reports-${{ inputs.sha }}
+          path: |
+            apps/frontend/playwright-report
+            report_html.html
+            report_md.md
+            report_json.json
+          if-no-files-found: warn
+
+      - name: Stop staging
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile frontend --profile sandbox down -v
+
+  mark-staging-verified:
+    name: Mark SHA staging-verified
+    needs: [publish, deploy-staging]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Lowercase registry owner
+        id: owner
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "name=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Add verification tags
+        env:
+          OWNER: ${{ steps.owner.outputs.name }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          for service in apiGateway cloudLLM c-sandbox frontend postgres; do
+            image=$(printf '%s' "$service" | tr '[:upper:]' '[:lower:]')
+            docker buildx imagetools create \
+              --tag "ghcr.io/${OWNER}/swcp-${image}:staging-verified-${SHA}" \
+              "ghcr.io/${OWNER}/swcp-${image}:${SHA}"
+          done
