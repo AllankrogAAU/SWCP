@@ -43,6 +43,16 @@ is at `http://localhost:5050`. NATS client and monitoring ports are 4222 and
 8222. Compose's default `down` preserves database, NATS, and signing-key volumes;
 avoid `docker compose down -v` unless you intend to delete them.
 
+The sandbox runtime is available as an opt-in service for Compose validation:
+
+```powershell
+docker compose --profile sandbox up -d --build
+```
+
+It stays out of the default stack because it is a runtime image for
+pre-compiled binaries rather than a long-running application service. The
+runner applies the isolation settings required for executing submissions.
+
 ## Frontend Development
 
 ```powershell
