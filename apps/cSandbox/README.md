@@ -5,6 +5,13 @@
 docker build -t c-sandbox-runtime:latest .
 ```
 
+Running the app:
+````bash
+docker run --rm -p 8000:8000 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --group-add $(stat -Lc '%g' /var/run/docker.sock) \
+  c-sandbox-service:latest
+  ```
 ## Usage
 
 ```bash

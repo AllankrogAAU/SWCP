@@ -1,0 +1,9 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && apt-get install -y --no-install-recommends gcc libc6-dev cppcheck \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
+    && useradd -M -u 10001 -s /usr/sbin/nologin sandboxuser
+
+USER sandboxuser

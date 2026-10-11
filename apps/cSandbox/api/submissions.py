@@ -17,6 +17,7 @@ class EvaluateResponse(BaseModel):
     status: str
     compile_stdout: str | None = None
     compile_stderr: str | None = None
+    lint_output: str | None = None      
     exit_code: int | None = None
     stdout: str | None = None
     stderr: str | None = None
@@ -33,6 +34,7 @@ def evaluate_submission(req: EvaluateRequest):
         status=result.status.value,
         compile_stdout=result.compile_stdout,
         compile_stderr=result.compile_stderr,
+        lint_output=result.lint_output,
         exit_code=result.exit_code,
         stdout=result.stdout,
         stderr=result.stderr,
