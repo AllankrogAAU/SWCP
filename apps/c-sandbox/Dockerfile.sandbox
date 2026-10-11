@@ -5,7 +5,10 @@ FROM debian:trixie-slim
 # Remove package manager metadata and anything not needed at runtime,
 # so a shell escape has as little to work with as possible.
 RUN apt-get update \
-    && apt-get upgrade -y \
+    && apt-get-install -y --no-install-recommends \
+        gcc \
+        libc6-dev \
+        cppcheck \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
     && useradd -M -u 10001 -s /usr/sbin/nologin sandboxuser \
     && mkdir -p /sandbox/work \
@@ -15,5 +18,4 @@ RUN apt-get update \
 USER sandboxuser
 WORKDIR /sandbox
 
-# The binary is bind-mounted read-only at container start (see runner.py).
-ENTRYPOINT ["/sandbox/bin/prog"]
+CMD ["sleep", "infinity"]

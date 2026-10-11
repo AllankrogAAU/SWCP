@@ -27,11 +27,9 @@ jobs:
             - name: Ruff check
               run: ruff check .
             - name: Mypy check
-              run: mypy runner.py tests
+              run: mypy api sandbox evaluation main.py tests
             - name: Build sandbox runtime image
-              run: docker build -t c-sandbox-runtime:latest .
-            - name: Build test fixture
-              run: gcc -Wall -Wextra tests/fixtures/source_code/testprogram.c -o tests/fixtures/test
+              run: docker build -f Dockerfile.sandbox -t c-sandbox-runtime:latest .
             - name: Unit tests with coverage
               run: python -m pytest -v --cov --cov-report=xml
 
