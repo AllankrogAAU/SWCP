@@ -15,6 +15,7 @@ def lint_submission(sandbox: Sandbox) -> RunResult:
             "cppcheck",
             "--enable=warning,style,performance,portability",
             "--max-configs=1",  # don't explore every #ifdef combination (time/memory DoS)
+            "--suppress=normalCheckLevelMaxBranches",
             "--std=c11",
             "--quiet",
             "--template={line}:{column}: {severity}: {message} [{id}]",
