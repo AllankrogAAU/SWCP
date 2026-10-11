@@ -1,0 +1,97 @@
+name: Promote release
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit SHA previously verified on staging
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify staging marker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      owner: ${{ steps.owner.outputs.name }}
+    steps:
+      - name: Lowercase registry owner
+        id: owner
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "name=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Require staging verification for every image
+        env:
+          OWNER: ${{ steps.owner.outputs.name }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          for service in apiGateway cloudLLM c-sandbox frontend postgres; do
+            image=$(printf '%s' "$service" | tr '[:upper:]' '[:lower:]')
+            docker manifest inspect \
+              "ghcr.io/${OWNER}/swcp-${image}:staging-verified-${SHA}" > /dev/null
+          done
+
+  production:
+    name: Production deployment stub and smoke test
+    needs: verify
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull exact verified images
+        env:
+          OWNER: ${{ needs.verify.outputs.owner }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          for service in apiGateway cloudLLM c-sandbox frontend postgres; do
+            image=$(printf '%s' "$service" | tr '[:upper:]' '[:lower:]')
+            docker pull "ghcr.io/${OWNER}/swcp-${image}:${SHA}"
+          done
+
+      - name: Production deployment stub
+        run: echo "Production target is not selected; verified SHA ${{ inputs.sha }} is ready for deployment."
+
+      - name: Production smoke check
+        run: echo "Production smoke check is pending the production target selection."
+
+  release:
+    name: Create GitHub Release
+    needs: production
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ inputs.sha }}" --target "${{ inputs.sha }}" --title "Release ${{ inputs.sha }}" --notes "Images verified on staging and promoted by workflow dispatch."

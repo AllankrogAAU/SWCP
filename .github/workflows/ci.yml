@@ -1,0 +1,218 @@
+name: CI
+
+on:
+  pull_request:
+  push: 
+    branches: [main]
+  workflow_dispatch:
+
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    permissions: 
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+        
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+  
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      api: ${{ steps.filter.outputs.api }}
+      c-sandbox: ${{ steps.filter.outputs.c-sandbox }}
+      cloudllm: ${{ steps.filter.outputs.cloudllm }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      postgres: ${{ steps.filter.outputs.postgres }}
+      images: ${{ steps.images.outputs.matrix }}
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            frontend: 'apps/frontend/**'  
+            api: 'apps/apiGateway/**'
+            cloudllm: 'apps/cloudLLM/**'
+            c-sandbox: 'apps/c-sandbox/**'
+            postgres: 'apps/postgres/**'
+            docker:
+              - '**/Dockerfile'
+              - '**/.dockerignore'
+              - 'docker-compose.yml'
+              - 'docker-compose.staging.yml'
+              - '.github/workflows/ci.yml'
+      - name: Build image matrix from changed services
+        id: images
+        env:
+          API_CHANGED: ${{ steps.filter.outputs.api }}
+          CLOUDLLM_CHANGED: ${{ steps.filter.outputs.cloudllm }}
+          C_SANDBOX_CHANGED: ${{ steps.filter.outputs.c-sandbox }}
+          FRONTEND_CHANGED: ${{ steps.filter.outputs.frontend }}
+          POSTGRES_CHANGED: ${{ steps.filter.outputs.postgres }}
+        run: |
+          matrix=$(jq -cn \
+            --arg api "$API_CHANGED" \
+            --arg cloudllm "$CLOUDLLM_CHANGED" \
+            --arg c_sandbox "$C_SANDBOX_CHANGED" \
+            --arg frontend "$FRONTEND_CHANGED" \
+            --arg postgres "$POSTGRES_CHANGED" \
+            '[
+              {name: "apiGateway", changed: $api},
+              {name: "cloudLLM", changed: $cloudllm},
+              {name: "c-sandbox", changed: $c_sandbox},
+              {name: "frontend", changed: $frontend},
+              {name: "postgres", changed: $postgres}
+            ] | map(select(.changed == "true") | .name)')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  api:
+    name: API gateway
+    needs: changes
+    secrets: inherit
+    if: needs.changes.outputs.api == 'true'
+    uses: ./.github/workflows/_api.yml
+
+  c-sandbox:
+    name: Sandbox service
+    needs: changes
+    secrets: inherit
+    if: needs.changes.outputs.c-sandbox == 'true'
+    uses: ./.github/workflows/_c-sandbox.yml
+    permissions:
+      contents: read
+
+  cloudllm:
+    name: CloudLLM service
+    needs: changes
+    secrets: inherit
+    if: needs.changes.outputs.cloudllm == 'true'
+    uses: ./.github/workflows/_cloudllm.yml
+    permissions:
+      contents: read
+    
+  frontend:
+    name: Frontend service
+    needs: changes
+    secrets: inherit
+    if: needs.changes.outputs.frontend == 'true'
+    uses: ./.github/workflows/_frontend.yml
+    permissions:
+      contents: read
+
+  images:
+    needs: changes
+    if: needs.changes.outputs.images != '[]'
+    strategy:
+      fail-fast: false
+      matrix: 
+        service: ${{ fromJSON(needs.changes.outputs.images) }}
+    uses: ./.github/workflows/_image.yml
+    with:
+      service: ${{ matrix.service }}
+      image_tag: ci
+      push: false
+    permissions:
+      contents: read
+      packages: read
+
+  deploy-config:
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - name: Validate docker-compose.yml
+      run: |
+        cat > .env <<'EOF'
+        POSTGRES_DB=ci
+        POSTGRES_USER=ci
+        POSTGRES_PASSWORD=ci-password
+        JWT_KEY=ci-only-jwt-key
+        PGADMIN_DEFAULT_EMAIL=ci@example.com
+        PGADMIN_DEFAULT_PASSWORD=ci-password
+        LLM_MODEL_PATH=ci-model
+        LLM_MODEL_NAME=ci-model
+        EOF
+        docker compose config --quiet
+    - name: Scan Dockerfiles for misconfiguration
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        scan-type: config
+        scan-ref: . 
+        severity: CRITICAL
+        exit-code: '1'
+
+  integration:
+    name: Compose integration smoke test
+    needs: changes
+    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.api == 'true' || needs.changes.outputs.cloudllm == 'true' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.c-sandbox == 'true' || needs.changes.outputs.postgres == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Write CI environment
+        run: |
+          cat > .env <<'EOF'
+          POSTGRES_DB=ci
+          POSTGRES_USER=ci
+          POSTGRES_PASSWORD=ci-password
+          JWT_KEY=ci-only-jwt-key-with-at-least-32-characters
+          PGADMIN_DEFAULT_EMAIL=ci@example.com
+          PGADMIN_DEFAULT_PASSWORD=ci-password
+          LLM_MODEL_PATH=ci-model
+          LLM_MODEL_NAME=ci-model
+          EOF
+      - name: Start deterministic Compose stack
+        run: docker compose --profile frontend --profile sandbox up --build -d --wait
+      - name: Check API and frontend
+        run: |
+          curl --fail --retry 12 --retry-delay 5 http://127.0.0.1:5170/health
+          curl --fail --retry 12 --retry-delay 5 http://127.0.0.1:5174/
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Stop Compose stack
+        if: always()
+        run: docker compose --profile frontend --profile sandbox down -v
+
+
+  ci-gate:
+    name: CI gate
+    needs: [secret-scan, changes, c-sandbox, cloudllm, frontend, images, deploy-config, integration, api]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any job failed or was cancelled
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - run: echo "All required jobs passed or were skipped."
+
+  delivery:
+    name: Continuous delivery
+    needs: ci-gate
+    if: >-
+      ${{ always() && needs.ci-gate.result == 'success' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    uses: ./.github/workflows/cd.yml
+    with:
+      sha: ${{ github.sha }}
+    permissions:
+      contents: read
+      packages: write

@@ -1,9 +1,19 @@
-FROM debian:bookworm-slim
+# Minimal runtime image for executing pre-compiled student C binaries.
+# Compilation and static analysis happen outside this container.
+FROM debian:trixie-slim
 
+# Remove package manager metadata and anything not needed at runtime,
+# so a shell escape has as little to work with as possible.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libc6-dev \
-    && apt-get install -y --no-install-recommends gcc libc6-dev cppcheck \
+    && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
-    && useradd -M -u 10001 -s /usr/sbin/nologin sandboxuser
+    && useradd -M -u 10001 -s /usr/sbin/nologin sandboxuser \
+    && mkdir -p /sandbox/work \
+    && chown sandboxuser:sandboxuser /sandbox/work
 
+# Run as an unprivileged user.
 USER sandboxuser
+WORKDIR /sandbox
+
+# The binary is bind-mounted read-only at container start (see runner.py).
+ENTRYPOINT ["/sandbox/bin/prog"]
