@@ -5,7 +5,7 @@ FROM debian:trixie-slim
 # Remove package manager metadata and anything not needed at runtime,
 # so a shell escape has as little to work with as possible.
 RUN apt-get update \
-    && apt-get-install -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
         gcc \
         libc6-dev \
         cppcheck \
