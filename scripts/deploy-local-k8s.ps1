@@ -75,6 +75,28 @@ foreach ($manifest in $manifests) {
     Invoke-Native kubectl @('apply', '-f', $manifest)
 }
 
+$envFile = Join-Path $root '.env'
+if (Test-Path $envFile) {
+    $secretData = @{}
+    foreach ($line in Get-Content $envFile) {
+        if ($line -match '^\s*AzureAIFoundry_*Models_*([A-Za-z0-9]+)_*ApiKey\s*=\s*(.+?)\s*$') {
+            $secretData["AzureAIFoundry__Models__$($Matches[1])__ApiKey"] = $Matches[2]
+        }
+    }
+    if ($secretData.Count -gt 0) {
+        $patch = @{ stringData = $secretData } | ConvertTo-Json -Compress
+        $patchFile = Join-Path ([System.IO.Path]::GetTempPath()) "llm-secret-$([guid]::NewGuid()).json"
+        try {
+            [System.IO.File]::WriteAllText($patchFile, $patch)
+            Invoke-Native kubectl @('patch', 'secret', 'llm-worker-secrets', '-n', 'swcp', '--type=merge', "--patch-file=$patchFile")
+        }
+        finally {
+            Remove-Item -Force -ErrorAction SilentlyContinue $patchFile
+        }
+        Invoke-Native kubectl @('rollout', 'restart', 'deployment/llm-worker', '-n', 'swcp')
+    }
+}
+
 $ErrorActionPreference = 'Continue'
 & kubectl rollout status deployment/c-sandbox -n swcp --timeout=120s
 $rolloutExit = $LASTEXITCODE

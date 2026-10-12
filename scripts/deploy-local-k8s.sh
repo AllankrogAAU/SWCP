@@ -46,6 +46,20 @@ kubectl apply -f k8s/03-nats.yaml
 kubectl apply -f k8s/04-core-api.yaml
 kubectl apply -f k8s/
 
+if [ -f "$ROOT/.env" ]; then
+  PATCH_ENTRIES=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    if [[ "$line" =~ ^[[:space:]]*AzureAIFoundry_*Models_*([A-Za-z0-9]+)_*ApiKey[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+      PATCH_ENTRIES+="\"AzureAIFoundry__Models__${BASH_REMATCH[1]}__ApiKey\":\"${BASH_REMATCH[2]}\","
+    fi
+  done < "$ROOT/.env"
+  if [ -n "$PATCH_ENTRIES" ]; then
+    kubectl patch secret llm-worker-secrets -n swcp --type=merge -p "{\"stringData\":{${PATCH_ENTRIES%,}}}"
+    kubectl rollout restart deployment/llm-worker -n swcp
+  fi
+fi
+
 kubectl rollout status deployment/c-sandbox -n swcp --timeout=120s || {
   echo "c-sandbox rollout did not complete within 120s" >&2
   kubectl get pods -n swcp -l app.kubernetes.io/name=c-sandbox >&2 || true

@@ -67,7 +67,7 @@ await using (var scope = app.Services.CreateAsyncScope())
 {
     var database = scope.ServiceProvider.GetRequiredService<CoreDbContext>();
     await database.Database.MigrateAsync();
-    if (builder.Environment.IsDevelopment())
+    if (builder.Environment.IsDevelopment() || builder.Configuration.GetValue<bool>("SeedSampleAssignments"))
     {
         await DevUserSeeder.SeedSampleAssignmentAsync(scope.ServiceProvider);
     }

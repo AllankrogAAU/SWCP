@@ -11,6 +11,11 @@ import '@mdi/font/css/materialdesignicons.css'
 import * as components from 'vuetify/components'
 import * as directives from 'vuetify/directives'
 import { createVuetify } from 'vuetify'
+import EditorWorker from 'monaco-editor/editor/editor.worker?worker'
+
+self.MonacoEnvironment = {
+  getWorker: () => new EditorWorker(),
+}
 
 const vuetify = createVuetify({
   components,
