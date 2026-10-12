@@ -89,7 +89,8 @@ if (app.Environment.IsDevelopment())
     app.MapGet("/", () => Results.Redirect("/scalar/v1"));
 }
 
-app.UseHttpsRedirection();
+app.MapGet("/health", () => Results.Ok());
+
 app.UseCors();
 app.UseWebSockets();
 
