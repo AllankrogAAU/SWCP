@@ -1,20 +1,17 @@
-# Minimal runtime image for executing pre-compiled student C binaries.
-# Compilation happens OUTSIDE this container, on the host/build service —
-# this image never sees source code or a compiler, only a binary.
-FROM debian:trixie-slim
+# Image for the c-sandbox *service* (FastAPI). 
+FROM python:3.12-slim
 
-# Remove package manager metadata and anything not needed at runtime,
-# so a shell escape has as little to work with as possible.
-RUN apt-get update \
-    && apt-get upgrade -y \
-    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
-    && useradd -M -u 10001 -s /usr/sbin/nologin sandboxuser
+COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 
-# The binary is bind-mounted in at container start (read-only), not baked
-# into the image — see runner.py. /sandbox/work is the only writable path.
-RUN mkdir -p /sandbox/work && chown sandboxuser:sandboxuser /sandbox/work
+WORKDIR /app
 
-USER sandboxuser
-WORKDIR /sandbox
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-ENTRYPOINT ["/sandbox/bin/prog"]
+COPY . .
+
+RUN useradd -M -u 10002 -s /usr/sbin/nologin app
+USER app
+
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -9,13 +9,13 @@
   ],
   "syscalls": [
     {
-      "comment": "Docker's default unconditional allow-list, trimmed: networking syscalls removed (redundant under --network none) and ptrace/process_vm_* removed explicitly. Everything requiring a capability (mount, clone with CAP_SYS_ADMIN, bpf, reboot, init_module, etc.) is intentionally left OUT of this file rather than re-added, since --cap-drop ALL already denies those at the kernel capability check regardless of what seccomp allows.",
+      "comment": "Docker's default unconditional allow-list, trimmed of capability-gated syscalls (--cap-drop ALL already blocks those at the kernel level).",
       "names": [
         "access", "adjtimex", "alarm", "brk",
         "cachestat", "capget", "capset", "chdir", "chmod", "chown", "chown32",
         "clock_adjtime", "clock_adjtime64", "clock_getres", "clock_getres_time64",
         "clock_gettime", "clock_gettime64", "clock_nanosleep", "clock_nanosleep_time64",
-        "close", "close_range", "copy_file_range", "creat",
+        "close", "close_range", "clone3", "copy_file_range", "creat",
         "dup", "dup2", "dup3",
         "epoll_create", "epoll_create1", "epoll_ctl", "epoll_ctl_old",
         "epoll_pwait", "epoll_pwait2", "epoll_wait", "epoll_wait_old",
