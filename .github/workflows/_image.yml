@@ -55,7 +55,8 @@ jobs:
       - name: Build image
         uses: docker/build-push-action@v6
         with:
-          context: apps/${{ inputs.service }}
+          context: ${{ contains(fromJSON('["apiGateway","llmWorker"]'), inputs.service) && '.' || format('apps/{0}', inputs.service) }}
+          file: apps/${{ inputs.service }}/Dockerfile
           push: ${{ inputs.push }}
           load: ${{ !inputs.push }}
           tags: |

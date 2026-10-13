@@ -26,7 +26,9 @@ import {
 const assignments = ref<Assignment[]>([])
 const solvedByAssignmentId = ref<Record<string, boolean | null>>({})
 const selectedId = ref('')
-const selected = computed(() => assignments.value.find(assignment => assignment.id === selectedId.value))
+const selected = computed(() =>
+  assignments.value.find((assignment) => assignment.id === selectedId.value),
+)
 const code = ref('#include <stdio.h>\n\nint main(void) {\n    return 0;\n}')
 const feedback = ref('')
 const busyAction = ref<'hint' | 'run' | 'submit' | null>(null)
@@ -58,7 +60,10 @@ function selectAssignment(id: string) {
 }
 
 async function loadAssignments() {
-  const [assignmentRows, submissions] = await Promise.all([getAssignments(), getSubmissionHistory()])
+  const [assignmentRows, submissions] = await Promise.all([
+    getAssignments(),
+    getSubmissionHistory(),
+  ])
   assignments.value = assignmentRows
   const latestSubmitByAssignment: Record<string, boolean | null> = {}
   for (const submission of submissions) {
@@ -67,7 +72,7 @@ async function loadAssignments() {
     }
   }
   solvedByAssignmentId.value = latestSubmitByAssignment
-  if (!assignments.value.some(assignment => assignment.id === selectedId.value)) {
+  if (!assignments.value.some((assignment) => assignment.id === selectedId.value)) {
     selectedId.value = assignments.value[0]?.id ?? ''
   }
 }
@@ -126,9 +131,10 @@ async function pollSubmission(id: string, generation: number) {
         if (result.action === 'submit') {
           solvedByAssignmentId.value[result.assignmentId] = result.taskSolved
         }
-        feedback.value = result.action === 'run'
-          ? ''
-          : result.llmFeedback ?? JSON.stringify(result.sandboxOutput, null, 2)
+        feedback.value =
+          result.action === 'run'
+            ? ''
+            : (result.llmFeedback ?? JSON.stringify(result.sandboxOutput, null, 2))
         terminalOutput.value = formatTerminalOutput(result.sandboxOutput)
         progress.value = 'Completed'
         busyAction.value = null
@@ -152,18 +158,22 @@ async function pollSubmission(id: string, generation: number) {
       return
     }
 
-    await new Promise(resolve => window.setTimeout(resolve, 2000))
+    await new Promise((resolve) => window.setTimeout(resolve, 2000))
   }
 }
 
-function trackSubmission(accepted: { submissionId: string; status: SubmissionStatus }, action: SubmissionAction) {
+function trackSubmission(
+  accepted: { submissionId: string; status: SubmissionStatus },
+  action: SubmissionAction,
+) {
   submissionId.value = accepted.submissionId
   status.value = accepted.status
-  progress.value = action === 'run'
-    ? 'Queued for sandbox run'
-    : action === 'hint'
-      ? 'Queued for a hint'
-      : 'Queued for sandbox evaluation'
+  progress.value =
+    action === 'run'
+      ? 'Queued for sandbox run'
+      : action === 'hint'
+        ? 'Queued for a hint'
+        : 'Queued for sandbox evaluation'
   reconnectAttempts = 0
   const generation = ++pollGeneration
   socket?.close()
@@ -220,7 +230,11 @@ async function runCode() {
 
 function verdictIcon(assignmentId: string): string {
   const verdict = solvedByAssignmentId.value[assignmentId]
-  return verdict === true ? 'mdi-check-circle' : verdict === false ? 'mdi-close-circle' : 'mdi-circle-outline'
+  return verdict === true
+    ? 'mdi-check-circle'
+    : verdict === false
+      ? 'mdi-close-circle'
+      : 'mdi-circle-outline'
 }
 
 function verdictColor(assignmentId: string): string {
@@ -230,21 +244,28 @@ function verdictColor(assignmentId: string): string {
 
 function verdictLabel(assignmentId: string): string {
   const verdict = solvedByAssignmentId.value[assignmentId]
-  return verdict === true ? 'Task judged correctly solved' : verdict === false ? 'Task judged not solved' : 'Task has not been judged yet'
+  return verdict === true
+    ? 'Task judged correctly solved'
+    : verdict === false
+      ? 'Task judged not solved'
+      : 'Task has not been judged yet'
 }
 
 function formatTerminalOutput(output: unknown): string {
-  if (!output || typeof output !== 'object') return output ? JSON.stringify(output, null, 2) : 'No terminal output.'
+  if (!output || typeof output !== 'object')
+    return output ? JSON.stringify(output, null, 2) : 'No terminal output.'
   const result = output as {
     compilation?: { stdout?: string; stderr?: string }
     testResults?: Array<{ stdout?: string; stderr?: string; exitCode?: number | null }>
   }
-  const lines = [result.compilation?.stdout, result.compilation?.stderr]
-    .filter((line): line is string => Boolean(line))
+  const lines = [result.compilation?.stdout, result.compilation?.stderr].filter(
+    (line): line is string => Boolean(line),
+  )
   for (const test of result.testResults ?? []) {
     if (test.stdout) lines.push(test.stdout)
     if (test.stderr) lines.push(test.stderr)
-    if (test.exitCode !== null && test.exitCode !== undefined) lines.push(`Exit code: ${test.exitCode}`)
+    if (test.exitCode !== null && test.exitCode !== undefined)
+      lines.push(`Exit code: ${test.exitCode}`)
   }
   return lines.join('\n') || JSON.stringify(output, null, 2)
 }
@@ -282,7 +303,9 @@ onBeforeUnmount(() => {
               :minlength="authMode === 'register' ? 5 : undefined"
               required
             />
-            <v-alert v-if="authError" type="error" variant="tonal" class="mb-3">{{ authError }}</v-alert>
+            <v-alert v-if="authError" type="error" variant="tonal" class="mb-3">{{
+              authError
+            }}</v-alert>
             <div class="d-flex ga-2">
               <v-btn type="submit" color="primary" :loading="authLoading">
                 {{ authMode === 'login' ? 'Sign in' : 'Create student account' }}
@@ -327,7 +350,10 @@ onBeforeUnmount(() => {
 
               <v-select
                 v-model="backend"
-                :items="[{ title: 'Azure AI Foundry', value: 'azure' }, { title: 'Local vLLM', value: 'local' }]"
+                :items="[
+                  { title: 'Azure AI Foundry', value: 'azure' },
+                  { title: 'Local vLLM', value: 'local' },
+                ]"
                 label="Feedback model"
                 item-title="title"
                 item-value="value"

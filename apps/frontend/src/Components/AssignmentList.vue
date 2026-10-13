@@ -2,12 +2,12 @@
 import type { Assignment } from '../services/api'
 
 defineProps<{
-    assignments: Assignment[]
-    selectedId: string
+  assignments: Assignment[]
+  selectedId: string
 }>()
 
 defineEmits<{
-    select: [id: string]
+  select: [id: string]
 }>()
 </script>
 

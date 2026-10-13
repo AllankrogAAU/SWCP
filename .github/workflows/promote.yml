@@ -43,7 +43,7 @@ jobs:
           OWNER: ${{ steps.owner.outputs.name }}
           SHA: ${{ inputs.sha }}
         run: |
-          for service in apiGateway cloudLLM c-sandbox frontend postgres; do
+          for service in apiGateway llmWorker cSandbox frontend postgres; do
             image=$(printf '%s' "$service" | tr '[:upper:]' '[:lower:]')
             docker manifest inspect \
               "ghcr.io/${OWNER}/swcp-${image}:staging-verified-${SHA}" > /dev/null
@@ -73,7 +73,7 @@ jobs:
           OWNER: ${{ needs.verify.outputs.owner }}
           SHA: ${{ inputs.sha }}
         run: |
-          for service in apiGateway cloudLLM c-sandbox frontend postgres; do
+          for service in apiGateway llmWorker cSandbox frontend postgres; do
             image=$(printf '%s' "$service" | tr '[:upper:]' '[:lower:]')
             docker pull "ghcr.io/${OWNER}/swcp-${image}:${SHA}"
           done

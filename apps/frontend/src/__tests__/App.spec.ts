@@ -4,18 +4,18 @@ import { flushPromises } from '@vue/test-utils'
 import App from '../App.vue'
 
 const api = vi.hoisted(() => ({
-  clearAccessToken: vi.fn(),
-  getAccessToken: vi.fn(),
-  getAssignments: vi.fn(),
-  getSubmissionHistory: vi.fn(),
-  getSubmission: vi.fn(),
-  login: vi.fn(),
-  openSubmissionSocket: vi.fn(),
-  register: vi.fn(),
-  setAccessToken: vi.fn(),
-  submitSource: vi.fn(),
-  requestHint: vi.fn(),
-  runSource: vi.fn(),
+  clearAccessToken: vi.fn<(...args: unknown[]) => unknown>(),
+  getAccessToken: vi.fn<(...args: unknown[]) => unknown>(),
+  getAssignments: vi.fn<(...args: unknown[]) => unknown>(),
+  getSubmissionHistory: vi.fn<(...args: unknown[]) => unknown>(),
+  getSubmission: vi.fn<(...args: unknown[]) => unknown>(),
+  login: vi.fn<(...args: unknown[]) => unknown>(),
+  openSubmissionSocket: vi.fn<(...args: unknown[]) => unknown>(),
+  register: vi.fn<(...args: unknown[]) => unknown>(),
+  setAccessToken: vi.fn<(...args: unknown[]) => unknown>(),
+  submitSource: vi.fn<(...args: unknown[]) => unknown>(),
+  requestHint: vi.fn<(...args: unknown[]) => unknown>(),
+  runSource: vi.fn<(...args: unknown[]) => unknown>(),
 }))
 
 vi.mock('../services/api', () => api)
@@ -24,7 +24,8 @@ vi.mock('../Components/CodeEditorBox.vue', () => ({
   default: {
     props: ['busyAction', 'terminalOutput'],
     emits: ['submit', 'hint', 'run'],
-    template: '<div><button data-test="submit" :disabled="busyAction !== null" @click="$emit(\'submit\')">Submit</button><button data-test="hint" :disabled="busyAction !== null" @click="$emit(\'hint\')">Hint</button><button data-test="run" :disabled="busyAction !== null" @click="$emit(\'run\')">Run</button><pre>{{ terminalOutput }}</pre></div>',
+    template:
+      '<div><button data-test="submit" :disabled="busyAction !== null" @click="$emit(\'submit\')">Submit</button><button data-test="hint" :disabled="busyAction !== null" @click="$emit(\'hint\')">Hint</button><button data-test="run" :disabled="busyAction !== null" @click="$emit(\'run\')">Run</button><pre>{{ terminalOutput }}</pre></div>',
   },
 }))
 
@@ -52,8 +53,8 @@ describe('App', () => {
       errorMessage: null,
     })
     api.openSubmissionSocket.mockReturnValue({
-      close: vi.fn(),
-      addEventListener: vi.fn(),
+      close: vi.fn<(...args: unknown[]) => unknown>(),
+      addEventListener: vi.fn<(...args: unknown[]) => unknown>(),
     })
   })
 
@@ -78,7 +79,11 @@ describe('App', () => {
     await flushPromises()
 
     expect(api.submitSource).toHaveBeenCalledWith('assignment-id', expect.any(String), 'azure')
-    expect(api.openSubmissionSocket).toHaveBeenCalledWith('submission-id', expect.any(Function), expect.any(Function))
+    expect(api.openSubmissionSocket).toHaveBeenCalledWith(
+      'submission-id',
+      expect.any(Function),
+      expect.any(Function),
+    )
     expect(api.getSubmission).toHaveBeenCalledWith('submission-id')
     expect(wrapper.text()).toContain('Looks good.')
     expect(wrapper.html()).toContain('Task judged correctly solved')
@@ -90,8 +95,14 @@ describe('App', () => {
     await flushPromises()
 
     api.getSubmission.mockResolvedValueOnce({
-      submissionId: 'hint-id', assignmentId: 'assignment-id', action: 'hint', status: 'COMPLETED',
-      llmFeedback: 'Try checking the loop condition.', sandboxOutput: null, taskSolved: null, errorMessage: null,
+      submissionId: 'hint-id',
+      assignmentId: 'assignment-id',
+      action: 'hint',
+      status: 'COMPLETED',
+      llmFeedback: 'Try checking the loop condition.',
+      sandboxOutput: null,
+      taskSolved: null,
+      errorMessage: null,
     })
     await wrapper.get('[data-test="hint"]').trigger('click')
     await flushPromises()
@@ -100,10 +111,14 @@ describe('App', () => {
     expect(wrapper.text()).toContain('Try checking the loop condition.')
 
     api.getSubmission.mockResolvedValueOnce({
-      submissionId: 'run-id', assignmentId: 'assignment-id', action: 'run', status: 'COMPLETED',
+      submissionId: 'run-id',
+      assignmentId: 'assignment-id',
+      action: 'run',
+      status: 'COMPLETED',
       llmFeedback: 'This must not be displayed.',
       sandboxOutput: { compilation: { stdout: 'program output', stderr: '' }, testResults: [] },
-      taskSolved: null, errorMessage: null,
+      taskSolved: null,
+      errorMessage: null,
     })
     await wrapper.get('[data-test="run"]').trigger('click')
     await flushPromises()
@@ -115,10 +130,16 @@ describe('App', () => {
   })
 
   it('loads the latest Submit verdict from submission history', async () => {
-    api.getSubmissionHistory.mockResolvedValue([{
-      submissionId: 'prior-submit', assignmentId: 'assignment-id', action: 'submit',
-      status: 'COMPLETED', taskSolved: false, createdAtUtc: '2026-10-08T20:00:00Z',
-    }])
+    api.getSubmissionHistory.mockResolvedValue([
+      {
+        submissionId: 'prior-submit',
+        assignmentId: 'assignment-id',
+        action: 'submit',
+        status: 'COMPLETED',
+        taskSolved: false,
+        createdAtUtc: '2026-10-08T20:00:00Z',
+      },
+    ])
     const wrapper = mount(App)
     await wrapper.find('v-form').trigger('submit')
     await flushPromises()

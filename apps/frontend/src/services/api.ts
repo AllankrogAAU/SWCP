@@ -165,7 +165,7 @@ export function openSubmissionSocket(
 
   const protocols = token ? ['swcp', `bearer.${token}`] : ['swcp']
   const socket = new WebSocket(url, protocols)
-  socket.addEventListener('message', event => {
+  socket.addEventListener('message', (event) => {
     try {
       onNotification(JSON.parse(String(event.data)) as SubmissionNotification)
     } catch {

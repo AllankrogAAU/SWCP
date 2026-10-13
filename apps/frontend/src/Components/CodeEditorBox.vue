@@ -20,14 +20,29 @@ defineEmits<{ submit: []; hint: []; run: [] }>()
       </v-card-text>
 
       <v-card-actions class="action-row">
-        <v-btn variant="outlined" :loading="busyAction === 'hint'" :disabled="busyAction !== null" @click="$emit('hint')">
+        <v-btn
+          variant="outlined"
+          :loading="busyAction === 'hint'"
+          :disabled="busyAction !== null"
+          @click="$emit('hint')"
+        >
           Hint
         </v-btn>
-        <v-btn variant="outlined" :loading="busyAction === 'run'" :disabled="busyAction !== null" @click="$emit('run')">
+        <v-btn
+          variant="outlined"
+          :loading="busyAction === 'run'"
+          :disabled="busyAction !== null"
+          @click="$emit('run')"
+        >
           Run
         </v-btn>
         <v-spacer />
-        <v-btn variant="outlined" :loading="busyAction === 'submit'" :disabled="busyAction !== null" @click="$emit('submit')">
+        <v-btn
+          variant="outlined"
+          :loading="busyAction === 'submit'"
+          :disabled="busyAction !== null"
+          @click="$emit('submit')"
+        >
           Submit
         </v-btn>
       </v-card-actions>

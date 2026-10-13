@@ -163,7 +163,7 @@ services:
   c-sandbox:
     profiles: [sandbox]
     build:
-      context: ./apps/c-sandbox
+      context: ./apps/cSandbox
       dockerfile: Dockerfile
     image: swcp/c-sandbox:latest
     entrypoint: ["/bin/sleep"]

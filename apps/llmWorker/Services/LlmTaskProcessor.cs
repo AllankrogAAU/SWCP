@@ -24,8 +24,8 @@ public sealed class RetryableLlmException(TimeSpan retryDelay, Exception innerEx
 
 public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFactory httpClientFactory)
 {
-        private const string StructuredResponseFormatName = "submission_feedback";
-        private const string StructuredResponseSchema = """
+    private const string StructuredResponseFormatName = "submission_feedback";
+    private const string StructuredResponseSchema = """
                 {
                     "type": "object",
                     "properties": {
@@ -36,7 +36,7 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                     "additionalProperties": false
                 }
                 """;
-        private const string HintStructuredResponseSchema = """
+    private const string HintStructuredResponseSchema = """
                 {
                     "type": "object",
                     "properties": {
@@ -84,9 +84,9 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                 BinaryData.FromString(GetStructuredResponseSchema(task, constrainHintFeedback: false)),
                 jsonSchemaIsStrict: true)
         };
-    #pragma warning disable AOAI001
+#pragma warning disable AOAI001
         options.SetNewMaxCompletionTokensPropertyEnabled();
-    #pragma warning restore AOAI001
+#pragma warning restore AOAI001
         ChatMessage[] messages =
         [
             new SystemChatMessage(task.SystemPrompt),

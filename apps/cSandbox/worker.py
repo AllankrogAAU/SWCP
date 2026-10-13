@@ -178,7 +178,13 @@ async def handle_message(message, connection, jetstream) -> None:
             )
             failed_result = SandboxResult(
                 submissionId=task.submissionId,
-                compilation=CompilationResult(False, "", error_text, None, None),
+                compilation=CompilationResult(
+                    success=False,
+                    stdout="",
+                    stderr=error_text,
+                    exitCode=None,
+                    durationMilliseconds=None,
+                ),
                 staticAnalysis=[],
                 testResults=[],
                 errorClassification=f"worker-error:{error_text}",
