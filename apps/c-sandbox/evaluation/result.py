@@ -1,11 +1,3 @@
-"""
-What an evaluation produces, independent of how the API chooses to
-serialize it. Keeping this separate from the Pydantic response model
-in api/submissions.py means evaluation logic doesn't depend on FastAPI
-at all -- useful once this gets called from a queue worker instead of
-an HTTP handler, which has no Pydantic response model to fill in.
-"""
-
 from dataclasses import dataclass
 from enum import Enum
 
@@ -24,9 +16,16 @@ class EvaluationResult:
     status: EvaluationStatus
     compile_stdout: str | None = None
     compile_stderr: str | None = None
+    lint_output: str | None = None      # new
     exit_code: int | None = None
     stdout: str | None = None
     stderr: str | None = None
+
+
+def _lint_text(lint_result: RunResult) -> str:
+    if lint_result.timed_out:
+        return "lint timed out"
+    return lint_result.stderr
 
 
 def from_compile_failure(compile_result: RunResult) -> EvaluationResult:
@@ -42,12 +41,13 @@ def from_compile_failure(compile_result: RunResult) -> EvaluationResult:
     )
 
 
-def from_run(compile_result: RunResult, run_result: RunResult) -> EvaluationResult:
+def from_run(compile_result: RunResult, run_result: RunResult, lint_result: RunResult) -> EvaluationResult:
     status = EvaluationStatus.RUN_TIMEOUT if run_result.timed_out else EvaluationStatus.SUCCESS
     return EvaluationResult(
         status=status,
         compile_stdout=compile_result.stdout,
         compile_stderr=compile_result.stderr,
+        lint_output=_lint_text(lint_result),
         exit_code=run_result.exit_code,
         stdout=run_result.stdout,
         stderr=run_result.stderr,
