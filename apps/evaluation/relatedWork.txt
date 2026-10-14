@@ -16,9 +16,20 @@ Misunderstanding for Better Code Generation
 
 https://arxiv.org/pdf/2309.16120
 
+{
 Evaluating Language Models for Generating and Judging Programming Feedback
 
 https://arxiv.org/pdf/2407.04873
+
+Grading criteria:
+EA 
+ES 
+EC 
+FA 
+FS 
+FC 
+
+}
 
 Evaluating the Application of Large Language Models to Generate Feedback in Programming Education
 
@@ -29,3 +40,6 @@ SWE-BENCH: CAN LANGUAGE MODELS RESOLVE
 REAL-WORLD GITHUB ISSUES?
 
 https://www.swebench.com/original.html
+
+Studying the effect of AI Code Generators on Supporting Novice Learners in Introductory Programming
+https://arxiv.org/pdf/2302.07427

@@ -72,11 +72,12 @@ Does the LLM avoid reporting non-existent issues (false positives/hallucinations
 
  Metric                         
  ------------------------------ 
- Root Cause Identification Rate 
- Logical Error Detection Rate   
+ Root Cause Identification Rate, llms evne til at finde den rigtige fejl på den rigtige linje som bliver påpeget fra compileren
+
+ Logical Error Detection Rate, Evne til at finde logiske fejl
  Error Explanation Accuracy     
- Fix Suggestion Accurac
- False Positive Rate            
+ Fix Suggestion Accuracy
+ False Positive Rate, hvor mange gange den siger det modsatte eller noget tredje af den faktiske situation            
  Cost                           
  Consistency                    
  Latency                        
