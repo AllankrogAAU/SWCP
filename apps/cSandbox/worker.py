@@ -5,6 +5,7 @@ import os
 import random
 import socket
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -15,12 +16,17 @@ from pydantic import ValidationError
 
 from contracts import CompilationResult, SandboxResult, SandboxTask, SandboxTestResult
 from evaluation.evaluator import evaluate
+from sandbox.interface import Limits
+from sandbox.k8s_pod import KubeSandboxProvider, PodConfig
 
 NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
 TASK_STREAM = "SANDBOX_TASKS"
 TASK_SUBJECT = "sandbox.tasks"
 TASK_DURABLE = "c-sandbox-workers"
 RESULT_SUBJECT = "sandbox.results"
+MAX_CONCURRENT = int(os.getenv("SANDBOX_MAX_CONCURRENT", "8"))
+POOL_SIZE = int(os.getenv("SANDBOX_POOL_SIZE", "4"))
+MAX_ACK_PENDING = int(os.getenv("SANDBOX_MAX_ACK_PENDING", "512"))
 
 class JsonLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -52,8 +58,8 @@ for handler in logging.getLogger().handlers:
 logger = logging.getLogger("c-sandbox-worker")
 
 
-def evaluate_task(task: SandboxTask) -> SandboxResult:
-    result = evaluate(task.source)
+def evaluate_task(task: SandboxTask, provider) -> SandboxResult:
+    result = evaluate(task.source, provider, Limits())
     status = result.status.value
     compiled = status not in {"compile_error", "compile_timeout"}
     test_results = []
@@ -65,7 +71,7 @@ def evaluate_task(task: SandboxTask) -> SandboxResult:
                 stdout=result.stdout or "",
                 stderr=result.stderr or "",
                 exitCode=result.exit_code,
-                durationMilliseconds=None,
+                durationMilliseconds=result.run_ms,
                 memoryConsumedMegabytes=None,
             )
         )
@@ -83,7 +89,7 @@ def evaluate_task(task: SandboxTask) -> SandboxResult:
             stdout=result.compile_stdout or "",
             stderr=result.compile_stderr or "",
             exitCode=None if compiled else 1,
-            durationMilliseconds=None,
+            durationMilliseconds=result.compile_ms,
         ),
         staticAnalysis=[],
         testResults=test_results,
@@ -91,7 +97,7 @@ def evaluate_task(task: SandboxTask) -> SandboxResult:
     )
 
 
-async def handle_message(message, connection, jetstream) -> None:
+async def handle_message(message, connection, jetstream, provider, executor) -> None:
     try:
         task = SandboxTask.model_validate_json(message.data)
     except ValidationError as exception:
@@ -130,7 +136,9 @@ async def handle_message(message, connection, jetstream) -> None:
             }).encode("utf-8"),
             headers=start_headers,
         )
-        result = await asyncio.to_thread(evaluate_task, task)
+        result = await asyncio.get_running_loop().run_in_executor(
+            executor, evaluate_task, task, provider
+        )
         duration_ms = round((time.perf_counter() - stage_started) * 1000)
         result_headers = {"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"}
         if trace_parent:
@@ -219,29 +227,55 @@ async def handle_message(message, connection, jetstream) -> None:
 async def run_worker() -> None:
     connection = await nats.connect(NATS_URL, name="c-sandbox-worker")
     jetstream = connection.jetstream()
-    consumer = await jetstream.pull_subscribe(
-        TASK_SUBJECT,
-        durable=TASK_DURABLE,
-        stream=TASK_STREAM,
-        config=ConsumerConfig(
-            durable_name=TASK_DURABLE,
-            ack_policy=AckPolicy.EXPLICIT,
-            ack_wait=60,
-            max_deliver=3,
-            max_ack_pending=4,
-        ),
+    consumer_config = ConsumerConfig(
+        durable_name=TASK_DURABLE,
+        ack_policy=AckPolicy.EXPLICIT,
+        filter_subject=TASK_SUBJECT,
+        ack_wait=120,
+        max_deliver=3,
+        max_ack_pending=MAX_ACK_PENDING,
     )
-    logger.info("Consuming JetStream subject %s", TASK_SUBJECT)
+    try:
+        await jetstream.add_consumer(TASK_STREAM, consumer_config)
+    except Exception:
+        logger.exception("Could not create/update consumer %s; binding to existing", TASK_DURABLE)
+    consumer = await jetstream.pull_subscribe_bind(TASK_DURABLE, stream=TASK_STREAM)
+
+    provider = KubeSandboxProvider(PodConfig.from_env(), pool_size=POOL_SIZE)
+    executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT, thread_name_prefix="sandbox")
+    slots = asyncio.Semaphore(MAX_CONCURRENT)
+    running: set[asyncio.Task] = set()
+    logger.info(
+        "Consuming %s (max_concurrent=%d, pool_size=%d)", TASK_SUBJECT, MAX_CONCURRENT, POOL_SIZE
+    )
+
+    async def process(message) -> None:
+        try:
+            await handle_message(message, connection, jetstream, provider, executor)
+        except Exception:
+            logger.exception("Unhandled error while processing sandbox message")
+        finally:
+            slots.release()
 
     try:
         while True:
+            await slots.acquire()
             try:
                 messages = await consumer.fetch(batch=1, timeout=1)
             except NatsTimeoutError:
+                slots.release()
                 continue
-            for message in messages:
-                await handle_message(message, connection, jetstream)
+            except BaseException:
+                slots.release()
+                raise
+            task = asyncio.create_task(process(messages[0]))
+            running.add(task)
+            task.add_done_callback(running.discard)
     finally:
+        if running:
+            await asyncio.wait(running, timeout=30)
+        executor.shutdown(wait=False, cancel_futures=True)
+        provider.close()
         await connection.drain()
         await connection.close()
 

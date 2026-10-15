@@ -60,13 +60,15 @@ if [ -f "$ROOT/.env" ]; then
   fi
 fi
 
+if [ "${SWCP_GVISOR:-0}" = "1" ]; then
+  echo "SWCP_GVISOR=1: sandbox pods will use the gvisor RuntimeClass (node needs runsc + label swcp.io/gvisor=true)."
+else
+  echo "WARNING: local mode, sandbox pods run WITHOUT gVisor. Set SWCP_GVISOR=1 on a node with gVisor installed." >&2
+  kubectl patch configmap c-sandbox-config -n swcp --type=merge -p '{"data":{"SANDBOX_RUNTIME_CLASS":""}}'
+fi
+kubectl rollout restart deployment/c-sandbox -n swcp
 kubectl rollout status deployment/c-sandbox -n swcp --timeout=120s || {
   echo "c-sandbox rollout did not complete within 120s" >&2
   kubectl get pods -n swcp -l app.kubernetes.io/name=c-sandbox >&2 || true
   exit 1
 }
-
-for pod in $(kubectl get pods -n swcp -l app.kubernetes.io/name=c-sandbox --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
-  docker save ghcr.io/allankrogaau/c-sandbox-runtime:latest | kubectl exec -i -n swcp "$pod" -c dind -- docker -H tcp://127.0.0.1:2375 load
-  kubectl exec -n swcp "$pod" -c dind -- docker -H tcp://127.0.0.1:2375 tag ghcr.io/allankrogaau/c-sandbox-runtime:latest c-sandbox-runtime:latest
-done

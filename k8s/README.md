@@ -37,7 +37,7 @@ macOS:
 bash scripts/deploy-local-k8s.sh
 ```
 
-The script installs metrics-server and ingress-nginx, builds all images locally, creates a `standard` storage class if the cluster lacks one, applies every manifest in `k8s/`, waits for c-sandbox, and loads the sandbox runtime image into each c-sandbox pod. The first run takes several minutes because of the image builds.
+The script installs metrics-server and ingress-nginx, builds all images locally, creates a `standard` storage class if the cluster lacks one, applies every manifest in `k8s/`, and waits for c-sandbox. The first run takes several minutes because of the image builds.
 
 When it finishes, open http://swcp.local.
 
@@ -63,7 +63,7 @@ Logs:
 kubectl logs deployment/core-api -n swcp
 kubectl logs deployment/core-api -n swcp -f
 kubectl logs deployment/c-sandbox -n swcp -c c-sandbox-worker
-kubectl logs deployment/c-sandbox -n swcp -c dind
+kubectl get pods -n swcp-sandbox
 kubectl logs <pod-name> -n swcp --previous
 ```
 
@@ -119,3 +119,17 @@ kubectl delete namespace swcp
 ```
 
 Removing the namespace also deletes the persistent volumes, so the database starts empty next time.
+
+## Sandbox (gVisor)
+
+Each submission runs in its own short-lived pod in the `swcp-sandbox` namespace (`k8s/06-sandbox-runtime.yaml`). The c-sandbox worker creates the pod through the Kubernetes API (no privileged Docker-in-Docker anymore), keeps a few warm pods ready, runs compile, lint and execute in one `exec`, and always deletes the pod afterwards.
+
+Pods use `runtimeClassName: gvisor` (runsc), restricted Pod Security, a read-only root filesystem, no service account token and a default-deny NetworkPolicy.
+
+Linux node/cluster setup:
+
+```bash
+sudo bash scripts/install-gvisor-node.sh   # installs runsc and labels the node swcp.io/gvisor=true
+```
+
+Local Docker Desktop has no runsc, so `deploy-local-k8s` runs the sandbox pods without gVisor (and warns). Set `SWCP_GVISOR=1` to keep gVisor on a node that has it. Tune with `SANDBOX_POOL_SIZE` and `SANDBOX_MAX_CONCURRENT` in `c-sandbox-config`.

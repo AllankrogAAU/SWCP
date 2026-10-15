@@ -1,0 +1,96 @@
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+overhead:
+  podFixed:
+    cpu: 50m
+    memory: 64Mi
+scheduling:
+  nodeSelector:
+    swcp.io/gvisor: "true"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: swcp-sandbox
+  labels:
+    app.kubernetes.io/part-of: swcp
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: c-sandbox-worker
+  namespace: swcp
+  labels:
+    app.kubernetes.io/part-of: swcp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-pod-manager
+  namespace: swcp-sandbox
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: c-sandbox-worker-manages-sandbox-pods
+  namespace: swcp-sandbox
+subjects:
+  - kind: ServiceAccount
+    name: c-sandbox-worker
+    namespace: swcp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-pod-manager
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: swcp-sandbox
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: sandbox-quota
+  namespace: swcp-sandbox
+spec:
+  hard:
+    pods: "200"
+    requests.cpu: "16"
+    requests.memory: 28Gi
+    limits.cpu: "300"
+    limits.memory: 80Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: sandbox-defaults
+  namespace: swcp-sandbox
+spec:
+  limits:
+    - type: Container
+      max:
+        cpu: "2"
+        memory: 512Mi
+      default:
+        cpu: "1"
+        memory: 256Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi

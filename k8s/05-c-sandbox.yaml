@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/name: c-sandbox
     app.kubernetes.io/part-of: swcp
 spec:
-  replicas: 2
+  replicas: 3
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -22,7 +22,15 @@ spec:
         app.kubernetes.io/name: c-sandbox
         app.kubernetes.io/part-of: swcp
     spec:
+      serviceAccountName: c-sandbox-worker
+      automountServiceAccountToken: true
       terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: ensure-streams
           image: natsio/nats-box:0.14.5
@@ -43,67 +51,6 @@ spec:
               cpu: 200m
               memory: 64Mi
       containers:
-        - name: dind
-          image: docker:27-dind
-          env:
-            - name: DOCKER_TLS_CERTDIR
-              value: ""
-          securityContext:
-            privileged: true
-          resources:
-            requests:
-              cpu: 500m
-              memory: 512Mi
-            limits:
-              cpu: "2"
-              memory: 2Gi
-          startupProbe:
-            exec:
-              command: ["docker", "-H", "tcp://127.0.0.1:2375", "info"]
-            periodSeconds: 3
-            timeoutSeconds: 5
-            failureThreshold: 40
-          readinessProbe:
-            exec:
-              command: ["docker", "-H", "tcp://127.0.0.1:2375", "info"]
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
-          livenessProbe:
-            exec:
-              command: ["docker", "-H", "tcp://127.0.0.1:2375", "info"]
-            periodSeconds: 20
-            timeoutSeconds: 10
-            failureThreshold: 6
-          volumeMounts:
-            - name: docker-storage
-              mountPath: /var/lib/docker
-        - name: runtime-image-loader
-          image: docker:27-cli
-          command:
-            - sh
-            - -ec
-            - |
-              until docker info >/dev/null 2>&1; do sleep 2; done
-              until docker image inspect c-sandbox-runtime:latest >/dev/null 2>&1; do
-                if docker image inspect ghcr.io/allankrogaau/c-sandbox-runtime:latest >/dev/null 2>&1 \
-                  || docker pull ghcr.io/allankrogaau/c-sandbox-runtime:latest; then
-                  docker tag ghcr.io/allankrogaau/c-sandbox-runtime:latest c-sandbox-runtime:latest
-                else
-                  sleep 5
-                fi
-              done
-              exec sleep infinity
-          envFrom:
-            - configMapRef:
-                name: c-sandbox-config
-          resources:
-            requests:
-              cpu: 10m
-              memory: 32Mi
-            limits:
-              cpu: 100m
-              memory: 128Mi
         - name: c-sandbox-worker
           image: ghcr.io/allankrogaau/c-sandbox-worker:latest
           imagePullPolicy: IfNotPresent
@@ -111,8 +58,15 @@ spec:
             - configMapRef:
                 name: c-sandbox-config
           env:
-            - name: DOCKER_HOST
-              value: "tcp://127.0.0.1:2375"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           resources:
             requests:
               cpu: 250m
@@ -120,25 +74,10 @@ spec:
             limits:
               cpu: "1"
               memory: 512Mi
-          startupProbe:
-            exec:
-              command: ["docker", "info"]
-            periodSeconds: 5
-            timeoutSeconds: 5
-            failureThreshold: 60
-          readinessProbe:
-            exec:
-              command: ["docker", "info"]
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
-          livenessProbe:
-            exec:
-              command: ["docker", "info"]
-            periodSeconds: 20
-            timeoutSeconds: 10
-            failureThreshold: 6
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
       volumes:
-        - name: docker-storage
+        - name: tmp
           emptyDir:
-            sizeLimit: 20Gi
+            sizeLimit: 64Mi

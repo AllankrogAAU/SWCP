@@ -97,6 +97,21 @@ if (Test-Path $envFile) {
     }
 }
 
+if ($env:SWCP_GVISOR -eq '1') {
+    Write-Host 'SWCP_GVISOR=1: sandbox pods will use the gvisor RuntimeClass (node needs runsc + label swcp.io/gvisor=true).'
+}
+else {
+    Write-Warning 'Local mode: sandbox pods run WITHOUT gVisor (Docker Desktop has no runsc). Set SWCP_GVISOR=1 on a node with gVisor installed.'
+    $patchFile = Join-Path ([System.IO.Path]::GetTempPath()) "sandbox-runtime-$([guid]::NewGuid()).json"
+    try {
+        [System.IO.File]::WriteAllText($patchFile, '{"data":{"SANDBOX_RUNTIME_CLASS":""}}')
+        Invoke-Native kubectl @('patch', 'configmap', 'c-sandbox-config', '-n', 'swcp', '--type=merge', "--patch-file=$patchFile")
+    }
+    finally {
+        Remove-Item -Force -ErrorAction SilentlyContinue $patchFile
+    }
+}
+Invoke-Native kubectl @('rollout', 'restart', 'deployment/c-sandbox', '-n', 'swcp')
 $ErrorActionPreference = 'Continue'
 & kubectl rollout status deployment/c-sandbox -n swcp --timeout=120s
 $rolloutExit = $LASTEXITCODE
@@ -104,21 +119,4 @@ $ErrorActionPreference = 'Stop'
 if ($rolloutExit -ne 0) {
     & kubectl get pods -n swcp -l app.kubernetes.io/name=c-sandbox
     throw 'c-sandbox rollout did not complete within 120s'
-}
-
-$runtimeImage = 'ghcr.io/allankrogaau/c-sandbox-runtime:latest'
-$tarPath = Join-Path ([System.IO.Path]::GetTempPath()) "c-sandbox-runtime-$([guid]::NewGuid()).tar"
-try {
-    Invoke-Native docker @('save', '-o', $tarPath, $runtimeImage)
-    $pods = (& kubectl get pods -n swcp -l app.kubernetes.io/name=c-sandbox --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}') -split '\s+' | Where-Object { $_ }
-    foreach ($pod in $pods) {
-        $loader = Start-Process -FilePath kubectl -ArgumentList @('exec', '-i', '-n', 'swcp', $pod, '-c', 'dind', '--', 'docker', '-H', 'tcp://127.0.0.1:2375', 'load') -RedirectStandardInput $tarPath -NoNewWindow -Wait -PassThru
-        if ($loader.ExitCode -ne 0) {
-            throw "Loading $runtimeImage into $pod failed with exit code $($loader.ExitCode)"
-        }
-        Invoke-Native kubectl @('exec', '-n', 'swcp', $pod, '-c', 'dind', '--', 'docker', '-H', 'tcp://127.0.0.1:2375', 'tag', $runtimeImage, 'c-sandbox-runtime:latest')
-    }
-}
-finally {
-    Remove-Item -Force -ErrorAction SilentlyContinue $tarPath
 }
