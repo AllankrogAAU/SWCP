@@ -1,3 +1,4 @@
+#!/bin/sh
 N=$1
 COMPILE_TIMEOUT=$2
 LINT_TIMEOUT=$3
@@ -18,6 +19,7 @@ phase() {
     started=$(now_ms)
     timeout -k 1 "$limit" "$@" < /dev/null > "$W/$name.out" 2> "$W/$name.err"
     rc=$?
+    if [ "$name" = run ] && [ "$rc" -eq 153 ]; then rc=124; fi
     finished=$(now_ms)
     emit "${name}_rc" "$rc"
     emit "${name}_ms" "$((finished - started))"
@@ -26,12 +28,14 @@ phase() {
     return "$rc"
 }
 
-phase compile "$COMPILE_TIMEOUT" gcc -Wall -Wextra -o "$W/prog" submission.c -lm
+phase compile "$COMPILE_TIMEOUT" gcc -Wall -Wextra submission.c -o "$W/prog"
 if [ $? -ne 0 ]; then
     exit 0
 fi
 
-phase lint "$LINT_TIMEOUT" cppcheck --enable=warning,style --inline-suppr --quiet submission.c
+phase lint "$LINT_TIMEOUT" cppcheck --enable=warning,style,performance,portability --max-configs=1 \
+    --suppress=normalCheckLevelMaxBranches --std=c11 --quiet \
+    "--template={line}:{column}: {severity}: {message} [{id}]" submission.c
 
-phase run "$RUN_TIMEOUT" sh -c 'ulimit -f 2048; ulimit -u 64; ulimit -c 0; exec "$0"' "$W/prog"
+phase run "$RUN_TIMEOUT" bash -c 'ulimit -f 2048; ulimit -u 64; ulimit -c 0; exec "$0"' "$W/prog"
 exit 0

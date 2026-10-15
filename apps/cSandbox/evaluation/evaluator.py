@@ -27,7 +27,7 @@ def to_result(report: SandboxReport) -> EvaluationResult:
         raise SandboxError("sandbox report contained no run phase")
     lint_output = None
     if report.lint is not None:
-        lint_output = (report.lint.stdout + report.lint.stderr) or None
+        lint_output = "lint timed out" if report.lint.timed_out else report.lint.stderr
     run_fields: dict[str, Any] = {
         "lint_output": lint_output,
         "stdout": run.stdout,

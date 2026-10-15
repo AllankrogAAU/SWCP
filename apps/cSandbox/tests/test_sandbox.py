@@ -64,7 +64,7 @@ def test_parse_report_empty() -> None:
 
 
 def test_success() -> None:
-    result = evaluate("x", FakeProvider(SandboxReport(phase(), phase(out="", err="note"), phase(0, "ok"))))
+    result = evaluate("x", FakeProvider(SandboxReport(phase(), phase(err="note"), phase(0, "ok"))))
     assert result.status is Status.SUCCESS
     assert result.exit_code == 0 and result.stdout == "ok"
     assert result.lint_output == "note"
@@ -120,3 +120,13 @@ def test_pod_manifest_is_hardened_and_gvisor() -> None:
 def test_pod_manifest_without_runtime_class_for_local_dev() -> None:
     spec = build_pod_manifest(PodConfig(runtime_class=""), "sbx-1")["spec"]
     assert "runtimeClassName" not in spec
+
+
+def test_lint_timeout_is_reported_as_text() -> None:
+    report = SandboxReport(phase(), phase(124), phase())
+    assert evaluate("x", FakeProvider(report)).lint_output == "lint timed out"
+
+
+def test_clean_lint_is_empty_string_not_none() -> None:
+    assert evaluate("x", FakeProvider(SandboxReport(phase(), phase(), phase()))).lint_output == ""
+

@@ -8,10 +8,10 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 cd "$tmp"
 
-curl -fsSLO "${URL}/runsc" -O "${URL}/runsc.sha512" \
-     -O "${URL}/containerd-shim-runsc-v1" -O "${URL}/containerd-shim-runsc-v1.sha512"
-sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512
-install -m 0755 runsc containerd-shim-runsc-v1 /usr/local/bin/
+curl -fsSLO "${URL}/gvisor.tar.bz2" -O "${URL}/gvisor.tar.bz2.sha512"
+sha512sum -c gvisor.tar.bz2.sha512
+tar -xjf gvisor.tar.bz2 -C /usr/local/bin
+chmod -R a+rx /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1 /usr/local/bin/gvisor-bin
 
 /usr/local/bin/runsc install
 systemctl restart containerd
