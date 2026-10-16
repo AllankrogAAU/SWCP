@@ -39,6 +39,8 @@ spec:
         app.kubernetes.io/name: frontend
         app.kubernetes.io/part-of: swcp
     spec:
+      imagePullSecrets:
+        - name: ghcr-pull-secret
       containers:
         - name: frontend
           image: ghcr.io/allankrogaau/frontend:latest

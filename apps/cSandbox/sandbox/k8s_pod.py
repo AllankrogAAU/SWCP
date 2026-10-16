@@ -30,6 +30,7 @@ class PodConfig:
     tmp_size_limit: str = "64Mi"
     ready_timeout_s: float = 30.0
     owner: str = "worker"
+    image_pull_secret: str = "ghcr-pull-secret"
 
     @staticmethod
     def from_env() -> "PodConfig":
@@ -42,6 +43,9 @@ class PodConfig:
             tmp_size_limit=os.getenv("SANDBOX_TMP_SIZE_LIMIT", "64Mi"),
             ready_timeout_s=float(os.getenv("SANDBOX_READY_TIMEOUT_S", "30")),
             owner=os.getenv("POD_NAME", "worker"),
+            image_pull_secret=os.getenv(
+                "SANDBOX_IMAGE_PULL_SECRET", "ghcr-pull-secret"
+            ),
         )
 
 
@@ -88,6 +92,8 @@ def build_pod_manifest(cfg: PodConfig, name: str) -> dict:
     }
     if cfg.runtime_class:
         spec["runtimeClassName"] = cfg.runtime_class
+    if cfg.image_pull_secret:
+        spec["imagePullSecrets"] = [{"name": cfg.image_pull_secret}]
     return {
         "apiVersion": "v1",
         "kind": "Pod",
@@ -222,6 +228,42 @@ class KubeSandboxProvider:
             ) from exception
         return sandbox
 
+    def _diagnose(self, name: str) -> str:
+        parts: list[str] = []
+        try:
+            pod = self._api.read_namespaced_pod_status(name, self._cfg.namespace)
+            if pod.status:
+                for condition in pod.status.conditions or []:
+                    if condition.status != "True":
+                        parts.append(
+                            f"condition {condition.type}={condition.status} "
+                            f"({condition.reason}: {condition.message})"
+                        )
+                for container_status in pod.status.container_statuses or []:
+                    waiting = (
+                        container_status.state.waiting
+                        if container_status.state
+                        else None
+                    )
+                    if waiting:
+                        parts.append(
+                            f"container waiting: {waiting.reason} ({waiting.message})"
+                        )
+        except ApiException as exception:
+            parts.append(f"could not read pod status: {exception}")
+
+        try:
+            events = self._api.list_namespaced_event(
+                self._cfg.namespace,
+                field_selector=f"involvedObject.name={name}",
+            )
+            for event in events.items[-5:]:
+                parts.append(f"event: {event.reason} - {event.message}")
+        except ApiException as exception:
+            parts.append(f"could not list pod events: {exception}")
+
+        return "; ".join(parts) if parts else "no diagnostic information available"
+
     def _wait_running(self, name: str) -> None:
         deadline = time.monotonic() + self._cfg.ready_timeout_s
         while time.monotonic() < deadline:
@@ -230,9 +272,13 @@ class KubeSandboxProvider:
             if phase == "Running":
                 return
             if phase in ("Failed", "Succeeded"):
-                raise SandboxStartError(f"pod entered phase {phase}")
+                raise SandboxStartError(
+                    f"pod entered phase {phase}: {self._diagnose(name)}"
+                )
             time.sleep(0.1)
-        raise SandboxStartError("pod did not become Running in time")
+        raise SandboxStartError(
+            f"pod did not become Running within {self._cfg.ready_timeout_s}s: {self._diagnose(name)}"
+        )
 
     def acquire(self):
         while True:

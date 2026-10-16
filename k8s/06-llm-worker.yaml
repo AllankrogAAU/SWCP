@@ -27,6 +27,8 @@ spec:
         runAsNonRoot: true
         runAsUser: 1654
         runAsGroup: 1654
+      imagePullSecrets:
+        - name: ghcr-pull-secret
       containers:
         - name: llm-worker
           image: ghcr.io/allankrogaau/llm-worker:latest

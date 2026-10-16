@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -27,29 +28,42 @@ RESULT_SUBJECT = "sandbox.results"
 MAX_CONCURRENT = int(os.getenv("SANDBOX_MAX_CONCURRENT", "8"))
 POOL_SIZE = int(os.getenv("SANDBOX_POOL_SIZE", "4"))
 MAX_ACK_PENDING = int(os.getenv("SANDBOX_MAX_ACK_PENDING", "512"))
+HEALTH_FILE = os.getenv("SANDBOX_HEALTH_FILE", "/tmp/healthy")
+
+
+def touch_health_file() -> None:
+    try:
+        with open(HEALTH_FILE, "w") as handle:
+            handle.write(str(time.time()))
+    except OSError:
+        logger.exception("Could not write health heartbeat to %s", HEALTH_FILE)
+
 
 class JsonLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         trace_parent = getattr(record, "traceparent", None)
         trace_parts = trace_parent.split("-") if trace_parent else []
-        return json.dumps({
-            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
-            "level": record.levelname,
-            "service": "c-sandbox-worker",
-            "pod_name": os.getenv("HOSTNAME", socket.gethostname()),
-            "trace_id": trace_parts[1] if len(trace_parts) == 4 else None,
-            "span_id": trace_parts[2] if len(trace_parts) == 4 else None,
-            "submission_id": getattr(record, "submission_id", None),
-            "event_name": getattr(record, "event_name", None),
-            "stage": getattr(record, "stage", None),
-            "duration_ms": getattr(record, "duration_ms", None),
-            "queue_wait_ms": getattr(record, "queue_wait_ms", None),
-            "attempt": getattr(record, "attempt", None),
-            "status": getattr(record, "status", None),
-            "outcome": getattr(record, "outcome", None),
-            "error_type": getattr(record, "error_type", None),
-            "message": record.getMessage(),
-        }, default=str)
+        return json.dumps(
+            {
+                "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
+                "level": record.levelname,
+                "service": "c-sandbox-worker",
+                "pod_name": os.getenv("HOSTNAME", socket.gethostname()),
+                "trace_id": trace_parts[1] if len(trace_parts) == 4 else None,
+                "span_id": trace_parts[2] if len(trace_parts) == 4 else None,
+                "submission_id": getattr(record, "submission_id", None),
+                "event_name": getattr(record, "event_name", None),
+                "stage": getattr(record, "stage", None),
+                "duration_ms": getattr(record, "duration_ms", None),
+                "queue_wait_ms": getattr(record, "queue_wait_ms", None),
+                "attempt": getattr(record, "attempt", None),
+                "status": getattr(record, "status", None),
+                "outcome": getattr(record, "outcome", None),
+                "error_type": getattr(record, "error_type", None),
+                "message": record.getMessage(),
+            },
+            default=str,
+        )
 
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), force=True)
@@ -128,12 +142,14 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
         start_headers = {"traceparent": trace_parent} if trace_parent else None
         await connection.publish(
             "submissions.work.started",
-            json.dumps({
-                "submissionId": str(task.submissionId),
-                "worker": "c-sandbox-worker",
-                "stage": "sandbox",
-                "timestampUtc": datetime.now(UTC).isoformat(),
-            }).encode("utf-8"),
+            json.dumps(
+                {
+                    "submissionId": str(task.submissionId),
+                    "worker": "c-sandbox-worker",
+                    "stage": "sandbox",
+                    "timestampUtc": datetime.now(UTC).isoformat(),
+                }
+            ).encode("utf-8"),
             headers=start_headers,
         )
         result = await asyncio.get_running_loop().run_in_executor(
@@ -203,7 +219,10 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
                 headers={"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"},
             )
             await message.ack()
-            logger.error("Sandbox retries exhausted for submission %s; sent to DLQ", task.submissionId)
+            logger.error(
+                "Sandbox retries exhausted for submission %s; sent to DLQ",
+                task.submissionId,
+            )
             return
 
         delay = min(30.0, 2.0 ** min(delivered, 5)) + random.random()
@@ -238,15 +257,22 @@ async def run_worker() -> None:
     try:
         await jetstream.add_consumer(TASK_STREAM, consumer_config)
     except Exception:
-        logger.exception("Could not create/update consumer %s; binding to existing", TASK_DURABLE)
+        logger.exception(
+            "Could not create/update consumer %s; binding to existing", TASK_DURABLE
+        )
     consumer = await jetstream.pull_subscribe_bind(TASK_DURABLE, stream=TASK_STREAM)
 
     provider = KubeSandboxProvider(PodConfig.from_env(), pool_size=POOL_SIZE)
-    executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT, thread_name_prefix="sandbox")
+    executor = ThreadPoolExecutor(
+        max_workers=MAX_CONCURRENT, thread_name_prefix="sandbox"
+    )
     slots = asyncio.Semaphore(MAX_CONCURRENT)
     running: set[asyncio.Task] = set()
     logger.info(
-        "Consuming %s (max_concurrent=%d, pool_size=%d)", TASK_SUBJECT, MAX_CONCURRENT, POOL_SIZE
+        "Consuming %s (max_concurrent=%d, pool_size=%d)",
+        TASK_SUBJECT,
+        MAX_CONCURRENT,
+        POOL_SIZE,
     )
 
     async def process(message) -> None:
@@ -256,6 +282,15 @@ async def run_worker() -> None:
             logger.exception("Unhandled error while processing sandbox message")
         finally:
             slots.release()
+
+    async def heartbeat_loop(stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            touch_health_file()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), timeout=1)
+
+    stop_heartbeat = asyncio.Event()
+    heartbeat_task = asyncio.create_task(heartbeat_loop(stop_heartbeat))
 
     try:
         while True:
@@ -272,6 +307,8 @@ async def run_worker() -> None:
             running.add(task)
             task.add_done_callback(running.discard)
     finally:
+        stop_heartbeat.set()
+        await heartbeat_task
         if running:
             await asyncio.wait(running, timeout=30)
         executor.shutdown(wait=False, cancel_futures=True)

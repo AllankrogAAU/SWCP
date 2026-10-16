@@ -4,8 +4,8 @@ import pytest
 
 from evaluation.evaluator import evaluate
 from evaluation.result import PhaseResult, SandboxReport, Status
-from sandbox.interface import Limits, SandboxError
-from sandbox.k8s_pod import PodConfig, build_pod_manifest
+from sandbox.interface import Limits, SandboxError, SandboxStartError
+from sandbox.k8s_pod import KubeSandboxProvider, PodConfig, build_pod_manifest
 from sandbox.report import parse_report
 
 
@@ -115,6 +115,12 @@ def test_pod_manifest_is_hardened_and_gvisor() -> None:
     assert container["securityContext"]["readOnlyRootFilesystem"] is True
     assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
     assert spec["volumes"][0]["emptyDir"]["medium"] == "Memory"
+    assert spec["imagePullSecrets"] == [{"name": "ghcr-pull-secret"}]
+
+
+def test_pod_manifest_without_image_pull_secret() -> None:
+    spec = build_pod_manifest(PodConfig(image_pull_secret=""), "sbx-1")["spec"]
+    assert "imagePullSecrets" not in spec
 
 
 def test_pod_manifest_without_runtime_class_for_local_dev() -> None:
@@ -129,4 +135,103 @@ def test_lint_timeout_is_reported_as_text() -> None:
 
 def test_clean_lint_is_empty_string_not_none() -> None:
     assert evaluate("x", FakeProvider(SandboxReport(phase(), phase(), phase()))).lint_output == ""
+
+
+class FakeWaiting:
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        self.message = message
+
+
+class FakeContainerState:
+    def __init__(self, waiting: FakeWaiting | None) -> None:
+        self.waiting = waiting
+
+
+class FakeContainerStatus:
+    def __init__(self, waiting: FakeWaiting | None) -> None:
+        self.state = FakeContainerState(waiting)
+
+
+class FakeCondition:
+    def __init__(self, type_: str, status: str, reason: str, message: str) -> None:
+        self.type = type_
+        self.status = status
+        self.reason = reason
+        self.message = message
+
+
+class FakePodStatus:
+    def __init__(self, phase, conditions=None, container_statuses=None) -> None:
+        self.phase = phase
+        self.conditions = conditions or []
+        self.container_statuses = container_statuses or []
+
+
+class FakePod:
+    def __init__(self, status: FakePodStatus) -> None:
+        self.status = status
+
+
+class FakeEvent:
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        self.message = message
+
+
+class FakeEventList:
+    def __init__(self, items: list[FakeEvent]) -> None:
+        self.items = items
+
+
+class FakeKubeApi:
+    def __init__(self, pod: FakePod, events: list[FakeEvent] | None = None) -> None:
+        self._pod = pod
+        self._events = events or []
+
+    def read_namespaced_pod_status(self, name: str, namespace: str) -> FakePod:
+        return self._pod
+
+    def list_namespaced_event(self, namespace: str, field_selector: str | None = None) -> FakeEventList:
+        return FakeEventList(self._events)
+
+
+def make_provider(api: FakeKubeApi) -> KubeSandboxProvider:
+    provider = object.__new__(KubeSandboxProvider)
+    provider._cfg = PodConfig(ready_timeout_s=0.2)
+    provider._api = api
+    return provider
+
+
+def test_wait_running_succeeds_once_pod_is_running() -> None:
+    provider = make_provider(FakeKubeApi(FakePod(FakePodStatus("Running"))))
+    provider._wait_running("sbx-ok")  # should not raise
+
+
+def test_wait_running_timeout_surfaces_scheduling_diagnostics() -> None:
+    conditions = [
+        FakeCondition("PodScheduled", "False", "Unschedulable", "0/1 nodes match node selector"),
+    ]
+    api = FakeKubeApi(
+        FakePod(FakePodStatus("Pending", conditions=conditions)),
+        events=[FakeEvent("FailedScheduling", "no nodes have the swcp.io/gvisor label")],
+    )
+    provider = make_provider(api)
+    with pytest.raises(SandboxStartError) as excinfo:
+        provider._wait_running("sbx-pending")
+    message = str(excinfo.value)
+    assert "Unschedulable" in message
+    assert "FailedScheduling" in message
+    assert "swcp.io/gvisor" in message
+
+
+def test_wait_running_failed_phase_surfaces_container_wait_reason() -> None:
+    container_statuses = [FakeContainerStatus(FakeWaiting("ImagePullBackOff", "manifest unknown"))]
+    api = FakeKubeApi(FakePod(FakePodStatus("Failed", container_statuses=container_statuses)))
+    provider = make_provider(api)
+    with pytest.raises(SandboxStartError) as excinfo:
+        provider._wait_running("sbx-failed")
+    message = str(excinfo.value)
+    assert "pod entered phase Failed" in message
+    assert "ImagePullBackOff" in message
 

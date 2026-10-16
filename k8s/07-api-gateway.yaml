@@ -62,6 +62,8 @@ spec:
         runAsUser: 1654
         runAsGroup: 1654
         fsGroup: 1654
+      imagePullSecrets:
+        - name: ghcr-pull-secret
       initContainers:
         - name: wait-for-core-api
           image: ghcr.io/allankrogaau/postgres:latest

@@ -25,6 +25,8 @@ spec:
       serviceAccountName: c-sandbox-worker
       automountServiceAccountToken: true
       terminationGracePeriodSeconds: 60
+      imagePullSecrets:
+        - name: ghcr-pull-secret
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -74,6 +76,32 @@ spec:
             limits:
               cpu: "1"
               memory: 512Mi
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "test -f /tmp/healthy"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              # Stale heartbeat (no fresh write in >15s) means the worker's
+              # event loop is wedged, not merely busy under legitimate load.
+              command:
+                - sh
+                - -c
+                - "test $(( $(date +%s) - $(stat -c %Y /tmp/healthy 2>/dev/null || echo 0) )) -lt 15"
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "test $(( $(date +%s) - $(stat -c %Y /tmp/healthy 2>/dev/null || echo 0) )) -lt 45"
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
           volumeMounts:
             - name: tmp
               mountPath: /tmp

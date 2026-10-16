@@ -36,6 +36,8 @@ spec:
         app.kubernetes.io/part-of: swcp
     spec:
       terminationGracePeriodSeconds: 60
+      imagePullSecrets:
+        - name: ghcr-pull-secret
       containers:
         - name: postgres
           image: ghcr.io/allankrogaau/postgres:latest
