@@ -46,6 +46,47 @@ Run the script again after code changes to rebuild the images. Then restart the 
 ```bash
 kubectl rollout restart deployment/core-api -n swcp
 ```
+
+Note: Docker Desktop's own Kubernetes runs inside a sealed, Docker-managed VM, so the sandbox pods above run **without gVisor** (the script warns about this). Use the WSL2 path below if you need real gVisor isolation locally.
+
+## Local Kubernetes with gVisor (Windows, via WSL2 + k3s)
+
+Docker Desktop Kubernetes can't host gVisor because its control plane runs inside a VM you don't control. To actually test the sandbox with gVisor enabled, run a small [k3s](https://k3s.io/) cluster inside a WSL2 distro instead (completely separate from Docker Desktop's own Kubernetes — you don't need "Enable Kubernetes" turned on for this path).
+
+Prerequisites:
+
+1. WSL2 installed, with a Linux distro (e.g. `Debian` or `Ubuntu`).
+2. Docker Desktop > Settings > Resources > WSL Integration > enable integration for that distro. You do **not** need to enable Docker Desktop's Kubernetes.
+3. The hosts file entry from above (`127.0.0.1 swcp.local`).
+
+Then run, from the repo root in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy-local-k8s-wsl.ps1
+```
+
+Pass `-Distro <name>` if your distro isn't named `Debian`.
+
+This single command, run inside the WSL distro as root, will:
+
+- install k3s (a lightweight Kubernetes distribution with its own bundled containerd), if not already installed;
+- install and verify `runsc` (gVisor) and register it as a containerd/Kubernetes runtime, then label the node `swcp.io/gvisor=true`;
+- build all 7 service images with `docker build` and import them straight into k3s's containerd (no registry needed);
+- install metrics-server and ingress-nginx, and apply every manifest in `k8s/`;
+- patch the LLM worker's secret from your local `.env` and wait for the c-sandbox rollout to finish.
+
+It's safe and idempotent to re-run after code changes — it rebuilds and re-imports the images and restarts the affected deployments. The first run takes several minutes (k3s + gVisor install plus image builds); later runs are much faster.
+
+When it finishes, open http://swcp.local — this time the c-sandbox pods really run under gVisor (`runtimeClassName: gvisor`), the same as on a production node.
+
+Any teammate with Docker Desktop and WSL Integration enabled for their distro can run the exact same command; they don't need to install anything manually first (no "Enable Kubernetes" checkbox, no separate gVisor install) — the script does it all.
+
+To tear the WSL-based cluster down completely:
+
+```bash
+wsl -d Debian -u root -- /usr/local/bin/k3s-uninstall.sh
+```
+
 ## Some useful commands
 
 ```bash
@@ -132,4 +173,4 @@ Linux node/cluster setup:
 sudo bash scripts/install-gvisor-node.sh   # installs runsc and labels the node swcp.io/gvisor=true
 ```
 
-Local Docker Desktop has no runsc, so `deploy-local-k8s` runs the sandbox pods without gVisor (and warns). Set `SWCP_GVISOR=1` to keep gVisor on a node that has it. Tune with `SANDBOX_POOL_SIZE` and `SANDBOX_MAX_CONCURRENT` in `c-sandbox-config`.
+Local Docker Desktop has no runsc, so `deploy-local-k8s` runs the sandbox pods without gVisor (and warns). Set `SWCP_GVISOR=1` to keep gVisor on a node that has it. To actually exercise gVisor locally on Windows, use `deploy-local-k8s-wsl.ps1` instead (see "Local Kubernetes with real gVisor" above), which runs `install-gvisor-node.sh` for you inside a real WSL2/k3s cluster. Tune with `SANDBOX_POOL_SIZE` and `SANDBOX_MAX_CONCURRENT` in `c-sandbox-config`.

@@ -37,6 +37,10 @@ spec:
         - name: ensure-streams
           image: natsio/nats-box:0.14.5
           imagePullPolicy: IfNotPresent
+          workingDir: /tmp
+          env:
+            - name: HOME
+              value: /tmp
           command:
             - sh
             - -ec

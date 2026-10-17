@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+import signal
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -43,27 +44,27 @@ class JsonLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         trace_parent = getattr(record, "traceparent", None)
         trace_parts = trace_parent.split("-") if trace_parent else []
-        return json.dumps(
-            {
-                "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
-                "level": record.levelname,
-                "service": "c-sandbox-worker",
-                "pod_name": os.getenv("HOSTNAME", socket.gethostname()),
-                "trace_id": trace_parts[1] if len(trace_parts) == 4 else None,
-                "span_id": trace_parts[2] if len(trace_parts) == 4 else None,
-                "submission_id": getattr(record, "submission_id", None),
-                "event_name": getattr(record, "event_name", None),
-                "stage": getattr(record, "stage", None),
-                "duration_ms": getattr(record, "duration_ms", None),
-                "queue_wait_ms": getattr(record, "queue_wait_ms", None),
-                "attempt": getattr(record, "attempt", None),
-                "status": getattr(record, "status", None),
-                "outcome": getattr(record, "outcome", None),
-                "error_type": getattr(record, "error_type", None),
-                "message": record.getMessage(),
-            },
-            default=str,
-        )
+        payload = {
+            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
+            "level": record.levelname,
+            "service": "c-sandbox-worker",
+            "pod_name": os.getenv("HOSTNAME", socket.gethostname()),
+            "trace_id": trace_parts[1] if len(trace_parts) == 4 else None,
+            "span_id": trace_parts[2] if len(trace_parts) == 4 else None,
+            "submission_id": getattr(record, "submission_id", None),
+            "event_name": getattr(record, "event_name", None),
+            "stage": getattr(record, "stage", None),
+            "duration_ms": getattr(record, "duration_ms", None),
+            "queue_wait_ms": getattr(record, "queue_wait_ms", None),
+            "attempt": getattr(record, "attempt", None),
+            "status": getattr(record, "status", None),
+            "outcome": getattr(record, "outcome", None),
+            "error_type": getattr(record, "error_type", None),
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, default=str)
 
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), force=True)
@@ -292,9 +293,22 @@ async def run_worker() -> None:
     stop_heartbeat = asyncio.Event()
     heartbeat_task = asyncio.create_task(heartbeat_loop(stop_heartbeat))
 
+    # Without an explicit handler, SIGTERM (sent by Kubernetes on pod
+    # termination/rollout) kills the process immediately via the OS default
+    # action, skipping the `finally` block below -- which otherwise orphans
+    # this worker's warm-pool sandbox pods until the janitor's 30-minute
+    # max-age sweep. Translate it into a cooperative shutdown instead.
+    shutdown = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, shutdown.set)
+
     try:
-        while True:
-            await slots.acquire()
+        while not shutdown.is_set():
+            try:
+                await asyncio.wait_for(slots.acquire(), timeout=1)
+            except TimeoutError:
+                continue
             try:
                 messages = await consumer.fetch(batch=1, timeout=1)
             except NatsTimeoutError:
