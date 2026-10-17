@@ -2,6 +2,6 @@
 useDefault = true
 
 # Placeholder dev password committed in k8s/01-configmaps-secrets.yaml (ffb27f5); history is not rewritten.
-[[allowlists]]
+[allowlist]
 description = "Historic k8s placeholder password"
 commits = ["ffb27f5f4ca58977ae8af5cb4c8a2abdd9ea9a3d"]
