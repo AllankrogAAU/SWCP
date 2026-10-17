@@ -1,3 +1,6 @@
 <Solution>
+  <Project Path="../llmWorker/llmWorker.csproj" />
+  <Project Path="../coreApi/coreApi.csproj" />
+  <Project Path="../SWCP.Contracts/SWCP.Contracts.csproj" />
   <Project Path="api.csproj" />
 </Solution>

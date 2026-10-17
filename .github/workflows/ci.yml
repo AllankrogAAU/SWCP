@@ -51,8 +51,8 @@ jobs:
           filters: |
             frontend: 'apps/frontend/**'  
             api: 'apps/apiGateway/**'
-            cloudllm: 'apps/cloudLLM/**'
-            c-sandbox: 'apps/c-sandbox/**'
+            cloudllm: 'apps/llmWorker/**'
+            c-sandbox: 'apps/cSandbox/**'
             postgres: 'apps/postgres/**'
             docker:
               - '**/Dockerfile'
@@ -77,8 +77,8 @@ jobs:
             --arg postgres "$POSTGRES_CHANGED" \
             '[
               {name: "apiGateway", changed: $api},
-              {name: "cloudLLM", changed: $cloudllm},
-              {name: "c-sandbox", changed: $c_sandbox},
+              {name: "llmWorker", changed: $cloudllm},
+              {name: "cSandbox", changed: $c_sandbox},
               {name: "frontend", changed: $frontend},
               {name: "postgres", changed: $postgres}
             ] | map(select(.changed == "true") | .name)')

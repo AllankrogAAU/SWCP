@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://swcp.local/contracts/sandbox-result.schema.json",
+  "title": "SandboxResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["submissionId", "compilation", "staticAnalysis", "testResults"],
+  "properties": {
+    "submissionId": { "type": "string", "format": "uuid" },
+    "compilation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["success", "stdout", "stderr", "durationMilliseconds"],
+      "properties": {
+        "success": { "type": "boolean" },
+        "stdout": { "type": "string" },
+        "stderr": { "type": "string" },
+        "exitCode": { "type": ["integer", "null"] },
+        "durationMilliseconds": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "staticAnalysis": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["line", "column", "severity", "message"],
+        "properties": {
+          "line": { "type": "integer", "minimum": 1 },
+          "column": { "type": "integer", "minimum": 1 },
+          "severity": { "type": "string" },
+          "message": { "type": "string" }
+        }
+      }
+    },
+    "testResults": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["passed", "stdout", "stderr", "durationMilliseconds", "memoryConsumedMegabytes"],
+        "properties": {
+          "passed": { "type": "boolean" },
+          "stdout": { "type": "string" },
+          "stderr": { "type": "string" },
+          "exitCode": { "type": ["integer", "null"] },
+          "durationMilliseconds": { "type": ["integer", "null"], "minimum": 0 },
+          "memoryConsumedMegabytes": { "type": ["number", "null"], "minimum": 0 }
+        }
+      }
+    },
+    "errorClassification": { "type": ["string", "null"] }
+  }
+}

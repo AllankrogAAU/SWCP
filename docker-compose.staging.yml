@@ -3,9 +3,9 @@ services:
     build: null
     image: ghcr.io/${GHCR_OWNER}/swcp-apigateway:${IMAGE_TAG}
 
-  cloudllm:
+  llm-worker:
     build: null
-    image: ghcr.io/${GHCR_OWNER}/swcp-cloudllm:${IMAGE_TAG}
+    image: ghcr.io/${GHCR_OWNER}/swcp-llmworker:${IMAGE_TAG}
 
   db:
     build: null
@@ -15,6 +15,6 @@ services:
     build: null
     image: ghcr.io/${GHCR_OWNER}/swcp-frontend:${IMAGE_TAG}
 
-  c-sandbox:
+  c-sandbox-worker:
     build: null
-    image: ghcr.io/${GHCR_OWNER}/swcp-c-sandbox:${IMAGE_TAG}
+    image: ghcr.io/${GHCR_OWNER}/swcp-csandbox:${IMAGE_TAG}

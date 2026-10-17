@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c-sandbox
+  namespace: swcp
+  labels:
+    app.kubernetes.io/name: c-sandbox
+    app.kubernetes.io/part-of: swcp
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c-sandbox
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c-sandbox
+        app.kubernetes.io/part-of: swcp
+    spec:
+      serviceAccountName: c-sandbox-worker
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 60
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: ensure-streams
+          image: natsio/nats-box:0.14.5
+          imagePullPolicy: IfNotPresent
+          workingDir: /tmp
+          env:
+            - name: HOME
+              value: /tmp
+          command:
+            - sh
+            - -ec
+            - |
+              nats --server nats://nats.swcp.svc.cluster.local:4222 stream info SANDBOX_TASKS >/dev/null 2>&1 || \
+                nats --server nats://nats.swcp.svc.cluster.local:4222 stream add SANDBOX_TASKS --subjects sandbox.tasks --retention work --storage file --replicas 1 --discard old --dupe-window 10m --max-msgs=-1 --max-bytes=-1 --max-age=0s --max-msg-size=-1 --max-msgs-per-subject=-1 --defaults
+              nats --server nats://nats.swcp.svc.cluster.local:4222 stream info SANDBOX_TASKS_DLQ >/dev/null 2>&1 || \
+                nats --server nats://nats.swcp.svc.cluster.local:4222 stream add SANDBOX_TASKS_DLQ --subjects sandbox.tasks.dlq --retention limits --storage file --replicas 1 --discard old --dupe-window 2m --max-msgs=-1 --max-bytes=-1 --max-age=168h --max-msg-size=-1 --max-msgs-per-subject=-1 --defaults
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+      containers:
+        - name: c-sandbox-worker
+          image: ghcr.io/allankrogaau/c-sandbox-worker:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: c-sandbox-config
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "test -f /tmp/healthy"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              # Stale heartbeat (no fresh write in >15s) means the worker's
+              # event loop is wedged, not merely busy under legitimate load.
+              command:
+                - sh
+                - -c
+                - "test $(( $(date +%s) - $(stat -c %Y /tmp/healthy 2>/dev/null || echo 0) )) -lt 15"
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "test $(( $(date +%s) - $(stat -c %Y /tmp/healthy 2>/dev/null || echo 0) )) -lt 45"
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

@@ -22,8 +22,8 @@ jobs:
       matrix:
         service:
           - apiGateway
-          - cloudLLM
-          - c-sandbox
+          - llmWorker
+          - cSandbox
           - frontend
           - postgres
     uses: ./.github/workflows/_image.yml
@@ -160,7 +160,7 @@ jobs:
           OWNER: ${{ steps.owner.outputs.name }}
           SHA: ${{ inputs.sha }}
         run: |
-          for service in apiGateway cloudLLM c-sandbox frontend postgres; do
+          for service in apiGateway llmWorker cSandbox frontend postgres; do
             image=$(printf '%s' "$service" | tr '[:upper:]' '[:lower:]')
             docker buildx imagetools create \
               --tag "ghcr.io/${OWNER}/swcp-${image}:staging-verified-${SHA}" \

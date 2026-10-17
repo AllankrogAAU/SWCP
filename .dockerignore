@@ -5,3 +5,8 @@ obj/
 .vs/
 .git/
 **/.git/
+**/node_modules/
+**/dist/
+apps/localLLM/models/**
+!apps/localLLM/models/.gitkeep
+apps/cSandbox/.venv/
