@@ -8,6 +8,7 @@ public sealed class CoreDbContext(DbContextOptions<CoreDbContext> options) : DbC
     public DbSet<User> Users => Set<User>();
     public DbSet<Assignment> Assignments => Set<Assignment>();
     public DbSet<Submission> Submissions => Set<Submission>();
+    public DbSet<UserAssignmentState> UserAssignmentStates => Set<UserAssignmentState>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -51,6 +52,21 @@ public sealed class CoreDbContext(DbContextOptions<CoreDbContext> options) : DbC
                 .HasFilter("\"Status\" IN ('PENDING', 'SANDBOX_QUEUED', 'SANDBOX_PROCESSING', 'LLM_QUEUED', 'LLM_PROCESSING')");
             entity.HasIndex(submission => new { submission.UserId, submission.CreatedAtUtc })
                 .IsDescending(false, true);
+        });
+
+        modelBuilder.Entity<UserAssignmentState>(entity =>
+        {
+            entity.HasKey(item => new
+            {
+                item.UserId,
+                item.AssignmentId
+            });
+
+            entity.Property(item => item.CurrentCode)
+                .IsRequired();
+
+            entity.Property(item => item.UpdatedAtUtc)
+                .IsRequired();
         });
     }
 }
