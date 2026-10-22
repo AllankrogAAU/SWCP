@@ -119,6 +119,94 @@ docker compose --profile frontend --profile local-llm build
 The local vLLM model files are bind-mounted and excluded from application image
 build contexts.
 
+## Frontend Benchmark
 
+`apps/benchmark` contains a streaming CodeNet sampler, a Playwright driver that
+submits through the actual frontend, resumable JSONL telemetry, an optional
+Azure feedback judge, a Cohen's kappa calculator, and dependency-free SVG/LaTeX
+report generation. It does not extract the CodeNet archive or download model
+weights. The separate repository-fixture validation slice is included unless
+`--no-repo-fixtures` is passed.
 
+Install the benchmark dependencies and Chromium once:
+
+```powershell
+python -m venv .venv-benchmark
+.\.venv-benchmark\Scripts\Activate.ps1
+python -m pip install -r apps\benchmark\requirements.txt
+python -m playwright install chromium
+```
+
+Set `SWCP_BENCHMARK_TEACHER_USERNAME`, `SWCP_BENCHMARK_TEACHER_PASSWORD`, and
+`SWCP_BENCHMARK_STUDENT_PASSWORD` in the shell or root `.env`. The runner passes
+the teacher values to Compose with development seeding enabled so it can
+provision CodeNet assignments. The teacher username/password must match an
+existing seeded account if that account is already present in the database.
+Keep these values private; benchmark result JSONL also contains submitted C
+source and model feedback and is ignored by Git.
+
+Start with a small validation run before the default 20-per-status sample:
+
+```powershell
+$env:SWCP_CODENET_ARCHIVE = 'C:\Users\allan\Downloads\Project_CodeNet.tar.gz'
+python apps\benchmark\src\run_benchmark.py `
+  --samples-per-status 1 --no-repo-fixtures --model azure:Gpt6Sol
+```
+
+The runner starts/rebuilds the existing Compose frontend and services, uses
+`POSTGRES_PORT=15432` by default to avoid the known host port 5432 conflict,
+creates assignments as needed, then submits each sample through Playwright.
+Use `--model azure:Gpt6Sol --model azure:Gpt4o` to run both configured Azure
+deployments, or repeat `--model local:<relative-model-directory>[=<served-name>]`
+to run local models. Local paths must already exist under
+`apps/localLLM/models` with `config.json` and weight files; no download is
+attempted. For local models the runner configures vLLM on the Compose host port
+(8080 by default), with 0.92 GPU memory utilization, 4096 context length, and
+four sequences. It uses AWQ-Marlin above 7B and eager mode at 12B or larger.
+Use `--burst-concurrency N` for parallel browser sessions with distinct
+benchmark student accounts; the default is sequential. The Compose model
+service is `local-llm-server` on port 8080 in this repository.
+
+`apps/benchmark/results/inferences.jsonl` is append-only and flushed after each
+inference. Successful `(sample, provider, model, context)` rows are skipped on
+resume; failed rows can be retried. Pipeline stage timing and token usage come
+from structured worker logs. Estimated cost remains null unless both per-million
+input/output rates are supplied with `--input-usd-per-million` and
+`--output-usd-per-million`; use `--pricing-json` for different rates by model,
+with keys such as `Azure:Gpt6Sol` and fields `input_usd_per_million` and
+`output_usd_per_million`. `peak_vram_mb` is sampled from `nvidia-smi` during
+each local inference (and represents total device usage, not a process-only
+allocation).
+
+The UI currently sends WebSocket progress/status events, not generated content
+tokens. Accordingly, `frontend_ttft_ms` means time to the first WebSocket
+progress event, not model time-to-first-token. Pipeline phase values derived
+from browser events are approximate; structured worker stage durations and
+queue waits are preferred when present.
+
+After collecting results, optionally run the Azure judge and generate
+publication assets:
+
+```powershell
+python apps\benchmark\src\judge_feedback.py apps\benchmark\results\inferences.jsonl
+python apps\benchmark\src\calibration.py apps\benchmark\results\judged.jsonl
+python apps\benchmark\src\report.py apps\benchmark\results\judged.jsonl
+```
+
+To produce QoS-only plots without invoking the optional judge, pass
+`inferences.jsonl` to `report.py` instead.
+
+The judge reads `SWCP_BENCHMARK_JUDGE_ENDPOINT`,
+`SWCP_BENCHMARK_JUDGE_API_KEY`, and `SWCP_BENCHMARK_JUDGE_DEPLOYMENT`. Endpoint
+and API key can fall back to the configured Gpt4o Azure settings in `.env`; set
+the judge deployment explicitly. Judge inference charges are separate and are
+not included in benchmark model cost estimates. Human calibration labels can be
+added as `human_label` values to judged JSONL before computing Cohen's kappa.
+SVG charts, summary JSON, and a LaTeX table are written under
+`apps/benchmark/results/plots`.
+
+For a readable timing breakdown of the latest individual submission:
+
+```powershell
 .\scripts\Show-PipelineTimings.ps1
+```

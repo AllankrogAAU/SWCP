@@ -12,12 +12,15 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import nats
+from nats.js.api import RetentionPolicy, StreamConfig
+from nats.js.errors import APIError, NotFoundError
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.api import AckPolicy, ConsumerConfig
 from pydantic import ValidationError
 
 from contracts import CompilationResult, SandboxResult, SandboxTask, SandboxTestResult
 from evaluation.evaluator import evaluate
+from sandbox.docker import DockerSandboxProvider
 from sandbox.interface import Limits
 from sandbox.k8s_pod import KubeSandboxProvider, PodConfig
 
@@ -247,6 +250,26 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
 async def run_worker() -> None:
     connection = await nats.connect(NATS_URL, name="c-sandbox-worker")
     jetstream = connection.jetstream()
+    await ensure_stream(
+        jetstream,
+        TASK_STREAM,
+        StreamConfig(
+            name=TASK_STREAM,
+            subjects=[TASK_SUBJECT],
+            retention=RetentionPolicy.WORK_QUEUE,
+            duplicate_window=600,
+        ),
+    )
+    await ensure_stream(
+        jetstream,
+        "SANDBOX_TASKS_DLQ",
+        StreamConfig(
+            name="SANDBOX_TASKS_DLQ",
+            subjects=["sandbox.tasks.dlq"],
+            retention=RetentionPolicy.LIMITS,
+            max_age=7 * 24 * 60 * 60,
+        ),
+    )
     consumer_config = ConsumerConfig(
         durable_name=TASK_DURABLE,
         ack_policy=AckPolicy.EXPLICIT,
@@ -263,7 +286,13 @@ async def run_worker() -> None:
         )
     consumer = await jetstream.pull_subscribe_bind(TASK_DURABLE, stream=TASK_STREAM)
 
-    provider = KubeSandboxProvider(PodConfig.from_env(), pool_size=POOL_SIZE)
+    sandbox_provider = os.getenv("SANDBOX_PROVIDER", "kubernetes").strip().lower()
+    if sandbox_provider == "docker":
+        provider = DockerSandboxProvider.from_env()
+    elif sandbox_provider == "kubernetes":
+        provider = KubeSandboxProvider(PodConfig.from_env(), pool_size=POOL_SIZE)
+    else:
+        raise ValueError(f"Unsupported sandbox provider '{sandbox_provider}'.")
     executor = ThreadPoolExecutor(
         max_workers=MAX_CONCURRENT, thread_name_prefix="sandbox"
     )
@@ -329,6 +358,19 @@ async def run_worker() -> None:
         provider.close()
         await connection.drain()
         await connection.close()
+
+
+async def ensure_stream(jetstream, name: str, stream_config: StreamConfig) -> None:
+    try:
+        await jetstream.stream_info(name)
+        return
+    except NotFoundError:
+        pass
+
+    try:
+        await jetstream.add_stream(config=stream_config)
+    except APIError:
+        await jetstream.stream_info(name)
 
 
 if __name__ == "__main__":

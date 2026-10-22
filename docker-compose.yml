@@ -81,10 +81,10 @@ services:
       LocalLlm__BaseUrl: http://local-llm-server:8080
       LocalLlm__ModelName: ${LLM_MODEL_NAME:-}
       AzureAIFoundry__DefaultModel: ${AzureAIFoundry__DefaultModel:-Gpt6Sol}
-      AzureAIFoundry__Models__Gpt4o__Endpoint: ${AzureAIFoundry__Models__Gpt4o__Endpoint:-}
-      AzureAIFoundry__Models__Gpt4o__ApiKey: ${AzureAIFoundry__Models__Gpt4o__ApiKey:-}
-      AzureAIFoundry__Models__Gpt6Sol__Endpoint: ${AzureAIFoundry__Models__Gpt6Sol__Endpoint:-}
-      AzureAIFoundry__Models__Gpt6Sol__ApiKey: ${AzureAIFoundry__Models__Gpt6Sol__ApiKey:-}
+      AzureAIFoundry__Models__Gpt4o__Endpoint: ${AzureAIFoundry__Models__Gpt4o__Endpoint:-${AzureAIFoundryModelsGpt4oEndpoint:-}}
+      AzureAIFoundry__Models__Gpt4o__ApiKey: ${AzureAIFoundry__Models__Gpt4o__ApiKey:-${AzureAIFoundryModelsGpt4oApiKey:-}}
+      AzureAIFoundry__Models__Gpt6Sol__Endpoint: ${AzureAIFoundry__Models__Gpt6Sol__Endpoint:-${AzureAIFoundryModelsGpt6SolEndpoint:-}}
+      AzureAIFoundry__Models__Gpt6Sol__ApiKey: ${AzureAIFoundry__Models__Gpt6Sol__ApiKey:-${AzureAIFoundryModelsGpt6SolApiKey:-}}
     depends_on:
       nats:
         condition: service_healthy
@@ -103,9 +103,13 @@ services:
       dockerfile: Dockerfile.worker
     environment:
       NATS_URL: nats://nats:4222
+      SANDBOX_PROVIDER: docker
+      SANDBOX_IMAGE: c-sandbox-runtime:latest
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "0"
     depends_on:
       nats:
         condition: service_healthy
@@ -185,6 +189,14 @@ services:
       - ./apps/localLLM/models:/models:ro
     environment:
       HF_HUB_OFFLINE: "1"
+      LLM_MODEL_PATH: ${LLM_MODEL_PATH:?Set LLM_MODEL_PATH in the root .env}
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:?Set LLM_MODEL_NAME in the root .env}
+      VLLM_QUANTIZATION: ${VLLM_QUANTIZATION:-awq_marlin}
+      VLLM_KV_CACHE_DTYPE: ${VLLM_KV_CACHE_DTYPE:-auto}
+      VLLM_MAX_MODEL_LEN: ${VLLM_MAX_MODEL_LEN:-8192}
+      VLLM_GPU_MEMORY_UTILIZATION: ${VLLM_GPU_MEMORY_UTILIZATION:-0.80}
+      VLLM_MAX_NUM_SEQS: ${VLLM_MAX_NUM_SEQS:-4}
+      VLLM_ENFORCE_EAGER: ${VLLM_ENFORCE_EAGER:-false}
     shm_size: "2gb"
     deploy:
       resources:
@@ -193,17 +205,22 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      - "/models/${LLM_MODEL_PATH:?Set LLM_MODEL_PATH in the root .env}"
-      - "--served-model-name=${LLM_MODEL_NAME:?Set LLM_MODEL_NAME in the root .env}"
-      - "--quantization=${VLLM_QUANTIZATION:-awq_marlin}"
-      - "--kv-cache-dtype=${VLLM_KV_CACHE_DTYPE:-auto}"
-      - "--max-model-len=${VLLM_MAX_MODEL_LEN:-8192}"
-      - "--gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.80}"
-      - "--max-num-seqs=${VLLM_MAX_NUM_SEQS:-4}"
-      - '--structured-outputs-config={"backend":"xgrammar","disable_any_whitespace":true}'
-      - "--host=0.0.0.0"
-      - "--port=8080"
+      - |
+        set -- "/models/$${LLM_MODEL_PATH}"
+        set -- "$$@" "--served-model-name=$${LLM_MODEL_NAME}"
+        if [ "$${VLLM_QUANTIZATION}" != "none" ]; then
+          set -- "$$@" "--quantization=$${VLLM_QUANTIZATION}"
+        fi
+        set -- "$$@" "--kv-cache-dtype=$${VLLM_KV_CACHE_DTYPE}"
+        set -- "$$@" "--max-model-len=$${VLLM_MAX_MODEL_LEN}"
+        set -- "$$@" "--gpu-memory-utilization=$${VLLM_GPU_MEMORY_UTILIZATION}"
+        set -- "$$@" "--max-num-seqs=$${VLLM_MAX_NUM_SEQS}"
+        set -- "$$@" '--structured-outputs-config={"backend":"xgrammar","disable_any_whitespace":true}'
+        set -- "$$@" "--host=0.0.0.0" "--port=8080"
+        if [ "$${VLLM_ENFORCE_EAGER}" = "true" ]; then set -- "$$@" --enforce-eager; fi
+        exec vllm serve "$$@"
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
       interval: 15s

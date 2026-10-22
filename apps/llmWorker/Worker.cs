@@ -45,7 +45,7 @@ public sealed class Worker(
             Messaging.LlmLocalTaskConsumer,
             Messaging.LlmLocalTaskSubject,
             4,
-            TimeSpan.FromSeconds(60),
+            TimeSpan.FromMinutes(5),
             stoppingToken);
 
         logger.LogInformation("LLM worker consuming Azure and local JetStream task subjects");
@@ -113,9 +113,10 @@ public sealed class Worker(
                 var completion = await processor.CompleteAsync(task, stoppingToken);
                 stageTimer.Stop();
                 logger.LogInformation(
-                    "Pipeline stage completed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {backend} {attempt} {status}",
+                    "Pipeline stage completed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {backend} {attempt} {status} {prompt_tokens} {completion_tokens}",
                     "pipeline.stage.completed", "llm", task.SubmissionId, traceId, stageTimer.ElapsedMilliseconds,
-                    task.Backend, attempt, "completed");
+                    task.Backend, attempt, "completed",
+                    completion.TokenUsage?.PromptTokens, completion.TokenUsage?.CompletionTokens);
                 await PublishResultAsync(new LlmResult(
                     task.SubmissionId,
                     "success",

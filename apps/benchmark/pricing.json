@@ -1,0 +1,5 @@
+{
+  "_note": "USD per 1M tokens, Azure Global Standard pay-as-you-go list prices (Oct 2026, third-party summaries). Verify against your Azure agreement. Local vLLM models default to 0 marginal cost.",
+  "Azure:Gpt4o": { "input_usd_per_million": 2.5, "output_usd_per_million": 10.0 },
+  "Azure:Gpt6Sol": { "input_usd_per_million": 2.0, "output_usd_per_million": 10.0 }
+}

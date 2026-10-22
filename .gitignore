@@ -60,6 +60,11 @@ dlldata.c
 
 # Benchmark Results
 BenchmarkDotNet.Artifacts/
+apps/benchmark/results/
+apps/benchmark/logs/
+.venv-benchmark/
+apps/localLLM/models/*
+!apps/localLLM/models/.gitkeep
 
 # .NET
 project.lock.json

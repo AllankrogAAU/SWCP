@@ -122,16 +122,18 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
         }
 
         var client = httpClientFactory.CreateClient("LocalLlm");
+        var messages = new[]
+        {
+            new { role = "system", content = task.SystemPrompt },
+            new { role = "user", content = task.UserPrompt }
+        };
+        var maxTokens = await FitLocalMaxTokensAsync(client, modelName, messages, task.Parameters.MaxTokens, cancellationToken);
         using var response = await client.PostAsJsonAsync("/v1/chat/completions", new
         {
             model = modelName,
-            messages = new[]
-            {
-                new { role = "system", content = task.SystemPrompt },
-                new { role = "user", content = task.UserPrompt }
-            },
+            messages,
             temperature = task.Parameters.Temperature,
-            max_tokens = task.Parameters.MaxTokens,
+            max_tokens = maxTokens,
             top_p = task.Parameters.TopP,
             response_format = new
             {
@@ -176,6 +178,41 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
         }
 
         return ParseCompletion(content, usage, task);
+    }
+
+    // vLLM rejects requests whose prompt + max_tokens exceed --max-model-len, so clamp to the remaining budget.
+    private static async Task<int> FitLocalMaxTokensAsync(
+        HttpClient client, string modelName, object messages, int requested, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var response = await client.PostAsJsonAsync("/tokenize", new { model = modelName, messages }, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                return requested;
+            }
+
+            using var document = await response.Content.ReadFromJsonAsync<JsonDocument>(cancellationToken: cancellationToken);
+            if (document is null
+                || !document.RootElement.TryGetProperty("count", out var countElement)
+                || !document.RootElement.TryGetProperty("max_model_len", out var maxElement))
+            {
+                return requested;
+            }
+
+            var remaining = maxElement.GetInt32() - countElement.GetInt32() - 16;
+            if (remaining < 64)
+            {
+                throw new InvalidOperationException(
+                    $"Prompt uses {countElement.GetInt32()} tokens, leaving no room in the local model context of {maxElement.GetInt32()}.");
+            }
+
+            return Math.Min(requested, remaining);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or JsonException)
+        {
+            return requested;
+        }
     }
 
     private static LlmCompletion ParseCompletion(string content, LlmTokenUsage? usage, LlmTask task)
