@@ -122,3 +122,77 @@ psql -h localhost -U swcp_user -d swcp_db
 kubectl delete namespace swcp
 ```
 
+---
+
+## 7. Monitoring, Distributed Tracing & Observability (Grafana Stack)
+
+SWCP includes a fully integrated, production-grade telemetry and observability stack deployed in the `monitoring` namespace:
+- **Grafana**: Unified Web UI for dashboards, log exploration, and distributed tracing.
+- **Loki**: Centralized log aggregation capturing structured JSON logs from all pods.
+- **Tempo**: High-throughput distributed tracing store tracking end-to-end W3C request traces.
+- **Prometheus**: Real-time cluster metrics, pod CPU/RAM usage, and NATS queue depths.
+- **Alloy**: DaemonSet collecting pod stdout/stderr logs and forwarding them into Loki.
+
+### Deploying or Redeploying the Monitoring Stack
+```bash
+bash scripts/deploy-monitoring.sh
+```
+
+### Accessing the Grafana Web UI
+Grafana is exposed directly on host port `3000`:
+- **Local Access**: `http://localhost:3000/`
+- **Tailscale Network**: `http://<tailscale-ip>:3000/` (e.g. `http://100.111.90.116:3000/`)
+
+*Anonymous Admin mode is enabled for development convenience — no password or login prompt required.*
+
+### Pre-Configured Dashboard
+Open **Dashboards** → **SWCP Pipeline Stress Test & Timings**:
+- **Total Pipeline Duration**: Real-time p50, p95, and p99 submission completion latency.
+- **NATS Queue Delay vs Execution Time**: Compares queue wait times against actual worker execution duration to detect worker starvation under stress.
+- **Sandbox Evaluation Latency**: Granular GCC compile duration vs binary execution duration.
+- **Recent Pipeline Submissions**: Real-time structured log stream with clickable **TraceID** badges that jump straight into Tempo's waterfall view.
+
+---
+
+## 8. CLI Stress Testing & Pipeline Timings (`show-pipeline-timings.sh`)
+
+To quickly inspect pipeline performance and pinpoint bottlenecks without opening a web browser:
+
+```bash
+# View timings and trace waterfall for the most recent completed submission
+./scripts/show-pipeline-timings.sh
+
+# View timings for a specific submission ID
+./scripts/show-pipeline-timings.sh <submission-uuid>
+```
+
+### Example Output
+```text
+================================================================================
+ SUBMISSION TIMINGS & WATERFALL: a49b177c-d060-46b8-b56c-1066c995511a
+ Trace ID:     f61ed1c57329c061740ca2ca28fcbf67
+ Grafana URL:  http://100.111.90.116:3000/d/swcp-pipeline-timings/swcp-pipeline-stress-test-and-timings
+================================================================================
+
+[Pipeline Stages (from Loki Logs)]
+STAGE                      DURATION         QUEUE WAIT     STATUS         OUTCOME
+---------------------------------------------------------------------------------
+sandbox (queue wait)       -                45 ms          SANDBOX_PROCESSING 
+submission_enqueue         163 ms           -              queued         
+TOTAL PIPELINE             491 ms           -              completed      sandbox_run_completed
+sandbox                    264 ms           -              completed      success;compiler-flags-not-yet-appl
+
+[Deep Waterfall & Sub-Span Breakdown (from Tempo)]
+OFFSET     SERVICE            SPAN NAME                  DURATION     DETAILS
+-----------------------------------------------------------------------------
++0.0ms     core-api           POST /api/submissions/     174.4 ms     http: 202
++156.1ms   core-api           publish sandbox.tasks      13.5 ms      
++165.7ms   c-sandbox-worker   sandbox.evaluate           264.3 ms     outcome: success;compiler-flags-not-yet
++166.0ms   c-sandbox-worker   sandbox.execute_code       263.2 ms     
++429.1ms   c-sandbox-worker   sandbox.compile            0.0 ms       gcc compile: 89ms
++429.2ms   c-sandbox-worker   sandbox.run_binary         0.0 ms       binary run: 11ms (exit: 0)
++449.8ms   core-api           process sandbox.results    62.6 ms      
+================================================================================
+```
+
+

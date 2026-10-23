@@ -11,10 +11,44 @@ using Microsoft.IdentityModel.Tokens;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
 using NATS.Client.Serializers.Json;
+using System.Diagnostics;
+using OpenTelemetry;
+using OpenTelemetry.Exporter;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.AddJsonConsole(options => options.TimestampFormat = "yyyy-MM-ddTHH:mm:ss.fffZ");
+var otelEndpoint = builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"] ?? builder.Configuration["Otel:Endpoint"];
+if (!string.IsNullOrWhiteSpace(otelEndpoint))
+{
+    builder.Services.AddOpenTelemetry()
+        .ConfigureResource(resource => resource.AddService(
+            serviceName: builder.Configuration["OTEL_SERVICE_NAME"] ?? "core-api"))
+        .WithTracing(tracing =>
+        {
+            tracing
+                .SetSampler(new AlwaysOnSampler())
+                .AddAspNetCoreInstrumentation(options =>
+                {
+                    options.RecordException = true;
+                    options.Filter = httpContext => !httpContext.Request.Path.StartsWithSegments("/healthz");
+                })
+                .AddHttpClientInstrumentation()
+                .AddSource("SWCP.CoreApi")
+                .AddOtlpExporter(options =>
+                {
+                    options.Endpoint = new Uri(otelEndpoint);
+                    options.Protocol = otelEndpoint.Contains(":4318") ? OtlpExportProtocol.HttpProtobuf : OtlpExportProtocol.Grpc;
+                    options.BatchExportProcessorOptions = new BatchExportProcessorOptions<Activity>
+                    {
+                        ScheduledDelayMilliseconds = 500,
+                        MaxExportBatchSize = 32
+                    };
+                });
+        });
+}
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 var keyDirectory = builder.Configuration["Jwt:KeyDirectory"] ?? Path.Combine(builder.Environment.ContentRootPath, ".keys");

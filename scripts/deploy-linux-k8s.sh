@@ -51,21 +51,23 @@ if ! kubectl get deployment metrics-server -n kube-system -o jsonpath='{.spec.te
   kubectl patch deployment metrics-server -n kube-system --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kubelet-insecure-tls"}]' || true
 fi
 
-echo "=== Ensuring Ingress-NGINX is installed with hostNetwork ==="
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.1/deploy/static/provider/cloud/deploy.yaml >/dev/null 2>&1 || true
+if ! kubectl get deployment ingress-nginx-controller -n ingress-nginx >/dev/null 2>&1; then
+  echo "=== Ensuring Ingress-NGINX is installed with hostNetwork ==="
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.1/deploy/static/provider/cloud/deploy.yaml >/dev/null 2>&1 || true
 
-if [ "$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.type}' 2>/dev/null || true)" != "ClusterIP" ]; then
-  kubectl patch service ingress-nginx-controller -n ingress-nginx --type=merge -p '{"spec":{"type":"ClusterIP"}}' || true
-fi
-if [ "$(kubectl get deployment ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.template.spec.hostNetwork}' 2>/dev/null || true)" != "true" ]; then
-  kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type=json -p='[{"op":"add","path":"/spec/template/spec/hostNetwork","value":true},{"op":"add","path":"/spec/template/spec/dnsPolicy","value":"ClusterFirstWithHostNet"}]' || true
-fi
-if [ "$(kubectl get deployment ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.strategy.type}' 2>/dev/null || true)" != "Recreate" ]; then
-  kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type=json -p='[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]' || true
-fi
+  if [ "$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.type}' 2>/dev/null || true)" != "ClusterIP" ]; then
+    kubectl patch service ingress-nginx-controller -n ingress-nginx --type=merge -p '{"spec":{"type":"ClusterIP"}}' || true
+  fi
+  if [ "$(kubectl get deployment ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.template.spec.hostNetwork}' 2>/dev/null || true)" != "true" ]; then
+    kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type=json -p='[{"op":"add","path":"/spec/template/spec/hostNetwork","value":true},{"op":"add","path":"/spec/template/spec/dnsPolicy","value":"ClusterFirstWithHostNet"}]' || true
+  fi
+  if [ "$(kubectl get deployment ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.strategy.type}' 2>/dev/null || true)" != "Recreate" ]; then
+    kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type=json -p='[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]' || true
+  fi
 
-echo "Waiting for ingress-nginx rollout..."
-kubectl rollout status deployment/ingress-nginx-controller -n ingress-nginx --timeout=120s || true
+  echo "Waiting for ingress-nginx rollout..."
+  kubectl rollout status deployment/ingress-nginx-controller -n ingress-nginx --timeout=120s || true
+fi
 
 # All defined image targets
 declare -A IMAGE_MAP
@@ -107,6 +109,8 @@ for entry in "${images_to_build[@]}"; do
   echo "--> Building $image from $dockerfile..."
   $DOCKER_CMD build -t "$image" -f "$dockerfile" "$context"
   echo "--> Importing $image into k3s containerd..."
+  sudo crictl rmi "$image" >/dev/null 2>&1 || true
+  $CTR_CMD images rm "$image" >/dev/null 2>&1 || true
   $DOCKER_CMD save "$image" | $CTR_CMD images import -
 done
 

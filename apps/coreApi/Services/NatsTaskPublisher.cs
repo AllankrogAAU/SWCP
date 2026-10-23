@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
 using NATS.Client.JetStream.Models;
@@ -7,11 +8,14 @@ namespace coreApi.Services;
 
 public sealed class NatsTaskPublisher(INatsJSContext jetStream)
 {
+    private static readonly ActivitySource ActivitySource = new("SWCP.CoreApi");
+
     public async Task PublishSandboxTaskAsync(
         SandboxTask task,
         CancellationToken cancellationToken,
         int attempt = 0)
     {
+        using var activity = ActivitySource.StartActivity("publish sandbox.tasks");
         await jetStream.CreateOrUpdateStreamAsync(
             new StreamConfig(Messaging.SandboxTasksStream, [Messaging.SandboxTaskSubject])
             {
@@ -39,6 +43,7 @@ public sealed class NatsTaskPublisher(INatsJSContext jetStream)
 
     public async Task PublishLlmTaskAsync(LlmTask task, CancellationToken cancellationToken)
     {
+        using var activity = ActivitySource.StartActivity("publish llm.tasks");
         await jetStream.CreateOrUpdateStreamAsync(
             new StreamConfig(Messaging.LlmTasksStream,
                 [Messaging.LlmAzureTaskSubject, Messaging.LlmLocalTaskSubject])
