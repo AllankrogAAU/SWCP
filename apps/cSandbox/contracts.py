@@ -22,6 +22,8 @@ class SandboxTask(StrictContract):
     compilerFlags: list[str]
     testCases: list[SandboxTestCase]
     traceParent: str | None = None
+    harnessSource: str | None = None
+    runStdin: str = ""
 
 
 class CompilationResult(StrictContract):

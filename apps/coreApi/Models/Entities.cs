@@ -35,6 +35,7 @@ public sealed class Assignment
     public string Description { get; set; } = string.Empty;
     public string TaskFocus { get; set; } = string.Empty;
     public string TestCasesJson { get; set; } = "[]";
+    public string? HarnessSource { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
 }
 
@@ -46,6 +47,7 @@ public sealed class Submission
     public string SourceCode { get; set; } = string.Empty;
     public string Action { get; set; } = "submit";
     public string LlmBackend { get; set; } = "azure";
+    public string StandardInput { get; set; } = string.Empty;
     public SubmissionStatus Status { get; set; }
     public int RetryCount { get; set; }
     public string? SandboxOutputJson { get; set; }

@@ -143,10 +143,15 @@ export function requestHint(assignmentId: string, sourceCode: string, llmBackend
   })
 }
 
-export function runSource(assignmentId: string, sourceCode: string, llmBackend: LlmBackend) {
+export function runSource(
+  assignmentId: string,
+  sourceCode: string,
+  llmBackend: LlmBackend,
+  standardInput: string,
+) {
   return request<SubmissionAccepted>('/api/submissions/run', {
     method: 'POST',
-    body: JSON.stringify({ assignmentId, sourceCode, llmBackend }),
+    body: JSON.stringify({ assignmentId, sourceCode, llmBackend, standardInput }),
   })
 }
 

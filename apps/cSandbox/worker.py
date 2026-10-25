@@ -74,28 +74,46 @@ logger = logging.getLogger("c-sandbox-worker")
 
 
 def evaluate_task(task: SandboxTask, provider) -> SandboxResult:
-    result = evaluate(task.source, provider, Limits())
+    result = evaluate(
+        task.source,
+        provider,
+        Limits(),
+        task.testCases,
+        task.harnessSource,
+        task.runStdin,
+    )
     status = result.status.value
     compiled = status not in {"compile_error", "compile_timeout"}
-    test_results = []
+    test_results: list[SandboxTestResult] = []
 
     if compiled:
-        test_results.append(
-            SandboxTestResult(
-                passed=status == "success" and result.exit_code == 0,
-                stdout=result.stdout or "",
-                stderr=result.stderr or "",
-                exitCode=result.exit_code,
-                durationMilliseconds=result.run_ms,
-                memoryConsumedMegabytes=None,
+        if task.testCases:
+            test_results.extend(
+                SandboxTestResult(
+                    passed=run.rc == 0 and run.stdout == test_case.expectedStdout,
+                    stdout=run.stdout,
+                    stderr=run.stderr,
+                    exitCode=run.rc,
+                    durationMilliseconds=run.duration_ms,
+                    memoryConsumedMegabytes=None,
+                )
+                for test_case, run in zip(task.testCases, result.test_runs, strict=True)
             )
-        )
+        else:
+            test_results.append(
+                SandboxTestResult(
+                    passed=status == "success" and result.exit_code == 0,
+                    stdout=result.stdout or "",
+                    stderr=result.stderr or "",
+                    exitCode=result.exit_code,
+                    durationMilliseconds=result.run_ms,
+                    memoryConsumedMegabytes=None,
+                )
+            )
 
     limitations = []
     if task.compilerFlags:
         limitations.append("compiler-flags-not-yet-applied")
-    if task.testCases:
-        limitations.append("per-test-case-execution-not-yet-implemented")
 
     return SandboxResult(
         submissionId=task.submissionId,

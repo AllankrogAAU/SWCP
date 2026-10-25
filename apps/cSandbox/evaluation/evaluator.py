@@ -1,6 +1,8 @@
 import logging
+from collections.abc import Sequence
 from typing import Any
 
+from contracts import SandboxTestCase
 from evaluation.result import EvaluationResult, SandboxReport, Status
 from sandbox.interface import Limits, SandboxError, SandboxProvider
 
@@ -22,12 +24,25 @@ def to_result(report: SandboxReport) -> EvaluationResult:
     if compile_.rc != 0:
         return EvaluationResult(status=Status.COMPILE_ERROR, **base)
 
-    run = report.run
-    if run is None:
-        raise SandboxError("sandbox report contained no run phase")
     lint_output = None
     if report.lint is not None:
         lint_output = "lint timed out" if report.lint.timed_out else report.lint.stderr
+    if report.test_runs:
+        return EvaluationResult(
+            status=(
+                Status.RUN_TIMEOUT
+                if any(test_run.timed_out for test_run in report.test_runs)
+                else Status.SUCCESS
+            ),
+            **base,
+            lint_output=lint_output,
+            run_ms=sum(test_run.duration_ms for test_run in report.test_runs),
+            test_runs=report.test_runs,
+        )
+
+    run = report.run
+    if run is None:
+        raise SandboxError("sandbox produced neither a run phase nor test results")
     run_fields: dict[str, Any] = {
         "lint_output": lint_output,
         "stdout": run.stdout,
@@ -42,14 +57,31 @@ def to_result(report: SandboxReport) -> EvaluationResult:
 
 
 def evaluate(
-    source: str, provider: SandboxProvider, limits: Limits | None = None
+    source: str,
+    provider: SandboxProvider,
+    limits: Limits | None = None,
+    test_cases: Sequence[SandboxTestCase] = (),
+    harness_source: str | None = None,
+    run_stdin: str = "",
 ) -> EvaluationResult:
     limits = limits or Limits()
     last_error: SandboxError | None = None
     for attempt in (1, 2):
         sandbox = provider.acquire()
         try:
-            return to_result(sandbox.run(source, limits))
+            report = sandbox.run(source, limits, test_cases, harness_source, run_stdin)
+            if (
+                test_cases
+                and report.compile is not None
+                and not report.compile.timed_out
+                and report.compile.rc == 0
+                and len(report.test_runs) != len(test_cases)
+            ):
+                raise SandboxError(
+                    f"sandbox returned {len(report.test_runs)} test results "
+                    f"for {len(test_cases)} test cases"
+                )
+            return to_result(report)
         except SandboxError as exception:
             last_error = exception
             logger.warning("Sandbox attempt %d failed: %s", attempt, exception)

@@ -27,6 +27,7 @@ public sealed class CoreDbContext(DbContextOptions<CoreDbContext> options) : DbC
             entity.Property(assignment => assignment.Description).IsRequired();
             entity.Property(assignment => assignment.TaskFocus).IsRequired();
             entity.Property(assignment => assignment.TestCasesJson).HasColumnType("jsonb").IsRequired();
+            entity.Property(assignment => assignment.HarnessSource).HasColumnType("text");
         });
 
         modelBuilder.Entity<Submission>(entity =>
@@ -35,6 +36,7 @@ public sealed class CoreDbContext(DbContextOptions<CoreDbContext> options) : DbC
             entity.Property(submission => submission.Status).HasConversion<string>().HasMaxLength(32);
             entity.Property(submission => submission.SourceCode).IsRequired();
             entity.Property(submission => submission.Action).HasMaxLength(16).HasDefaultValue("submit").IsRequired();
+            entity.Property(submission => submission.StandardInput).HasColumnType("text").HasDefaultValue(string.Empty).IsRequired();
             entity.Property(submission => submission.SandboxOutputJson).HasColumnType("jsonb");
             entity.Property(submission => submission.LlmFeedback).HasColumnType("text");
             entity.Property(submission => submission.TaskSolved);
