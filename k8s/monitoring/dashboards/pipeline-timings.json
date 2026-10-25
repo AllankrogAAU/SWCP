@@ -27,7 +27,7 @@
     },
     {
       "datasource": { "type": "loki", "uid": "loki" },
-      "description": "95th percentile latency of each stage. Spikes here show execution slowdowns.",
+      "description": "50th and 95th percentile duration of each pipeline stage and total pipeline end-to-end. Spikes indicate processing slowdowns.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -49,14 +49,20 @@
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "quantile_over_time(0.95, {namespace=\"swcp\"} | json | unwrap duration_ms [1m]) by (stage)",
+          "expr": "quantile_over_time(0.95, {namespace=\"swcp\"} | regexp `.*\"stage\":\\s*\"(?P<stage>[^\"]+)\".*\"duration_ms\":\\s*(?P<duration_ms>\\d+)` | unwrap duration_ms [5m]) by (stage)",
           "legendFormat": "p95 {{stage}}"
         },
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "quantile_over_time(0.50, {namespace=\"swcp\"} | json | unwrap duration_ms [1m]) by (stage)",
+          "expr": "quantile_over_time(0.50, {namespace=\"swcp\"} | regexp `.*\"stage\":\\s*\"(?P<stage>[^\"]+)\".*\"duration_ms\":\\s*(?P<duration_ms>\\d+)` | unwrap duration_ms [5m]) by (stage)",
           "legendFormat": "p50 {{stage}}"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95, {namespace=\"swcp\"} |= \"pipeline.completed\" | regexp `.*\"duration_ms\":\\s*(?P<duration_ms>\\d+)` | unwrap duration_ms [5m])",
+          "legendFormat": "p95 TOTAL Pipeline"
         }
       ],
       "title": "Stage Duration Percentiles (p50 vs p95)",
@@ -64,21 +70,21 @@
     },
     {
       "datasource": { "type": "loki", "uid": "loki" },
-      "description": "Time a task sat waiting in NATS before an available worker picked it up. A spike means worker pool is saturated!",
+      "description": "Time tasks sat waiting in NATS JetStream before worker pickup. Spikes indicate worker starvation under load.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
           "custom": {
             "drawStyle": "bars",
-            "fillOpacity": 50,
+            "fillOpacity": 60,
             "lineWidth": 1
           },
           "thresholds": {
             "mode": "absolute",
             "steps": [
               { "color": "green", "value": null },
-              { "color": "yellow", "value": 500 },
-              { "color": "red", "value": 2000 }
+              { "color": "yellow", "value": 200 },
+              { "color": "red", "value": 1000 }
             ]
           },
           "unit": "ms"
@@ -94,7 +100,7 @@
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "quantile_over_time(0.95, {namespace=\"swcp\"} | json | unwrap queue_wait_ms [1m]) by (stage)",
+          "expr": "quantile_over_time(0.95, {namespace=\"swcp\"} | regexp `.*\"stage\":\\s*\"(?P<stage>[^\"]+)\".*\"queue_wait_ms\":\\s*(?P<queue_wait_ms>\\d+)` | unwrap queue_wait_ms [5m]) by (stage)",
           "legendFormat": "Queue Wait p95 ({{stage}})"
         }
       ],
@@ -105,7 +111,7 @@
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
       "id": 101,
-      "title": "Throughput & Event Rates",
+      "title": "Throughput & Cluster Resources",
       "type": "row"
     },
     {
@@ -120,7 +126,7 @@
           "unit": "reqps"
         }
       },
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 10 },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 10 },
       "id": 3,
       "options": {
         "legend": { "displayMode": "table", "placement": "bottom" }
@@ -129,13 +135,13 @@
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "sum(rate({namespace=\"swcp\"} | json | event_name=\"pipeline.stage.completed\" [1m])) by (stage)",
+          "expr": "sum(rate({namespace=\"swcp\"} |= \"pipeline.stage.completed\" | regexp `.*\"stage\":\\s*\"(?P<stage>[^\"]+)\".*` [1m])) by (stage)",
           "legendFormat": "{{stage}} completed/s"
         },
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "sum(rate({namespace=\"swcp\"} | json | event_name=\"pipeline.stage.failed\" [1m])) by (stage)",
+          "expr": "sum(rate({namespace=\"swcp\"} |= \"pipeline.stage.failed\" | regexp `.*\"stage\":\\s*\"(?P<stage>[^\"]+)\".*` [1m])) by (stage)",
           "legendFormat": "{{stage}} FAILED/s"
         }
       ],
@@ -151,11 +157,39 @@
             "lineWidth": 2,
             "fillOpacity": 10
           },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 10 },
+      "id": 4,
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last"] }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"swcp\", container!=\"\"}[1m])) by (pod)",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "title": "SWCP Pods CPU Usage (Cores)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "bytes"
         }
       },
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 10 },
-      "id": 4,
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 10 },
+      "id": 5,
       "options": {
         "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last"] }
       },
@@ -180,7 +214,7 @@
     {
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 10, "w": 24, "x": 0, "y": 18 },
-      "id": 5,
+      "id": 6,
       "options": {
         "dedupStrategy": "none",
         "enableLogDetails": true,
@@ -194,21 +228,20 @@
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "{namespace=\"swcp\"} | json | event_name =~ \"pipeline.*\""
+          "expr": "{namespace=\"swcp\"} |= \"pipeline.\""
         }
       ],
-      "title": "Pipeline Events Stream (Click any trace_id to view Tempo waterfall)",
+      "title": "Pipeline Events Stream (Click any TraceID badge to view Tempo waterfall)",
       "type": "logs"
     }
   ],
   "refresh": "5s",
   "schemaVersion": 39,
   "tags": ["swcp", "stress-test", "pipeline"],
-  "time": { "from": "now-15m", "to": "now" },
+  "time": { "from": "now-1h", "to": "now" },
   "timepicker": { "refresh_intervals": ["5s", "10s", "30s", "1m"] },
   "timezone": "browser",
   "title": "SWCP Pipeline Stress Test & Timings",
   "uid": "swcp-pipeline-timings",
-  "version": 1
+  "version": 2
 }
-
