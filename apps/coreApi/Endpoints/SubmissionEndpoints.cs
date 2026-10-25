@@ -103,6 +103,29 @@ public static class SubmissionEndpoints
             }
 
             database.Submissions.Add(submission);
+
+            var state = await database.UserAssignmentStates.
+                 SingleOrDefaultAsync( 
+                x => x.UserId == userId && x.AssignmentId == assignment.Id,cancellationToken);
+
+                if (state is null)
+                {
+                    state = new UserAssignmentState
+                    {
+                        UserId = userId,
+                        AssignmentId = assignment.Id,
+                        CurrentCode = request.SourceCode,
+                        UpdatedAtUtc = DateTimeOffset.UtcNow
+                    };
+
+                    database.UserAssignmentStates.Add(state);
+                }
+                else
+                {
+                    state.CurrentCode = request.SourceCode;
+                    state.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                }
+
             await database.SaveChangesAsync(cancellationToken);
             submission.Status = SubmissionStatus.SANDBOX_QUEUED;
             submission.UpdatedAtUtc = DateTimeOffset.UtcNow;

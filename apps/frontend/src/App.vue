@@ -7,6 +7,7 @@ import {
   clearAccessToken,
   getAccessToken,
   getAssignments,
+  getAssignmentState,
   getSubmissionHistory,
   getSubmission,
   login,
@@ -51,9 +52,26 @@ let reconnectTimer: number | undefined
 let reconnectAttempts = 0
 let pollGeneration = 0
 
-function selectAssignment(id: string) {
+async function selectAssignment(id: string) {
+  console.log("SELECT ASSIGNMENT", id)
+
   selectedId.value = id
-  code.value = '#include <stdio.h>\n\nint main(void) {\n    return 0;\n}'
+
+  try {
+    console.log("LOADING STATE")
+
+    const state = await getAssignmentState(id)
+
+    console.log("STATE", state)
+
+    code.value = state.currentCode
+  } catch (error) {
+    console.error("FAILED TO LOAD STATE", error)
+
+    code.value =
+      '#include <stdio.h>\n\nint main(void) {\n    return 0;\n}'
+  }
+
   feedback.value = ''
   error.value = ''
   terminalOutput.value = ''
@@ -72,8 +90,14 @@ async function loadAssignments() {
     }
   }
   solvedByAssignmentId.value = latestSubmitByAssignment
-  if (!assignments.value.some((assignment) => assignment.id === selectedId.value)) {
-    selectedId.value = assignments.value[0]?.id ?? ''
+
+  const firstId = assignments.value[0]?.id
+
+  console.log("FIRST ID", firstId)
+
+  if (firstId) {
+    console.log("CALLING SELECT ASSIGNMENT")
+    await selectAssignment(firstId)
   }
 }
 
