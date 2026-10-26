@@ -22,8 +22,12 @@ var publicKeyDirectory = builder.Configuration["Jwt:PublicKeyDirectory"] ?? Path
 var signingKeys = RsaSigningKeys.LoadOrCreate(keyDirectory, publicKeyDirectory);
 
 builder.Services.AddSingleton(signingKeys);
-builder.Services.AddDbContext<CoreDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
+var defaultConnection = builder.Configuration.GetConnectionString("Default");
+if (!string.IsNullOrEmpty(defaultConnection))
+{
+    builder.Services.AddDbContext<CoreDbContext>(options =>
+        options.UseNpgsql(defaultConnection));
+}
 builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddSingleton(_ => new NatsConnection(new NatsOpts
@@ -66,7 +70,14 @@ var app = builder.Build();
 await using (var scope = app.Services.CreateAsyncScope())
 {
     var database = scope.ServiceProvider.GetRequiredService<CoreDbContext>();
-    await database.Database.MigrateAsync();
+    if (database.Database.IsRelational())
+    {
+        await database.Database.MigrateAsync();
+    }
+    else
+    {
+        await database.Database.EnsureCreatedAsync();
+    }
     if (builder.Environment.IsDevelopment() || builder.Configuration.GetValue<bool>("SeedSampleAssignments"))
     {
         await DevUserSeeder.SeedSampleAssignmentAsync(scope.ServiceProvider);
@@ -91,4 +102,7 @@ app.MapGet("/.well-known/swcp-signing-key", (RsaSigningKeys keys) =>
 
 await app.RunAsync();
 
-public partial class Program;
+namespace coreApi
+{
+    public partial class Program;
+}

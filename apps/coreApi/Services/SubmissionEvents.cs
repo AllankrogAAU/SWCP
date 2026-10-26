@@ -4,9 +4,20 @@ using SWCP.Contracts;
 
 namespace coreApi.Services;
 
-public sealed class SubmissionEvents(NatsConnection nats)
+public class SubmissionEvents
 {
-    public async Task PublishAsync(
+    private readonly NatsConnection? _nats;
+
+    public SubmissionEvents()
+    {
+    }
+
+    public SubmissionEvents(NatsConnection nats)
+    {
+        _nats = nats;
+    }
+
+    public virtual async Task PublishAsync(
         Submission submission,
         string eventType,
         string message,
@@ -14,6 +25,7 @@ public sealed class SubmissionEvents(NatsConnection nats)
         CancellationToken cancellationToken,
         string? traceParent = null)
     {
+        if (_nats is null) return;
         var notification = new SubmissionNotification(
             submission.Id,
             eventType,
@@ -25,7 +37,7 @@ public sealed class SubmissionEvents(NatsConnection nats)
         {
             { Messaging.TraceParentHeader, traceParent ?? Messaging.CurrentOrNewTraceParent() }
         };
-        await nats.PublishAsync(
+        await _nats.PublishAsync(
             Messaging.NotificationSubject(submission.Id),
             notification,
             headers: headers,

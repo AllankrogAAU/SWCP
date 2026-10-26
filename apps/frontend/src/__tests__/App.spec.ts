@@ -161,4 +161,53 @@ describe('App', () => {
     expect((wrapper.get('[data-test="run"]').element as HTMLButtonElement).disabled).toBe(true)
     wrapper.unmount()
   })
+
+  it('displays authentication error when login fails', async () => {
+    api.login.mockRejectedValueOnce(new Error('Invalid username or password.'))
+    const wrapper = mount(App)
+    await wrapper.find('v-form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Invalid username or password.')
+    expect(wrapper.text()).toContain('Sign in')
+    wrapper.unmount()
+  })
+
+  it('handles submission error gracefully and resets busy state', async () => {
+    const wrapper = mount(App)
+    await wrapper.find('v-form').trigger('submit')
+    await flushPromises()
+
+    api.submitSource.mockRejectedValueOnce(new Error('Network error during submit.'))
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Network error during submit.')
+    expect((wrapper.get('[data-test="submit"]').element as HTMLButtonElement).disabled).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('displays error and completes when submission polling returns FAILED status', async () => {
+    const wrapper = mount(App)
+    await wrapper.find('v-form').trigger('submit')
+    await flushPromises()
+
+    api.getSubmission.mockResolvedValueOnce({
+      submissionId: 'failed-id',
+      assignmentId: 'assignment-id',
+      action: 'submit',
+      status: 'FAILED',
+      errorMessage: 'Execution timed out in sandbox.',
+      sandboxOutput: null,
+      taskSolved: false,
+      llmFeedback: null,
+    })
+
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Execution timed out in sandbox.')
+    expect((wrapper.get('[data-test="submit"]').element as HTMLButtonElement).disabled).toBe(false)
+    wrapper.unmount()
+  })
 })

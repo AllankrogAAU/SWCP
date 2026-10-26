@@ -78,9 +78,11 @@ public static class SubmissionEndpoints
         };
         await using (var transaction = await database.Database.BeginTransactionAsync(cancellationToken))
         {
-            var lockedUser = await database.Users
-                .FromSqlInterpolated($"SELECT * FROM \"Users\" WHERE \"Id\" = {userId} FOR UPDATE")
-                .SingleOrDefaultAsync(cancellationToken);
+            var lockedUser = database.Database.IsRelational()
+                ? await database.Users
+                    .FromSqlInterpolated($"SELECT * FROM \"Users\" WHERE \"Id\" = {userId} FOR UPDATE")
+                    .SingleOrDefaultAsync(cancellationToken)
+                : await database.Users.SingleOrDefaultAsync(u => u.Id == userId, cancellationToken);
             if (lockedUser is null)
             {
                 return Results.Unauthorized();

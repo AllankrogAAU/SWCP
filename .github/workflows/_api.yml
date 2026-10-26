@@ -49,12 +49,11 @@ jobs:
             - name: Build (warnings as errors)
               run: dotnet build --no-restore --no-incremental -c Release
 
-            # when xUnit is in
-            # - name: Unit tests with coverage
-            #   run: >
-            #       dotnet test --no-build -c Release
-            #       --collect:"XPlat Code Coverage"
-            #       -- DataCollectionRunSettings.DataCollector.Configuration.Format=opencover
+            - name: Unit tests with coverage
+              run: >
+                  dotnet test api.slnx --no-build -c Release
+                  --collect:"XPlat Code Coverage"
+                  -- DataCollectionRunSettings.DataCollector.Configuration.Format=opencover
 
             - name: Sonar end
               env:
