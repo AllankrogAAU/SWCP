@@ -14,6 +14,13 @@ from uuid import uuid4
 import nats
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.api import AckPolicy, ConsumerConfig
+from opentelemetry import context, trace
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from pydantic import ValidationError
 
 from contracts import CompilationResult, SandboxResult, SandboxTask, SandboxTestResult
@@ -72,44 +79,77 @@ for handler in logging.getLogger().handlers:
     handler.setFormatter(JsonLogFormatter())
 logger = logging.getLogger("c-sandbox-worker")
 
-
-def evaluate_task(task: SandboxTask, provider) -> SandboxResult:
-    result = evaluate(task.source, provider, Limits())
-    status = result.status.value
-    compiled = status not in {"compile_error", "compile_timeout"}
-    test_results = []
-
-    if compiled:
-        test_results.append(
-            SandboxTestResult(
-                passed=status == "success" and result.exit_code == 0,
-                stdout=result.stdout or "",
-                stderr=result.stderr or "",
-                exitCode=result.exit_code,
-                durationMilliseconds=result.run_ms,
-                memoryConsumedMegabytes=None,
-            )
-        )
-
-    limitations = []
-    if task.compilerFlags:
-        limitations.append("compiler-flags-not-yet-applied")
-    if task.testCases:
-        limitations.append("per-test-case-execution-not-yet-implemented")
-
-    return SandboxResult(
-        submissionId=task.submissionId,
-        compilation=CompilationResult(
-            success=compiled,
-            stdout=result.compile_stdout or "",
-            stderr=result.compile_stderr or "",
-            exitCode=None if compiled else 1,
-            durationMilliseconds=result.compile_ms,
-        ),
-        staticAnalysis=[],
-        testResults=test_results,
-        errorClassification=";".join([status, *limitations]),
+OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+if OTEL_ENDPOINT:
+    grpc_endpoint = OTEL_ENDPOINT.replace("http://", "").replace("https://", "")
+    resource = Resource.create({"service.name": os.getenv("OTEL_SERVICE_NAME", "c-sandbox-worker")})
+    tracer_provider = TracerProvider(sampler=ALWAYS_ON, resource=resource)
+    exporter = OTLPSpanExporter(endpoint=grpc_endpoint, insecure=True)
+    tracer_provider.add_span_processor(
+        BatchSpanProcessor(exporter, schedule_delay_millis=500, max_export_batch_size=32)
     )
+    trace.set_tracer_provider(tracer_provider)
+else:
+    tracer_provider = TracerProvider(sampler=ALWAYS_ON)
+    trace.set_tracer_provider(tracer_provider)
+
+tracer = trace.get_tracer("c-sandbox-worker")
+
+
+def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
+    token = context.attach(ctx) if ctx else None
+    try:
+        with tracer.start_as_current_span("sandbox.execute_code"):
+            result = evaluate(task.source, provider, Limits())
+            status = result.status.value
+            compiled = status not in {"compile_error", "compile_timeout"}
+
+            with tracer.start_as_current_span("sandbox.compile") as compile_span:
+                compile_span.set_attribute("compile.duration_ms", result.compile_ms or 0)
+                compile_span.set_attribute("compile.success", compiled)
+                if not compiled and result.compile_stderr:
+                    compile_span.set_attribute("compile.error", result.compile_stderr[:500])
+
+            test_results = []
+            if compiled:
+                with tracer.start_as_current_span("sandbox.run_binary") as exec_span:
+                    exec_span.set_attribute("run.duration_ms", result.run_ms or 0)
+                    exec_span.set_attribute("run.exit_code", result.exit_code or 0)
+                    exec_span.set_attribute("run.passed", status == "success" and result.exit_code == 0)
+
+                test_results.append(
+                    SandboxTestResult(
+                        passed=status == "success" and result.exit_code == 0,
+                        stdout=result.stdout or "",
+                        stderr=result.stderr or "",
+                        exitCode=result.exit_code,
+                        durationMilliseconds=result.run_ms,
+                        memoryConsumedMegabytes=None,
+                    )
+                )
+
+            limitations = []
+            if task.compilerFlags:
+                limitations.append("compiler-flags-not-yet-applied")
+            if task.testCases:
+                limitations.append("per-test-case-execution-not-yet-implemented")
+
+            return SandboxResult(
+                submissionId=task.submissionId,
+                compilation=CompilationResult(
+                    success=compiled,
+                    stdout=result.compile_stdout or "",
+                    stderr=result.compile_stderr or "",
+                    exitCode=None if compiled else 1,
+                    durationMilliseconds=result.compile_ms,
+                ),
+                staticAnalysis=[],
+                testResults=test_results,
+                errorClassification=";".join([status, *limitations]),
+            )
+    finally:
+        if token:
+            context.detach(token)
 
 
 async def handle_message(message, connection, jetstream, provider, executor) -> None:
@@ -125,60 +165,73 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
         await message.ack()
         return
 
+    trace_parent = task.traceParent or (message.headers or {}).get("traceparent")
+    parent_ctx = None
+    if trace_parent:
+        parent_ctx = TraceContextTextMapPropagator().extract(carrier={"traceparent": trace_parent})
+
+    attempt = getattr(getattr(message, "metadata", None), "num_delivered", 1)
+    stage_started = time.perf_counter()
+
     try:
-        trace_parent = task.traceParent or (message.headers or {}).get("traceparent")
-        attempt = getattr(getattr(message, "metadata", None), "num_delivered", 1)
-        stage_started = time.perf_counter()
-        logger.info(
-            "Sandbox evaluation started",
-            extra={
-                "event_name": "pipeline.stage.started",
-                "stage": "sandbox",
-                "submission_id": str(task.submissionId),
-                "traceparent": trace_parent,
-                "attempt": attempt,
-                "status": "processing",
-            },
-        )
-        start_headers = {"traceparent": trace_parent} if trace_parent else None
-        await connection.publish(
-            "submissions.work.started",
-            json.dumps(
-                {
-                    "submissionId": str(task.submissionId),
-                    "worker": "c-sandbox-worker",
+        with tracer.start_as_current_span("sandbox.evaluate", context=parent_ctx) as eval_span:
+            eval_span.set_attribute("submission.id", str(task.submissionId))
+            eval_span.set_attribute("attempt", attempt)
+
+            logger.info(
+                "Sandbox evaluation started",
+                extra={
+                    "event_name": "pipeline.stage.started",
                     "stage": "sandbox",
-                    "timestampUtc": datetime.now(UTC).isoformat(),
-                }
-            ).encode("utf-8"),
-            headers=start_headers,
-        )
-        result = await asyncio.get_running_loop().run_in_executor(
-            executor, evaluate_task, task, provider
-        )
-        duration_ms = round((time.perf_counter() - stage_started) * 1000)
-        result_headers = {"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"}
-        if trace_parent:
-            result_headers["traceparent"] = trace_parent
-        await jetstream.publish(
-            RESULT_SUBJECT,
-            result.model_dump_json().encode("utf-8"),
-            headers=result_headers,
-        )
-        await message.ack()
-        logger.info(
-            "Sandbox evaluation completed",
-            extra={
-                "event_name": "pipeline.stage.completed",
-                "stage": "sandbox",
-                "submission_id": str(task.submissionId),
-                "traceparent": trace_parent,
-                "duration_ms": duration_ms,
-                "attempt": attempt,
-                "status": "completed",
-                "outcome": result.errorClassification,
-            },
-        )
+                    "submission_id": str(task.submissionId),
+                    "traceparent": trace_parent,
+                    "attempt": attempt,
+                    "status": "processing",
+                },
+            )
+            start_headers = {"traceparent": trace_parent} if trace_parent else None
+            await connection.publish(
+                "submissions.work.started",
+                json.dumps(
+                    {
+                        "submissionId": str(task.submissionId),
+                        "worker": "c-sandbox-worker",
+                        "stage": "sandbox",
+                        "timestampUtc": datetime.now(UTC).isoformat(),
+                    }
+                ).encode("utf-8"),
+                headers=start_headers,
+            )
+            curr_ctx = context.get_current()
+            result = await asyncio.get_running_loop().run_in_executor(
+                executor, evaluate_task, task, provider, curr_ctx
+            )
+            duration_ms = round((time.perf_counter() - stage_started) * 1000)
+            eval_span.set_attribute("duration_ms", duration_ms)
+            eval_span.set_attribute("outcome", result.errorClassification or "unknown")
+
+            result_headers = {"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"}
+            if trace_parent:
+                result_headers["traceparent"] = trace_parent
+            await jetstream.publish(
+                RESULT_SUBJECT,
+                result.model_dump_json().encode("utf-8"),
+                headers=result_headers,
+            )
+            await message.ack()
+            logger.info(
+                "Sandbox evaluation completed",
+                extra={
+                    "event_name": "pipeline.stage.completed",
+                    "stage": "sandbox",
+                    "submission_id": str(task.submissionId),
+                    "traceparent": trace_parent,
+                    "duration_ms": duration_ms,
+                    "attempt": attempt,
+                    "status": "completed",
+                    "outcome": result.errorClassification,
+                },
+            )
     except Exception:
         delivered = getattr(getattr(message, "metadata", None), "num_delivered", 1)
         if delivered >= 3:
@@ -238,10 +291,12 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
                 "duration_ms": round((time.perf_counter() - stage_started) * 1000),
                 "attempt": delivered,
                 "status": "retrying",
-                "error_type": "WorkerError",
             },
         )
-        await message.nak(delay=delay)
+        await asyncio.sleep(delay)
+        await message.nak()
+    finally:
+        tracer_provider.force_flush()
 
 
 async def run_worker() -> None:

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
 using NATS.Client.JetStream.Models;

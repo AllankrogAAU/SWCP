@@ -17,3 +17,6 @@ typing_extensions==4.16.0
 typing-inspection==0.4.4
 urllib3==2.8.0
 websocket-client==1.9.2
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-grpc

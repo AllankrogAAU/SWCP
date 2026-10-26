@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using coreApi.Data;
 using coreApi.Models;
 using Microsoft.EntityFrameworkCore;
@@ -13,6 +14,7 @@ public sealed class LlmResultConsumer(
     IServiceScopeFactory scopeFactory,
     SubmissionEvents events) : BackgroundService
 {
+    private static readonly ActivitySource ActivitySource = new("SWCP.CoreApi");
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await jetStream.CreateOrUpdateStreamAsync(
@@ -38,14 +40,19 @@ public sealed class LlmResultConsumer(
 
             try
             {
+                var traceParent = message.Headers?.TryGetLastValue(Messaging.TraceParentHeader, out var parent)
+                    == true ? parent : null;
+                using var activity = ActivitySource.StartActivity(
+                    "process llm.results",
+                    ActivityKind.Consumer,
+                    traceParent ?? string.Empty);
+
                 await using var scope = scopeFactory.CreateAsyncScope();
                 var database = scope.ServiceProvider.GetRequiredService<CoreDbContext>();
                 var submission = await database.Submissions
                     .SingleOrDefaultAsync(item => item.Id == result.SubmissionId, stoppingToken);
                 if (submission is not null)
                 {
-                    var traceParent = message.Headers?.TryGetLastValue(Messaging.TraceParentHeader, out var parent)
-                        == true ? parent : null;
                     submission.Status = result.Status == "success"
                         ? SubmissionStatus.COMPLETED
                         : SubmissionStatus.FAILED;
