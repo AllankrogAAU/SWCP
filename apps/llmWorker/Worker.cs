@@ -112,10 +112,16 @@ public sealed class Worker(
                     task.SubmissionId, "llm-worker", "llm", DateTimeOffset.UtcNow), headers: headers, cancellationToken: stoppingToken);
                 var completion = await processor.CompleteAsync(task, stoppingToken);
                 stageTimer.Stop();
+                var promptTokens = completion.TokenUsage?.PromptTokens;
+                var completionTokens = completion.TokenUsage?.CompletionTokens;
+                var totalTokens = completion.TokenUsage?.TotalTokens;
+                var tokensPerSec = completionTokens > 0 && stageTimer.ElapsedMilliseconds > 0
+                    ? Math.Round((double)completionTokens.Value / (stageTimer.ElapsedMilliseconds / 1000.0), 1)
+                    : 0.0;
                 logger.LogInformation(
-                    "Pipeline stage completed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {backend} {attempt} {status}",
+                    "Pipeline stage completed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {backend} {attempt} {status} {prompt_tokens} {completion_tokens} {total_tokens} {tokens_per_second}",
                     "pipeline.stage.completed", "llm", task.SubmissionId, traceId, stageTimer.ElapsedMilliseconds,
-                    task.Backend, attempt, "completed");
+                    task.Backend, attempt, "completed", promptTokens, completionTokens, totalTokens, tokensPerSec);
                 await PublishResultAsync(new LlmResult(
                     task.SubmissionId,
                     "success",
