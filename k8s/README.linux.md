@@ -141,7 +141,7 @@ bash scripts/deploy-monitoring.sh
 ### Accessing the Grafana Web UI
 Grafana is exposed directly on host port `3000`:
 - **Local Access**: `http://localhost:3000/`
-- **Tailscale Network**: `http://<tailscale-ip>:3000/` (e.g. `http://100.111.90.116:3000/`)
+- **Tailscale Network**: `http://<tailscale-ip>:3000/` (e.g. `http://100.x.y.z:3000/`)
 
 *Anonymous Admin mode is enabled for development convenience — no password or login prompt required.*
 
@@ -171,7 +171,7 @@ To quickly inspect pipeline performance and pinpoint bottlenecks without opening
 ================================================================================
  SUBMISSION TIMINGS & WATERFALL: a49b177c-d060-46b8-b56c-1066c995511a
  Trace ID:     f61ed1c57329c061740ca2ca28fcbf67
- Grafana URL:  http://100.111.90.116:3000/d/swcp-pipeline-timings/swcp-pipeline-stress-test-and-timings
+ Grafana URL:  http://<tailscale-ip>:3000/d/swcp-pipeline-timings/swcp-pipeline-stress-test-and-timings
 ================================================================================
 
 [Pipeline Stages (from Loki Logs)]

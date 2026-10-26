@@ -19,10 +19,10 @@ kubectl apply -f k8s/monitoring/02-tempo.yaml
 kubectl apply -f k8s/monitoring/03-prometheus.yaml
 kubectl apply -f k8s/monitoring/04-alloy.yaml
 
-# Create/update dashboards ConfigMap directly from json file
-if [ -f "$ROOT/k8s/monitoring/dashboards/pipeline-timings.json" ]; then
+# Create/update dashboards ConfigMap directly from json files
+if [ -d "$ROOT/k8s/monitoring/dashboards" ]; then
   kubectl create configmap grafana-dashboards-swcp -n monitoring \
-    --from-file=pipeline-timings.json="$ROOT/k8s/monitoring/dashboards/pipeline-timings.json" \
+    --from-file="$ROOT/k8s/monitoring/dashboards" \
     --dry-run=client -o yaml | kubectl apply -f -
 fi
 
@@ -39,7 +39,7 @@ echo ""
 echo "=== Current Pods in monitoring namespace ==="
 kubectl get pods -n monitoring -o wide
 
-TS_IP="$(tailscale ip -4 2>/dev/null || echo "100.111.90.116")"
+TS_IP="$(tailscale ip -4 2>/dev/null || echo "127.0.0.1")"
 NODE_NAME="$(hostname | tr '[:upper:]' '[:lower:]')"
 
 echo ""
