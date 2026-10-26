@@ -6,23 +6,32 @@ using SWCP.Contracts;
 
 namespace coreApi.Services;
 
-public sealed class NatsTaskPublisher(INatsJSContext jetStream)
+public class NatsTaskPublisher
 {
-    private static readonly ActivitySource ActivitySource = new("SWCP.CoreApi");
+    private readonly INatsJSContext? _jetStream;
 
-    public async Task PublishSandboxTaskAsync(
+    public NatsTaskPublisher()
+    {
+    }
+
+    public NatsTaskPublisher(INatsJSContext jetStream)
+    {
+        _jetStream = jetStream;
+    }
+
+    public virtual async Task PublishSandboxTaskAsync(
         SandboxTask task,
         CancellationToken cancellationToken,
         int attempt = 0)
     {
-        using var activity = ActivitySource.StartActivity("publish sandbox.tasks");
-        await jetStream.CreateOrUpdateStreamAsync(
+        if (_jetStream is null) return;
+        await _jetStream.CreateOrUpdateStreamAsync(
             new StreamConfig(Messaging.SandboxTasksStream, [Messaging.SandboxTaskSubject])
             {
                 Retention = StreamConfigRetention.Workqueue,
                 DuplicateWindow = TimeSpan.FromMinutes(10)
             }, cancellationToken);
-        await jetStream.CreateOrUpdateStreamAsync(
+        await _jetStream.CreateOrUpdateStreamAsync(
             new StreamConfig(Messaging.SandboxTasksDlqStream, [Messaging.SandboxTasksDlqSubject])
             {
                 Retention = StreamConfigRetention.Limits,
@@ -34,17 +43,17 @@ public sealed class NatsTaskPublisher(INatsJSContext jetStream)
             { "Nats-Msg-Id", Messaging.SandboxMessageId(task.SubmissionId, attempt) },
             { Messaging.TraceParentHeader, task.TraceParent ?? Messaging.CurrentOrNewTraceParent() }
         };
-        await jetStream.PublishAsync(
+        await _jetStream.PublishAsync(
             Messaging.SandboxTaskSubject,
             task,
             headers: headers,
             cancellationToken: cancellationToken);
     }
 
-    public async Task PublishLlmTaskAsync(LlmTask task, CancellationToken cancellationToken)
+    public virtual async Task PublishLlmTaskAsync(LlmTask task, CancellationToken cancellationToken)
     {
-        using var activity = ActivitySource.StartActivity("publish llm.tasks");
-        await jetStream.CreateOrUpdateStreamAsync(
+        if (_jetStream is null) return;
+        await _jetStream.CreateOrUpdateStreamAsync(
             new StreamConfig(Messaging.LlmTasksStream,
                 [Messaging.LlmAzureTaskSubject, Messaging.LlmLocalTaskSubject])
             {
@@ -60,6 +69,6 @@ public sealed class NatsTaskPublisher(INatsJSContext jetStream)
             { "Nats-Msg-Id", Messaging.LlmMessageId(task.SubmissionId) },
             { Messaging.TraceParentHeader, task.TraceParent ?? Messaging.CurrentOrNewTraceParent() }
         };
-        await jetStream.PublishAsync(subject, task, headers: headers, cancellationToken: cancellationToken);
+        await _jetStream.PublishAsync(subject, task, headers: headers, cancellationToken: cancellationToken);
     }
 }
