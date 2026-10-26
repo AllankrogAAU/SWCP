@@ -43,7 +43,7 @@ jobs:
                   /o:"magnuselholm"
                   /d:sonar.token="$SONAR_TOKEN"
                   /d:sonar.host.url="https://sonarcloud.io"
-                  /d:sonar.cs.opencover.reportsPaths="**/coverage.opencover.xml"
+                  /d:sonar.cs.opencover.reportsPaths="${{ github.workspace }}/**/coverage.opencover.xml"
                   /d:sonar.projectBaseDir="${{ github.workspace }}/apps/apiGateway"
 
             - name: Build (warnings as errors)
@@ -53,7 +53,7 @@ jobs:
               run: >
                   dotnet test api.slnx --no-build -c Release
                   --collect:"XPlat Code Coverage"
-                  -- DataCollectionRunSettings.DataCollector.Configuration.Format=opencover
+                  -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover
 
             - name: Sonar end
               env:
