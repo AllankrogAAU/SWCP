@@ -53,23 +53,22 @@ let reconnectAttempts = 0
 let pollGeneration = 0
 
 async function selectAssignment(id: string) {
-  console.log("SELECT ASSIGNMENT", id)
+  console.log('SELECT ASSIGNMENT', id)
 
   selectedId.value = id
 
   try {
-    console.log("LOADING STATE")
+    console.log('LOADING STATE')
 
     const state = await getAssignmentState(id)
 
-    console.log("STATE", state)
+    console.log('STATE', state)
 
     code.value = state.currentCode
   } catch (error) {
-    console.error("FAILED TO LOAD STATE", error)
+    console.error('FAILED TO LOAD STATE', error)
 
-    code.value =
-      '#include <stdio.h>\n\nint main(void) {\n    return 0;\n}'
+    code.value = '#include <stdio.h>\n\nint main(void) {\n    return 0;\n}'
   }
 
   feedback.value = ''
@@ -93,10 +92,10 @@ async function loadAssignments() {
 
   const firstId = assignments.value[0]?.id
 
-  console.log("FIRST ID", firstId)
+  console.log('FIRST ID', firstId)
 
   if (firstId) {
-    console.log("CALLING SELECT ASSIGNMENT")
+    console.log('CALLING SELECT ASSIGNMENT')
     await selectAssignment(firstId)
   }
 }

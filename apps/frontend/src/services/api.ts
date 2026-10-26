@@ -130,11 +130,8 @@ export function getAssignments() {
   return request<Assignment[]>('/api/assignments/')
 }
 
-export function getAssignmentState(assignmentId: string,) 
-{
-  return request<AssignmentState>(
-    `/api/assignments/${assignmentId}/state`,
-  )
+export function getAssignmentState(assignmentId: string) {
+  return request<AssignmentState>(`/api/assignments/${assignmentId}/state`)
 }
 
 export function getSubmissionHistory() {
