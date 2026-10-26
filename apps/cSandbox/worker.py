@@ -21,7 +21,6 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.sampling import ALWAYS_ON
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
-from opentelemetry.trace.status import Status, StatusCode
 from pydantic import ValidationError
 
 from contracts import CompilationResult, SandboxResult, SandboxTask, SandboxTestResult
@@ -100,7 +99,7 @@ tracer = trace.get_tracer("c-sandbox-worker")
 def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
     token = context.attach(ctx) if ctx else None
     try:
-        with tracer.start_as_current_span("sandbox.execute_code") as run_span:
+        with tracer.start_as_current_span("sandbox.execute_code"):
             result = evaluate(task.source, provider, Limits())
             status = result.status.value
             compiled = status not in {"compile_error", "compile_timeout"}
@@ -233,7 +232,7 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
                     "outcome": result.errorClassification,
                 },
             )
-    except Exception as exc:
+    except Exception:
         delivered = getattr(getattr(message, "metadata", None), "num_delivered", 1)
         if delivered >= 3:
             error_text = "sandbox worker retries exhausted"
