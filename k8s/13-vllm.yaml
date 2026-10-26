@@ -1,0 +1,124 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: local-llm-server
+  namespace: swcp
+  labels:
+    app.kubernetes.io/name: vllm
+    app.kubernetes.io/part-of: swcp
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vllm
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: swcp
+  labels:
+    app.kubernetes.io/name: vllm
+    app.kubernetes.io/part-of: swcp
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vllm
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: swcp
+  labels:
+    app.kubernetes.io/name: vllm
+    app.kubernetes.io/part-of: swcp
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vllm
+        app.kubernetes.io/part-of: swcp
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      runtimeClassName: nvidia
+      enableServiceLinks: false
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: VLLM_PORT
+              value: "8080"
+            - name: VLLM_USAGE_SOURCE
+              value: "production-swcp"
+          args:
+            - /models/Qwen2.5-Coder-14B-Instruct-AWQ
+            - --served-model-name=qwen2.5-coder-14b-instruct-awq
+            - --quantization=awq_marlin
+            - --kv-cache-dtype=auto
+            - --max-model-len=8192
+            - --gpu-memory-utilization=0.80
+            - --max-num-seqs=4
+            - --enforce-eager
+            - --host=0.0.0.0
+            - --port=8080
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+              cpu: "2"
+              memory: "8Gi"
+            limits:
+              nvidia.com/gpu: "1"
+              cpu: "8"
+              memory: "16Gi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 40
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: models
+          hostPath:
+            path: /home/test/SWCP/apps/localLLM/models
+            type: Directory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
