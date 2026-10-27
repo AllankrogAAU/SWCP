@@ -123,7 +123,12 @@ describe('App', () => {
     await wrapper.get('[data-test="stdin"]').setValue('2 3\n')
     await wrapper.get('[data-test="run"]').trigger('click')
     await flushPromises()
-    expect(api.runSource).toHaveBeenCalledWith('assignment-id', expect.any(String), 'azure', '2 3\n')
+    expect(api.runSource).toHaveBeenCalledWith(
+      'assignment-id',
+      expect.any(String),
+      'azure',
+      '2 3\n',
+    )
     expect(api.getSubmission).toHaveBeenCalledWith('run-id')
     expect(wrapper.text()).toContain('program output')
     expect(wrapper.text()).not.toContain('This must not be displayed.')
