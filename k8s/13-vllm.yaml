@@ -63,22 +63,20 @@ spec:
         - name: vllm
           image: vllm/vllm-openai:latest
           imagePullPolicy: IfNotPresent
-          env:
-            - name: VLLM_PORT
-              value: "8080"
-            - name: VLLM_USAGE_SOURCE
-              value: "production-swcp"
+          envFrom:
+            - configMapRef:
+                name: vllm-config
           args:
-            - /models/Qwen2.5-Coder-14B-Instruct-AWQ
-            - --served-model-name=qwen2.5-coder-14b-instruct-awq
-            - --quantization=awq_marlin
-            - --kv-cache-dtype=auto
-            - --max-model-len=8192
-            - --gpu-memory-utilization=0.80
-            - --max-num-seqs=4
+            - /models/$(LLM_MODEL_PATH)
+            - --served-model-name=$(LLM_MODEL_NAME)
+            - --quantization=$(VLLM_QUANTIZATION)
+            - --kv-cache-dtype=$(VLLM_KV_CACHE_DTYPE)
+            - --max-model-len=$(VLLM_MAX_MODEL_LEN)
+            - --gpu-memory-utilization=$(VLLM_GPU_MEMORY_UTILIZATION)
+            - --max-num-seqs=$(VLLM_MAX_NUM_SEQS)
             - --enforce-eager
             - --host=0.0.0.0
-            - --port=8080
+            - --port=$(VLLM_PORT)
           ports:
             - name: http
               containerPort: 8080

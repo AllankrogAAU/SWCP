@@ -9,10 +9,14 @@ public sealed class SubmissionReconciler(
     ILogger<SubmissionReconciler> logger,
     IServiceScopeFactory scopeFactory,
     NatsTaskPublisher publisher,
-    SubmissionEvents events) : BackgroundService
+    SubmissionEvents events,
+    IConfiguration? configuration = null) : BackgroundService
 {
     private static readonly TimeSpan ScanInterval = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan StuckAfter = TimeSpan.FromSeconds(30);
+    private readonly TimeSpan _pendingStuckAfter = TimeSpan.FromSeconds(
+        Math.Max(5, configuration?.GetValue<int?>("Reconciler:PendingStuckAfterSeconds") ?? 30));
+    private readonly TimeSpan _queuedStuckAfter = TimeSpan.FromSeconds(
+        Math.Max(30, configuration?.GetValue<int?>("Reconciler:QueuedStuckAfterSeconds") ?? 300));
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -39,9 +43,10 @@ public sealed class SubmissionReconciler(
         await using var scope = scopeFactory.CreateAsyncScope();
         var database = scope.ServiceProvider.GetRequiredService<CoreDbContext>();
         await using var transaction = await database.Database.BeginTransactionAsync(cancellationToken);
-        var cutoff = DateTimeOffset.UtcNow - StuckAfter;
+        var pendingCutoff = DateTimeOffset.UtcNow - _pendingStuckAfter;
+        var queuedCutoff = DateTimeOffset.UtcNow - _queuedStuckAfter;
         var stale = await database.Submissions
-            .FromSqlInterpolated($"SELECT * FROM \"Submissions\" WHERE \"Status\" IN ('PENDING', 'SANDBOX_QUEUED') AND \"UpdatedAtUtc\" < {cutoff} ORDER BY \"UpdatedAtUtc\" LIMIT 25 FOR UPDATE SKIP LOCKED")
+            .FromSqlInterpolated($"SELECT * FROM \"Submissions\" WHERE ((\"Status\" = 'PENDING' AND \"UpdatedAtUtc\" < {pendingCutoff}) OR (\"Status\" = 'SANDBOX_QUEUED' AND \"UpdatedAtUtc\" < {queuedCutoff})) ORDER BY \"UpdatedAtUtc\" LIMIT 25 FOR UPDATE SKIP LOCKED")
             .ToListAsync(cancellationToken);
 
         foreach (var submission in stale)
