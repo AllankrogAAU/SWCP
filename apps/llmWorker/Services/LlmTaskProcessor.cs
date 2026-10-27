@@ -115,6 +115,21 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
 
     private async Task<LlmCompletion> CompleteLocalAsync(LlmTask task, CancellationToken cancellationToken)
     {
+        if (configuration.GetValue<bool>("LocalLlm:MockEnabled"))
+        {
+            var delayMs = Math.Max(0, configuration.GetValue<int?>("LocalLlm:MockLatencyMs") ?? 5);
+            if (delayMs > 0)
+            {
+                await Task.Delay(delayMs, cancellationToken);
+            }
+
+            var solved = task.EvaluationMode == "submit" && !task.SandboxFailed ? true : (bool?)null;
+            return new LlmCompletion(
+                "Mock LLM feedback for infinite-GPU bottleneck benchmarking.",
+                new LlmTokenUsage(250, 80, 330),
+                solved);
+        }
+
         var modelName = configuration["LocalLlm:ModelName"] ?? configuration["LLM_MODEL_NAME"];
         if (string.IsNullOrWhiteSpace(modelName))
         {

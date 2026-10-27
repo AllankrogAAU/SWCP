@@ -1,0 +1,364 @@
+"""Asynchronous load generation engine with queue-isolated users and dual WS/polling telemetry."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import math
+import random
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Coroutine
+from urllib.parse import urlparse
+
+import httpx
+import websockets
+
+from benchmarks.config import BenchmarkConfig
+from benchmarks.workloads import get_workload_source, pick_archetype
+
+logger = logging.getLogger("benchmarks.runner")
+
+
+@dataclass
+class ClientSubmissionResult:
+    submission_id: str
+    token: str
+    step_label: str
+    fixture_type: str
+    client_e2e_ms: float
+    http_accepted_ms: float
+    final_status: str
+    error_message: str | None = None
+    terminal_via: str = "unknown"
+    ws_events_count: int = 0
+
+
+class LoadRunner:
+    def __init__(
+        self,
+        config: BenchmarkConfig,
+        tokens: list[str],
+        assignment_id: str,
+        run_id: str,
+    ) -> None:
+        self.config = config
+        self.tokens = tokens
+        self.assignment_id = assignment_id
+        self.run_id = run_id
+        self.user_queue: asyncio.Queue[str] = asyncio.Queue()
+        for token in tokens:
+            self.user_queue.put_nowait(token)
+
+        self._submission_seq = 0
+        self._seq_lock = asyncio.Lock()
+
+    async def _next_seq(self) -> int:
+        async with self._seq_lock:
+            self._submission_seq += 1
+            return self._submission_seq
+
+    def _resolve_ws_url(self, submission_id: str) -> str:
+        parsed = urlparse(self.config.target_url)
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        netloc = parsed.netloc
+        if not netloc:
+            netloc = "localhost"
+        return f"{scheme}://{netloc}/ws/submissions/{submission_id}"
+
+    async def execute_single_submission(
+        self,
+        step_label: str,
+        client: httpx.AsyncClient,
+        archetype: str | None = None,
+        timeout_s: float = 240.0,
+    ) -> ClientSubmissionResult:
+        """Execute one complete submission lifecycle guaranteed to have a dedicated user."""
+        token = await self.user_queue.get()
+        seq = await self._next_seq()
+        archetype = archetype or pick_archetype(self.config.workload_weights)
+        c_code = get_workload_source(archetype, self.run_id, seq)
+
+        t0 = time.perf_counter()
+        submission_id = ""
+        http_accepted_ms = 0.0
+
+        try:
+            # 1. Post submission to API
+            payload = {
+                "assignmentId": self.assignment_id,
+                "sourceCode": c_code,
+                "llmBackend": self.config.llm_backend,
+                "action": "submit",
+            }
+            resp = await client.post(
+                "/api/submissions",
+                json=payload,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30.0,
+            )
+            t_after_post = time.perf_counter()
+            http_accepted_ms = (t_after_post - t0) * 1000.0
+
+            if resp.status_code != 202:
+                resp.raise_for_status()
+
+            body = resp.json()
+            submission_id = str(body.get("submissionId") or body.get("id"))
+
+            # 2. Concurrently wait via WebSocket and fallback Polling
+            ws_url = self._resolve_ws_url(submission_id)
+            final_status, terminal_via, events_cnt, err = await self._wait_for_completion(
+                submission_id, ws_url, token, client, timeout_s=timeout_s
+            )
+
+            client_e2e_ms = (time.perf_counter() - t0) * 1000.0
+
+            return ClientSubmissionResult(
+                submission_id=submission_id,
+                token=token,
+                step_label=step_label,
+                fixture_type=archetype,
+                client_e2e_ms=client_e2e_ms,
+                http_accepted_ms=http_accepted_ms,
+                final_status=final_status,
+                error_message=err,
+                terminal_via=terminal_via,
+                ws_events_count=events_cnt,
+            )
+        except Exception as exc:
+            client_e2e_ms = (time.perf_counter() - t0) * 1000.0
+            logger.error("Submission failed or errored: %s", exc)
+            return ClientSubmissionResult(
+                submission_id=submission_id or "unassigned",
+                token=token,
+                step_label=step_label,
+                fixture_type=archetype,
+                client_e2e_ms=client_e2e_ms,
+                http_accepted_ms=http_accepted_ms,
+                final_status="FAILED",
+                error_message=str(exc),
+                terminal_via="exception",
+            )
+        finally:
+            # Always return the token back to user pool so user can be reused!
+            await self.user_queue.put(token)
+
+    async def _wait_for_completion(
+        self,
+        submission_id: str,
+        ws_url: str,
+        token: str,
+        client: httpx.AsyncClient,
+        timeout_s: float,
+    ) -> tuple[str, str, int, str | None]:
+        """Dual-wait: WebSocket stream + periodic HTTP polling fallback."""
+        event_count = 0
+        terminal_status: str | None = None
+        terminal_via = "timeout"
+        error_msg: str | None = None
+
+        done_event = asyncio.Event()
+
+        async def ws_listener() -> None:
+            nonlocal event_count, terminal_status, terminal_via, error_msg
+            subprotocols = ["swcp", f"bearer.{token}"]
+            extra_headers = {"Authorization": f"Bearer {token}"}
+            try:
+                async with websockets.connect(
+                    ws_url,
+                    subprotocols=subprotocols,
+                    extra_headers=extra_headers,
+                    open_timeout=10.0,
+                    close_timeout=5.0,
+                ) as ws:
+                    async for message in ws:
+                        event_count += 1
+                        try:
+                            data = json.loads(message)
+                            evt_type = str(data.get("eventType", "")).upper()
+                            if evt_type in ("COMPLETED", "FAILED"):
+                                terminal_status = evt_type
+                                terminal_via = "websocket"
+                                error_msg = data.get("errorMessage")
+                                done_event.set()
+                                return
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.debug("WS connection ended for %s: %s", submission_id, e)
+
+        async def poll_fallback() -> None:
+            nonlocal terminal_status, terminal_via, error_msg
+            while not done_event.is_set():
+                await asyncio.sleep(1.0)
+                if done_event.is_set():
+                    return
+                try:
+                    r = await client.get(
+                        f"/api/submissions/{submission_id}",
+                        headers={"Authorization": f"Bearer {token}"},
+                        timeout=5.0,
+                    )
+                    if r.status_code == 200:
+                        data = r.json()
+                        st = str(data.get("status", "")).upper()
+                        if st in ("COMPLETED", "FAILED"):
+                            if not done_event.is_set():
+                                terminal_status = st
+                                terminal_via = "polling"
+                                error_msg = data.get("errorMessage")
+                                done_event.set()
+                                return
+                except Exception:
+                    pass
+
+        ws_task = asyncio.create_task(ws_listener())
+        poll_task = asyncio.create_task(poll_fallback())
+
+        try:
+            await asyncio.wait_for(done_event.wait(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            terminal_status = "TIMEOUT"
+            terminal_via = "timeout"
+            error_msg = f"Timed out waiting for completion after {timeout_s}s"
+        finally:
+            ws_task.cancel()
+            poll_task.cancel()
+            await asyncio.gather(ws_task, poll_task, return_exceptions=True)
+
+        return terminal_status or "FAILED", terminal_via, event_count, error_msg
+
+    # =========================================================================
+    # Arrival Pattern 1: Stepped Poisson
+    # =========================================================================
+    async def run_stepped_poisson(
+        self,
+        rates_per_minute: list[float],
+        step_duration_s: float = 120.0,
+        min_completions: int = 10,
+        on_result: Callable[[ClientSubmissionResult], Coroutine[Any, Any, None]] | None = None,
+    ) -> list[ClientSubmissionResult]:
+        """Run stepped Poisson arrival rate plateaus."""
+        all_results: list[ClientSubmissionResult] = []
+
+        async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0) as client:
+            for rate in rates_per_minute:
+                step_label = f"poisson_{rate:.1f}rpm"
+                logger.info("Starting plateau: %s (target rate: %.1f subs/min, duration: %.0fs)...",
+                            step_label, rate, step_duration_s)
+
+                lam = rate / 60.0  # requests per second
+                step_start = time.perf_counter()
+                in_flight: set[asyncio.Task] = set()
+                step_results: list[ClientSubmissionResult] = []
+
+                while (time.perf_counter() - step_start < step_duration_s) or (len(step_results) < min_completions):
+                    # Sample inter-arrival time: delta_t ~ Exp(lambda)
+                    inter_arrival_s = -math.log(random.random()) / lam if lam > 0 else 1.0
+
+                    task = asyncio.create_task(self.execute_single_submission(step_label, client))
+                    in_flight.add(task)
+
+                    def make_done_callback(t: asyncio.Task) -> Callable[[asyncio.Task], None]:
+                        def done_cb(res_task: asyncio.Task) -> None:
+                            in_flight.discard(res_task)
+                            if not res_task.cancelled() and res_task.exception() is None:
+                                res = res_task.result()
+                                step_results.append(res)
+                                all_results.append(res)
+                                if on_result:
+                                    asyncio.create_task(on_result(res))
+                        return done_cb
+
+                    task.add_done_callback(make_done_callback(task))
+
+                    await asyncio.sleep(inter_arrival_s)
+
+                # Drain in-flight submissions for this step before advancing
+                if in_flight:
+                    logger.info("Draining %d in-flight submissions for step %s...", len(in_flight), step_label)
+                    await asyncio.gather(*in_flight, return_exceptions=True)
+
+                logger.info("Completed plateau %s: %d submissions collected.", step_label, len(step_results))
+
+        return all_results
+
+    # =========================================================================
+    # Arrival Pattern 2: Closed-Loop (Virtual Concurrent Students)
+    # =========================================================================
+    async def run_closed_loop(
+        self,
+        concurrency_levels: list[int],
+        step_duration_s: float = 120.0,
+        think_time_min_s: float = 10.0,
+        think_time_max_s: float = 20.0,
+        on_result: Callable[[ClientSubmissionResult], Coroutine[Any, Any, None]] | None = None,
+    ) -> list[ClientSubmissionResult]:
+        """Run closed-loop virtual students who submit, wait, think, and repeat."""
+        all_results: list[ClientSubmissionResult] = []
+
+        async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0) as client:
+            for users_count in concurrency_levels:
+                step_label = f"closed_loop_{users_count}users"
+                logger.info("Starting closed-loop plateau: %s (duration: %.0fs)...", step_label, step_duration_s)
+
+                stop_event = asyncio.Event()
+
+                async def virtual_student() -> None:
+                    while not stop_event.is_set():
+                        res = await self.execute_single_submission(step_label, client)
+                        all_results.append(res)
+                        if on_result:
+                            await on_result(res)
+                        if stop_event.is_set():
+                            break
+                        think_s = random.uniform(think_time_min_s, think_time_max_s)
+                        await asyncio.sleep(think_s)
+
+                workers = [asyncio.create_task(virtual_student()) for _ in range(users_count)]
+                await asyncio.sleep(step_duration_s)
+                stop_event.set()
+                await asyncio.gather(*workers, return_exceptions=True)
+                logger.info("Completed closed-loop step %s.", step_label)
+
+        return all_results
+
+    # =========================================================================
+    # Arrival Pattern 3: Synchronized Burst ("Thundering Herd")
+    # =========================================================================
+    async def run_burst(
+        self,
+        burst_sizes: list[int],
+        burst_window_s: float = 5.0,
+        drain_timeout_s: float = 240.0,
+        on_result: Callable[[ClientSubmissionResult], Coroutine[Any, Any, None]] | None = None,
+    ) -> list[ClientSubmissionResult]:
+        """Fire B simultaneous submissions within a short burst window."""
+        all_results: list[ClientSubmissionResult] = []
+
+        async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0) as client:
+            for b_size in burst_sizes:
+                step_label = f"burst_{b_size}subs"
+                logger.info("Firing synchronized burst of %d submissions over %.1fs window...", b_size, burst_window_s)
+
+                interval = burst_window_s / max(1, b_size)
+                tasks: list[asyncio.Task] = []
+
+                for _ in range(b_size):
+                    t = asyncio.create_task(self.execute_single_submission(step_label, client, timeout_s=drain_timeout_s))
+                    tasks.append(t)
+                    if interval > 0.01:
+                        await asyncio.sleep(interval)
+
+                burst_results = await asyncio.gather(*tasks, return_exceptions=False)
+                for res in burst_results:
+                    all_results.append(res)
+                    if on_result:
+                        await on_result(res)
+
+                logger.info("Burst step %s finished: %d submissions drained.", step_label, len(burst_results))
+
+        return all_results
+
