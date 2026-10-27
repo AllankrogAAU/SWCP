@@ -11,10 +11,44 @@ using Microsoft.IdentityModel.Tokens;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
 using NATS.Client.Serializers.Json;
+using System.Diagnostics;
+using OpenTelemetry;
+using OpenTelemetry.Exporter;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.AddJsonConsole(options => options.TimestampFormat = "yyyy-MM-ddTHH:mm:ss.fffZ");
+var otelEndpoint = builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"] ?? builder.Configuration["Otel:Endpoint"];
+if (!string.IsNullOrWhiteSpace(otelEndpoint))
+{
+    builder.Services.AddOpenTelemetry()
+        .ConfigureResource(resource => resource.AddService(
+            serviceName: builder.Configuration["OTEL_SERVICE_NAME"] ?? "core-api"))
+        .WithTracing(tracing =>
+        {
+            tracing
+                .SetSampler(new AlwaysOnSampler())
+                .AddAspNetCoreInstrumentation(options =>
+                {
+                    options.RecordException = true;
+                    options.Filter = httpContext => !httpContext.Request.Path.StartsWithSegments("/healthz");
+                })
+                .AddHttpClientInstrumentation()
+                .AddSource("SWCP.CoreApi")
+                .AddOtlpExporter(options =>
+                {
+                    options.Endpoint = new Uri(otelEndpoint);
+                    options.Protocol = otelEndpoint.Contains(":4318") ? OtlpExportProtocol.HttpProtobuf : OtlpExportProtocol.Grpc;
+                    options.BatchExportProcessorOptions = new BatchExportProcessorOptions<Activity>
+                    {
+                        ScheduledDelayMilliseconds = 500,
+                        MaxExportBatchSize = 32
+                    };
+                });
+        });
+}
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 var keyDirectory = builder.Configuration["Jwt:KeyDirectory"] ?? Path.Combine(builder.Environment.ContentRootPath, ".keys");
@@ -22,8 +56,12 @@ var publicKeyDirectory = builder.Configuration["Jwt:PublicKeyDirectory"] ?? Path
 var signingKeys = RsaSigningKeys.LoadOrCreate(keyDirectory, publicKeyDirectory);
 
 builder.Services.AddSingleton(signingKeys);
-builder.Services.AddDbContext<CoreDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
+var defaultConnection = builder.Configuration.GetConnectionString("Default");
+if (!string.IsNullOrEmpty(defaultConnection))
+{
+    builder.Services.AddDbContext<CoreDbContext>(options =>
+        options.UseNpgsql(defaultConnection));
+}
 builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddSingleton(_ => new NatsConnection(new NatsOpts
@@ -66,7 +104,14 @@ var app = builder.Build();
 await using (var scope = app.Services.CreateAsyncScope())
 {
     var database = scope.ServiceProvider.GetRequiredService<CoreDbContext>();
-    await database.Database.MigrateAsync();
+    if (database.Database.IsRelational())
+    {
+        await database.Database.MigrateAsync();
+    }
+    else
+    {
+        await database.Database.EnsureCreatedAsync();
+    }
     if (builder.Environment.IsDevelopment() || builder.Configuration.GetValue<bool>("SeedSampleAssignments"))
     {
         await DevUserSeeder.SeedSampleAssignmentAsync(scope.ServiceProvider);
@@ -91,4 +136,7 @@ app.MapGet("/.well-known/swcp-signing-key", (RsaSigningKeys keys) =>
 
 await app.RunAsync();
 
-public partial class Program;
+namespace coreApi
+{
+    public partial class Program;
+}

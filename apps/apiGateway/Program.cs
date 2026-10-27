@@ -11,7 +11,14 @@ builder.Logging.AddJsonConsole(options => options.TimestampFormat = "yyyy-MM-ddT
 var publicKeyPath = builder.Configuration["Jwt:PublicKeyPath"]
     ?? Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "coreApi", ".keys", "jwt-public.pem"));
 using var publicRsa = RSA.Create();
-publicRsa.ImportFromPem(await File.ReadAllTextAsync(publicKeyPath));
+if (File.Exists(publicKeyPath))
+{
+    publicRsa.ImportFromPem(await File.ReadAllTextAsync(publicKeyPath));
+}
+else
+{
+    publicRsa.KeySize = 2048;
+}
 var publicKeyId = Convert.ToHexString(SHA256.HashData(publicRsa.ExportSubjectPublicKeyInfo())).ToLowerInvariant();
 var publicSigningKey = new RsaSecurityKey(publicRsa.ExportParameters(false)) { KeyId = publicKeyId };
 
@@ -101,3 +108,8 @@ app.MapSubmissionNotificationWebSocket();
 app.MapReverseProxy();
 
 app.Run();
+
+namespace api
+{
+    public partial class Program;
+}
