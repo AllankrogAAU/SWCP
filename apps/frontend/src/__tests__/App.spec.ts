@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { flushPromises } from '@vue/test-utils'
+// @ts-expect-error Vue SFC module declarations are unavailable to this test's TypeScript config.
 import App from '../App.vue'
 
 const api = vi.hoisted(() => ({
