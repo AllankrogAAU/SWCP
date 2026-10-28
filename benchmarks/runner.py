@@ -164,55 +164,79 @@ class LoadRunner:
         async def ws_listener() -> None:
             nonlocal event_count, terminal_status, terminal_via, error_msg
             subprotocols = ["swcp", f"bearer.{token}"]
-            extra_headers = {"Authorization": f"Bearer {token}"}
-            try:
-                async with websockets.connect(
-                    ws_url,
-                    subprotocols=subprotocols,
-                    extra_headers=extra_headers,
-                    open_timeout=10.0,
-                    close_timeout=5.0,
-                ) as ws:
-                    async for message in ws:
-                        event_count += 1
-                        try:
-                            data = json.loads(message)
-                            evt_type = str(data.get("eventType", "")).upper()
-                            if evt_type in ("COMPLETED", "FAILED"):
-                                terminal_status = evt_type
-                                terminal_via = "websocket"
-                                error_msg = data.get("errorMessage")
-                                done_event.set()
-                                return
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.debug("WS connection ended for %s: %s", submission_id, e)
+            headers = {"Authorization": f"Bearer {token}"}
+
+            while not done_event.is_set():
+                try:
+                    # websockets >= 14 uses additional_headers; < 14 uses extra_headers
+                    try:
+                        ws_conn = websockets.connect(
+                            ws_url,
+                            subprotocols=subprotocols,
+                            additional_headers=headers,
+                            open_timeout=10.0,
+                            close_timeout=5.0,
+                        )
+                    except TypeError:
+                        ws_conn = websockets.connect(
+                            ws_url,
+                            subprotocols=subprotocols,
+                            extra_headers=headers,
+                            open_timeout=10.0,
+                            close_timeout=5.0,
+                        )
+
+                    async with ws_conn as ws:
+                        async for message in ws:
+                            event_count += 1
+                            try:
+                                data = json.loads(message)
+                                evt_type = str(data.get("eventType") or data.get("stage") or "").upper()
+                                if evt_type in ("COMPLETED", "FAILED"):
+                                    terminal_status = evt_type
+                                    terminal_via = "websocket"
+                                    error_msg = data.get("errorMessage")
+                                    done_event.set()
+                                    return
+                            except Exception:
+                                pass
+                except Exception as e:
+                    logger.debug("WS connection ended for %s: %s", submission_id, e)
+
+                if done_event.is_set():
+                    return
+                # Brief pause before retrying WS connection if still awaiting completion
+                await asyncio.sleep(2.0)
 
         async def poll_fallback() -> None:
             nonlocal terminal_status, terminal_via, error_msg
+            # Initial slight pause to allow WebSocket to establish first
+            await asyncio.sleep(1.5)
             while not done_event.is_set():
-                await asyncio.sleep(1.0)
-                if done_event.is_set():
-                    return
                 try:
                     r = await client.get(
                         f"/api/submissions/{submission_id}",
                         headers={"Authorization": f"Bearer {token}"},
-                        timeout=5.0,
+                        timeout=10.0,
                     )
                     if r.status_code == 200:
                         data = r.json()
-                        st = str(data.get("status", "")).upper()
+                        st = str(data.get("status") or data.get("Status") or "").upper()
                         if st in ("COMPLETED", "FAILED"):
                             if not done_event.is_set():
                                 terminal_status = st
                                 terminal_via = "polling"
-                                error_msg = data.get("errorMessage")
+                                error_msg = data.get("errorMessage") or data.get("ErrorMessage")
                                 done_event.set()
                                 return
-                except Exception:
-                    pass
+                    elif r.status_code in (401, 403):
+                        logger.warning("Auth error polling submission %s: HTTP %d", submission_id, r.status_code)
+                except httpx.RequestError as req_err:
+                    logger.debug("Transient request error polling %s: %s", submission_id, req_err)
+                except Exception as poll_err:
+                    logger.debug("Unexpected polling error for %s: %s", submission_id, poll_err)
+
+                await asyncio.sleep(2.0)
 
         ws_task = asyncio.create_task(ws_listener())
         poll_task = asyncio.create_task(poll_fallback())
@@ -242,8 +266,9 @@ class LoadRunner:
     ) -> list[ClientSubmissionResult]:
         """Run stepped Poisson arrival rate plateaus."""
         all_results: list[ClientSubmissionResult] = []
+        client_limits = httpx.Limits(max_connections=300, max_keepalive_connections=100, keepalive_expiry=30.0)
 
-        async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0) as client:
+        async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0, limits=client_limits) as client:
             for rate in rates_per_minute:
                 step_label = f"poisson_{rate:.1f}rpm"
                 logger.info("Starting plateau: %s (target rate: %.1f subs/min, duration: %.0fs)...",
@@ -253,12 +278,14 @@ class LoadRunner:
                 step_start = time.perf_counter()
                 in_flight: set[asyncio.Task] = set()
                 step_results: list[ClientSubmissionResult] = []
+                dispatched_count = 0
 
-                while (time.perf_counter() - step_start < step_duration_s) or (len(step_results) < min_completions):
+                while (time.perf_counter() - step_start < step_duration_s) or (dispatched_count < min_completions):
                     # Sample inter-arrival time: delta_t ~ Exp(lambda)
                     inter_arrival_s = -math.log(random.random()) / lam if lam > 0 else 1.0
 
                     task = asyncio.create_task(self.execute_single_submission(step_label, client))
+                    dispatched_count += 1
                     in_flight.add(task)
 
                     def make_done_callback(t: asyncio.Task) -> Callable[[asyncio.Task], None]:
@@ -298,8 +325,9 @@ class LoadRunner:
     ) -> list[ClientSubmissionResult]:
         """Run closed-loop virtual students who submit, wait, think, and repeat."""
         all_results: list[ClientSubmissionResult] = []
+        client_limits = httpx.Limits(max_connections=300, max_keepalive_connections=100, keepalive_expiry=30.0)
 
-        async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0) as client:
+        async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0, limits=client_limits) as client:
             for users_count in concurrency_levels:
                 step_label = f"closed_loop_{users_count}users"
                 logger.info("Starting closed-loop plateau: %s (duration: %.0fs)...", step_label, step_duration_s)
@@ -337,8 +365,9 @@ class LoadRunner:
     ) -> list[ClientSubmissionResult]:
         """Fire B simultaneous submissions within a short burst window."""
         all_results: list[ClientSubmissionResult] = []
+        client_limits = httpx.Limits(max_connections=300, max_keepalive_connections=100, keepalive_expiry=30.0)
 
-        async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0) as client:
+        async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0, limits=client_limits) as client:
             for b_size in burst_sizes:
                 step_label = f"burst_{b_size}subs"
                 logger.info("Firing synchronized burst of %d submissions over %.1fs window...", b_size, burst_window_s)

@@ -28,16 +28,17 @@ public static class SubmissionPromptBuilder
 
     private const string FailedSubmitInstructions =
         "The sandbox reported a compilation or runtime failure. Focus on explaining the failure and how the student " +
-        "can debug it educationally. Do not judge whether the assignment is solved. Set taskSolved to null.";
+        "can debug it educationally. Keep the explanation concise and direct (no more than 200 words). " +
+        "Do not judge whether the assignment is solved. Set taskSolved to null.";
 
     private const string SuccessfulSubmitInstructions =
-        "Review the code for significant non-crashing quality issues first. If significant issues exist, explain them " +
-        "and set taskSolved to null. If no significant issues exist, compare the program with the assignment " +
+        "Review the code for significant non-crashing quality issues first. If significant issues exist, explain them concisely " +
+        "(no more than 200 words) and set taskSolved to null. If no significant issues exist, compare the program with the assignment " +
         "description and set taskSolved to true or false based on whether it is correctly solved. Do not give away the solution.";
 
-    private static readonly LlmInferenceParameters HintParameters = new(0.2, 2048, 1.0);
-    private static readonly LlmInferenceParameters FailedSubmitParameters = new(0.2, 2048, 1.0);
-    private static readonly LlmInferenceParameters SuccessfulSubmitParameters = new(0.2, 2048, 1.0);
+    private static readonly LlmInferenceParameters HintParameters = new(0.2, 4096, 1.0);
+    private static readonly LlmInferenceParameters FailedSubmitParameters = new(0.2, 4096, 1.0);
+    private static readonly LlmInferenceParameters SuccessfulSubmitParameters = new(0.2, 4096, 1.0);
 
 
     public static SubmissionPrompt Build(Assignment assignment, Submission submission, SandboxResult sandboxResult)

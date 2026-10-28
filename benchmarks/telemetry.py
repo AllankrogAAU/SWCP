@@ -222,7 +222,7 @@ class TelemetryCollector:
 
         # 2. Query mean token generation rate
         tok_data = self._query_prom_range(
-            'rate(vllm:num_total_tokens_total{namespace="swcp"}[30s])',
+            'rate(vllm:generation_tokens_total{namespace="swcp"}[30s])',
             start_epoch, end_epoch, step_s
         )
         if tok_data:

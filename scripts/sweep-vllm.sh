@@ -32,7 +32,7 @@ if [ -z "${KUBECONFIG:-}" ]; then
 fi
 
 # Defaults
-MEM_VALUES="0.80,0.88,0.92"
+MEM_VALUES="0.88"
 SEQS_VALUES="4,8,12,16"
 MEM_RANGE=""
 SEQS_RANGE=""
@@ -43,6 +43,7 @@ DURATION="120"
 MIN_COMPLETIONS="16"
 USERS="100"
 HARDWARE_PREFIX="rtx5070ti"
+DRAIN_TIMEOUT="90"
 APPLY_WINNER=0
 REPORT_ONLY=0
 SWEEP_ID=""
@@ -53,7 +54,7 @@ Usage: ./scripts/sweep-vllm.sh [OPTIONS]
 
 Variable Range / Value Options:
   --mem-range START:END:STEP     Range for VLLM_GPU_MEMORY_UTILIZATION (e.g. 0.80:0.92:0.04)
-  --mem-values v1,v2,...         Comma-separated memory utilization values (default: 0.80,0.88,0.92)
+  --mem-values v1,v2,...         Comma-separated memory utilization values (default: 0.88)
   --seqs-range START:END:STEP    Range for VLLM_MAX_NUM_SEQS (e.g. 4:16:4)
   --seqs-values s1,s2,...        Comma-separated max_num_seqs values (default: 4,8,12,16)
   --pairs m1:s1,m2:s2,...        Test specific (mem:seqs) pairs instead of full Cartesian grid
@@ -62,6 +63,7 @@ Load & Execution Options:
   --rate RPM                     Submission arrival rate per minute per test (default: 16)
   --duration SECONDS             Duration in seconds per configuration (default: 120)
   --min-completions COUNT        Minimum completed submissions per configuration (default: 16)
+  --drain-timeout SECONDS        Max seconds to wait for queues/DB to drain between runs (default: 90)
   --users COUNT                  Pre-seeded virtual user pool size (default: 100)
   --hardware TAG                 Hardware prefix tag (default: rtx5070ti)
   --target-url URL               Target ingress URL (default: http://localhost)
@@ -82,6 +84,7 @@ while [ $# -gt 0 ]; do
     --rate)            RATE="$2"; shift 2 ;;
     --duration)        DURATION="$2"; shift 2 ;;
     --min-completions) MIN_COMPLETIONS="$2"; shift 2 ;;
+    --drain-timeout)   DRAIN_TIMEOUT="$2"; shift 2 ;;
     --users)           USERS="$2"; shift 2 ;;
     --hardware)        HARDWARE_PREFIX="$2"; shift 2 ;;
     --target-url)      TARGET_URL="$2"; shift 2 ;;
@@ -112,6 +115,46 @@ run_in_container() {
     --network host \
     -v "$ROOT/benchmarks/results:/app/results" \
     swcp-benchmarks:latest "$@"
+}
+
+drain_pipeline() {
+  local timeout="${1:-$DRAIN_TIMEOUT}"
+  echo ">>> Checking pipeline drain status (active DB submissions and NATS queue depth)..."
+  local start_time
+  start_time=$(date +%s)
+  while true; do
+    local nats_pending=0
+    local db_pending=0
+
+    # 1. Check NATS pending & unacked messages across all consumers
+    local nats_stats
+    nats_stats=$(kubectl exec -n swcp nats-0 -- wget -qO- 'http://localhost:8222/jsz?consumers=1' 2>/dev/null || echo "{}")
+    if command -v jq >/dev/null 2>&1; then
+      nats_pending=$(echo "$nats_stats" | jq '[.. | .num_ack_pending?, .num_pending? // empty] | add // 0' 2>/dev/null || echo 0)
+    fi
+
+    # 2. Check Postgres submissions that are still in flight
+    local db_res
+    db_res=$(kubectl exec -n swcp postgres-0 -- psql -U swcp -d swcp -t -c "SELECT count(*) FROM \"Submissions\" WHERE \"Status\" NOT IN ('COMPLETED', 'FAILED');" 2>/dev/null || echo 0)
+    db_pending=$(echo "$db_res" | tr -d '[:space:]')
+    db_pending="${db_pending:-0}"
+
+    if [ "$nats_pending" -eq 0 ] && [ "$db_pending" -eq 0 ]; then
+      echo "✓ Pipeline is completely idle (NATS pending: 0, DB in-flight: 0)."
+      break
+    fi
+
+    local now
+    now=$(date +%s)
+    local elapsed=$(( now - start_time ))
+    if [ "$elapsed" -ge "$timeout" ]; then
+      echo "Warning: Pipeline drain timed out after ${timeout}s (NATS pending: $nats_pending, DB in-flight: $db_pending). Proceeding..." >&2
+      break
+    fi
+
+    echo "  [Drain] NATS in-flight/pending: $nats_pending | DB in-flight: $db_pending | Elapsed: ${elapsed}s / ${timeout}s"
+    sleep 2
+  done
 }
 
 if [ "$REPORT_ONLY" -eq 1 ]; then
@@ -178,7 +221,8 @@ echo " Total configurations to test: ${#TEST_PAIRS[@]} -> ${TEST_PAIRS[*]}"
 echo " Target rate: ${RATE}/min | Duration: ${DURATION}s | Min completions: ${MIN_COMPLETIONS}"
 echo "=================================================================="
 
-# Ensure virtual users are seeded once before starting loop
+# Ensure pipeline is clean and virtual users are seeded once before starting loop
+drain_pipeline
 run_in_container seed --users "$USERS" --target-url "$TARGET_URL"
 
 IDX=0
@@ -223,6 +267,9 @@ for cfg in "${TEST_PAIRS[@]}"; do
     --target-url "$TARGET_URL" || {
       echo "Warning: Benchmark step failed for MEM=$MEM, SEQS=$SEQS; continuing sweep..." >&2
     }
+
+  # 4. Drain any in-flight work before restarting deployments for the next step
+  drain_pipeline
 done
 
 echo ""
