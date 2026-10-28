@@ -8,12 +8,16 @@ namespace coreApi.Endpoints;
 
 public static class AssignmentEndpoints
 {
+    private sealed record SaveAssignmentStateRequest(
+        string CurrentCode);
+
     public static RouteGroupBuilder MapAssignmentEndpoints(this IEndpointRouteBuilder endpoints)
     {
         var group = endpoints.MapGroup("/api/assignments").WithTags("Assignments").RequireAuthorization();
         group.MapGet("/", List);
         group.MapGet("/{id:guid}", Get);
         group.MapGet("/{id:guid}/state", GetState);
+        group.MapPut("/{id:guid}/state", SaveState);
         group.MapPost("/", Create).RequireAuthorization("TeacherOnly");
         return group;
     }
@@ -63,6 +67,47 @@ public static class AssignmentEndpoints
             state.CurrentCode,
             state.UpdatedAtUtc
         });
+    }
+
+    private static async Task<IResult> SaveState(
+        Guid id,
+        SaveAssignmentStateRequest request,
+        ClaimsPrincipal principal,
+        CoreDbContext database,
+        CancellationToken cancellationToken)
+    {
+        if(!Guid.TryParse(
+            principal.FindFirstValue(ClaimTypes.NameIdentifier), 
+            out var userId))
+        {
+            return Results.Unauthorized();
+        }
+
+        var state = await database.UserAssignmentStates.SingleOrDefaultAsync(
+            x => x.UserId == userId && x.AssignmentId == id, cancellationToken);
+
+           if (state is null)
+                {
+                    state = new UserAssignmentState
+                    {
+                        UserId = userId,
+                        AssignmentId = id,
+                        CurrentCode = request.CurrentCode,
+                        UpdatedAtUtc = DateTimeOffset.UtcNow
+                    };
+
+                    database.UserAssignmentStates.Add(state);
+                }
+                else
+                {
+                    state.CurrentCode = request.CurrentCode;
+                    state.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                }
+
+           await database.SaveChangesAsync(cancellationToken);
+
+           return Results.NoContent();     
+        
     }
 
     private static async Task<IResult> Create(
