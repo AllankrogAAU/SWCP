@@ -292,5 +292,11 @@ if [ "$APPLY_WINNER" -eq 1 ] && [ -f "$WINNER_FILE" ]; then
   kubectl rollout status deployment/llm-worker -n swcp --timeout=120s
   kubectl rollout status deployment/vllm -n swcp --timeout=300s
   echo "✓ Cluster is now running optimal settings: VLLM_GPU_MEMORY_UTILIZATION=$BEST_MEM, VLLM_MAX_NUM_SEQS=$BEST_SEQS"
+
+  if [ -f "$ROOT/.env" ]; then
+    sed -i "s/^VLLM_GPU_MEMORY_UTILIZATION=.*/VLLM_GPU_MEMORY_UTILIZATION=$BEST_MEM/" "$ROOT/.env"
+    sed -i "s/^VLLM_MAX_NUM_SEQS=.*/VLLM_MAX_NUM_SEQS=$BEST_SEQS/" "$ROOT/.env"
+    echo "✓ Updated .env: VLLM_GPU_MEMORY_UTILIZATION=$BEST_MEM, VLLM_MAX_NUM_SEQS=$BEST_SEQS"
+  fi
 fi
 

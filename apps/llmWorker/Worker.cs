@@ -132,6 +132,13 @@ public sealed class Worker(
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
+            try
+            {
+                await message.NakAsync();
+            }
+            catch
+            {
+            }
         }
         catch (Exception exception)
         {

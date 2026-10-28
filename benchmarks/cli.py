@@ -257,13 +257,15 @@ async def _run_benchmark(config: BenchmarkConfig, args: argparse.Namespace) -> i
             "outcome": stages.outcome or r.terminal_via,
         })
 
-    prom_snap = telemetry.collect_prometheus_snapshot(start_epoch, end_epoch)
-
     by_step: dict[str, list[ClientSubmissionResult]] = {}
     for r in results:
         by_step.setdefault(r.step_label, []).append(r)
 
     for step_label, step_subs in by_step.items():
+        step_start_s, step_end_s = runner.step_windows.get(step_label, (start_epoch, end_epoch))
+        step_duration_min = max(0.01, (step_end_s - step_start_s) / 60.0)
+        prom_snap = telemetry.collect_prometheus_snapshot(step_start_s, step_end_s)
+
         e2e_vals = [s.client_e2e_ms for s in step_subs]
         subs_stages = [stages_by_sub[s.submission_id] for s in step_subs if s.submission_id in stages_by_sub]
         loki_tok_rates = [st.tokens_per_sec for st in subs_stages if st.tokens_per_sec > 0]
@@ -278,7 +280,7 @@ async def _run_benchmark(config: BenchmarkConfig, args: argparse.Namespace) -> i
             "run_id": run_id,
             "step_label": step_label,
             "target_load": target_load_val,
-            "achieved_throughput_per_min": len(step_subs) / max(0.1, (end_epoch - start_epoch) / 60.0),
+            "achieved_throughput_per_min": len(step_subs) / step_duration_min,
             "total_requests": len(step_subs),
             "success_rate": sum(1 for s in step_subs if s.final_status == "COMPLETED") / len(step_subs),
             "p50_e2e_ms": float(np.percentile(e2e_vals, 50)),
@@ -522,6 +524,16 @@ def main() -> None:
         config_kwargs["results_dir"] = Path(args.results_dir)
     if args.users:
         config_kwargs["user_pool_size"] = args.users
+
+    # Auto-scale user pool size if concurrency or burst exceeds specified pool
+    if getattr(args, "arrival_mode", None) == "closed-loop":
+        concurrencies = [int(c.strip()) for c in getattr(args, "concurrency", "").split(",") if c.strip()]
+        if concurrencies:
+            config_kwargs["user_pool_size"] = max(config_kwargs.get("user_pool_size", 100), max(concurrencies) + 10)
+    elif getattr(args, "arrival_mode", None) == "burst":
+        bursts = [int(b.strip()) for b in getattr(args, "bursts", "").split(",") if b.strip()]
+        if bursts:
+            config_kwargs["user_pool_size"] = max(config_kwargs.get("user_pool_size", 100), max(bursts) + 10)
 
     config = BenchmarkConfig(**config_kwargs)
 

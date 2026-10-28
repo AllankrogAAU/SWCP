@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import time
 from typing import Any
 import httpx
 
@@ -112,6 +114,16 @@ class Seeder:
 
     async def _is_token_valid(self, token: str) -> bool:
         try:
+            # Check JWT expiry header/payload: require at least 30 minutes of remaining lifetime
+            parts = token.split(".")
+            if len(parts) == 3:
+                padded = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+                payload = json.loads(base64.urlsafe_b64decode(padded.encode()))
+                exp = payload.get("exp")
+                if exp is not None and (exp - time.time()) < 1800:
+                    logger.info("Cached JWT token expires within 30 minutes (exp=%s). Treating as expired.", exp)
+                    return False
+
             async with httpx.AsyncClient(base_url=self.config.target_url, timeout=5.0) as client:
                 resp = await client.get(
                     "/api/assignments",

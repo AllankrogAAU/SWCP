@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import math
@@ -51,6 +52,7 @@ class LoadRunner:
         for token in tokens:
             self.user_queue.put_nowait(token)
 
+        self.step_windows: dict[str, tuple[float, float]] = {}
         self._submission_seq = 0
         self._seq_lock = asyncio.Lock()
 
@@ -100,6 +102,26 @@ class LoadRunner:
             )
             t_after_post = time.perf_counter()
             http_accepted_ms = (t_after_post - t0) * 1000.0
+
+            if resp.status_code == 401:
+                # Token expired during run - auto-refresh and retry once
+                try:
+                    parts = token.split(".")
+                    padded = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+                    jwt_data = json.loads(base64.urlsafe_b64decode(padded.encode()))
+                    uname = jwt_data.get("preferred_username") or jwt_data.get("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name")
+                    if uname:
+                        login_res = await client.post("/api/auth/login", json={"username": uname, "password": self.config.password})
+                        if login_res.status_code == 200:
+                            token = str(login_res.json().get("accessToken") or login_res.json().get("token"))
+                            resp = await client.post(
+                                "/api/submissions",
+                                json=payload,
+                                headers={"Authorization": f"Bearer {token}"},
+                                timeout=30.0,
+                            )
+                except Exception as refresh_err:
+                    logger.warning("Token auto-refresh failed: %s", refresh_err)
 
             if resp.status_code != 202:
                 resp.raise_for_status()
@@ -275,12 +297,13 @@ class LoadRunner:
                             step_label, rate, step_duration_s)
 
                 lam = rate / 60.0  # requests per second
-                step_start = time.perf_counter()
+                step_start_perf = time.perf_counter()
+                step_start_epoch = time.time()
                 in_flight: set[asyncio.Task] = set()
                 step_results: list[ClientSubmissionResult] = []
                 dispatched_count = 0
 
-                while (time.perf_counter() - step_start < step_duration_s) or (dispatched_count < min_completions):
+                while (time.perf_counter() - step_start_perf < step_duration_s) or (dispatched_count < min_completions):
                     # Sample inter-arrival time: delta_t ~ Exp(lambda)
                     inter_arrival_s = -math.log(random.random()) / lam if lam > 0 else 1.0
 
@@ -308,7 +331,11 @@ class LoadRunner:
                     logger.info("Draining %d in-flight submissions for step %s...", len(in_flight), step_label)
                     await asyncio.gather(*in_flight, return_exceptions=True)
 
-                logger.info("Completed plateau %s: %d submissions collected.", step_label, len(step_results))
+                step_end_epoch = time.time()
+                self.step_windows[step_label] = (step_start_epoch, step_end_epoch)
+                duration_actual = step_end_epoch - step_start_epoch
+                logger.info("Completed plateau %s: %d submissions collected in %.1fs.", step_label, len(step_results), duration_actual)
+                await asyncio.sleep(2.0)
 
         return all_results
 
@@ -333,6 +360,7 @@ class LoadRunner:
                 logger.info("Starting closed-loop plateau: %s (duration: %.0fs)...", step_label, step_duration_s)
 
                 stop_event = asyncio.Event()
+                step_start_epoch = time.time()
 
                 async def virtual_student() -> None:
                     while not stop_event.is_set():
@@ -349,7 +377,10 @@ class LoadRunner:
                 await asyncio.sleep(step_duration_s)
                 stop_event.set()
                 await asyncio.gather(*workers, return_exceptions=True)
-                logger.info("Completed closed-loop step %s.", step_label)
+                step_end_epoch = time.time()
+                self.step_windows[step_label] = (step_start_epoch, step_end_epoch)
+                logger.info("Completed closed-loop step %s in %.1fs.", step_label, step_end_epoch - step_start_epoch)
+                await asyncio.sleep(2.0)
 
         return all_results
 
@@ -372,6 +403,7 @@ class LoadRunner:
                 step_label = f"burst_{b_size}subs"
                 logger.info("Firing synchronized burst of %d submissions over %.1fs window...", b_size, burst_window_s)
 
+                step_start_epoch = time.time()
                 interval = burst_window_s / max(1, b_size)
                 tasks: list[asyncio.Task] = []
 
@@ -387,7 +419,10 @@ class LoadRunner:
                     if on_result:
                         await on_result(res)
 
-                logger.info("Burst step %s finished: %d submissions drained.", step_label, len(burst_results))
+                step_end_epoch = time.time()
+                self.step_windows[step_label] = (step_start_epoch, step_end_epoch)
+                logger.info("Burst step %s finished: %d submissions drained in %.1fs.", step_label, len(burst_results), step_end_epoch - step_start_epoch)
+                await asyncio.sleep(2.0)
 
         return all_results
 

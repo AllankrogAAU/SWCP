@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,14 @@ def plot_obj1_bottleneck_stacked(
         }).reset_index()
     else:
         grouped = sum_df.copy()
+
+    if "target_load" in grouped.columns:
+        grouped = grouped.sort_values("target_load")
+    elif "step_label" in grouped.columns:
+        grouped["_sort_key"] = grouped["step_label"].apply(
+            lambda s: float(re.search(r"([0-9]+(?:\.[0-9]+)?)", str(s)).group(1)) if re.search(r"([0-9]+(?:\.[0-9]+)?)", str(s)) else 0.0
+        )
+        grouped = grouped.sort_values("_sort_key")
 
     steps = grouped["step_label"].tolist() if "step_label" in grouped else [f"Step {i}" for i in range(len(grouped))]
     x = np.arange(len(steps))
@@ -92,6 +101,14 @@ def plot_obj2_infinite_gpu_scaling(
         }).reset_index()
     else:
         grouped = sum_df.copy()
+
+    if "target_load" in grouped.columns:
+        grouped = grouped.sort_values("target_load")
+    elif "step_label" in grouped.columns:
+        grouped["_sort_key"] = grouped["step_label"].apply(
+            lambda s: float(re.search(r"([0-9]+(?:\.[0-9]+)?)", str(s)).group(1)) if re.search(r"([0-9]+(?:\.[0-9]+)?)", str(s)) else 0.0
+        )
+        grouped = grouped.sort_values("_sort_key")
 
     steps = grouped["step_label"].tolist() if "step_label" in grouped else [f"Step {i}" for i in range(len(grouped))]
     x = np.arange(len(steps))
