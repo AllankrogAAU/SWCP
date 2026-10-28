@@ -63,10 +63,21 @@ drain_pipeline() {
 
 # Check if Objective 2 or mock LLM is requested
 IS_MOCK_SUITE=0
+TARGET_URL="http://localhost"
+skip_next=0
 for arg in "$@"; do
-  if [ "$arg" = "obj2_infinite_gpu" ] || [ "$arg" = "--mock-llm" ]; then
+  if [ "$skip_next" -eq 1 ]; then
+    TARGET_URL="$arg"
+    skip_next=0
+    continue
+  fi
+  if [ "$arg" = "--target-url" ]; then
+    skip_next=1
+  elif [[ "$arg" =~ ^--target-url=(.*)$ ]]; then
+    TARGET_URL="${BASH_REMATCH[1]}"
+  fi
+  if [ "$arg" = "obj2_infinite_gpu" ] || [ "$arg" = "infinite_gpu" ] || [ "$arg" = "--mock-llm" ]; then
     IS_MOCK_SUITE=1
-    break
   fi
 done
 
@@ -82,6 +93,14 @@ cleanup_mock() {
     kubectl rollout restart deployment/llm-worker -n swcp || true
     kubectl rollout status deployment/llm-worker -n swcp --timeout=120s || true
     echo "✓ Restored local LLM mode on cluster."
+
+    # Warmup after restoring real LLM
+    echo "=== Running Warmup Submissions (3 requests) after rollout ==="
+    docker run --rm $DOCKER_TTY \
+      --network host \
+      -v "$ROOT/benchmarks/results:/app/results" \
+      swcp-benchmarks:latest warmup --count 3 --target-url "$TARGET_URL" || true
+    drain_pipeline
   fi
 }
 
@@ -102,6 +121,13 @@ if [ "$IS_MOCK_SUITE" -eq 1 ]; then
   kubectl rollout restart deployment/llm-worker -n swcp
   kubectl rollout status deployment/llm-worker -n swcp --timeout=120s
   echo "✓ Infinite GPU (Mock LLM) mode active."
+
+  # Warmup: Execute 3 requests to eliminate cold-start JIT noise
+  echo "=== Running Warmup Submissions (3 requests) after rollout ==="
+  docker run --rm $DOCKER_TTY \
+    --network host \
+    -v "$ROOT/benchmarks/results:/app/results" \
+    swcp-benchmarks:latest warmup --count 3 --target-url "$TARGET_URL" || true
 fi
 
 # Drain prior work before test

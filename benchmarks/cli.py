@@ -39,6 +39,22 @@ def setup_logging(verbose: bool = False) -> None:
     )
 
 
+async def _run_warmup(config: BenchmarkConfig, count: int = 3) -> int:
+    console.print(f"[bold cyan]=== Sending {count} Warmup Submissions (JIT & CUDA Graph Initialization) ===[/bold cyan]")
+    seeder = Seeder(config)
+    tokens = await seeder.ensure_users_and_tokens(count=count)
+    assignment_id = await seeder.resolve_assignment_id(tokens[0])
+    runner = LoadRunner(config, tokens, assignment_id, "warmup")
+    import httpx
+    async with httpx.AsyncClient(base_url=config.target_url, timeout=90.0) as client:
+        for i in range(1, count + 1):
+            console.print(f" [Warmup {i}/{count}] Executing warmup submission...")
+            res = await runner.execute_single_submission("warmup", client, archetype="pass", timeout_s=90.0)
+            console.print(f"  -> Finished: status={res.final_status}, latency={res.client_e2e_ms:.1f}ms")
+    console.print("[bold green]✓ Warmup completed. System is warm and ready for benchmark runs.[/bold green]\n")
+    return 0
+
+
 async def _run_smoke_test(config: BenchmarkConfig) -> int:
     console.print("[bold cyan]=== SWCP Benchmark Smoke Test ===[/bold cyan]")
     run_id = f"smoke_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -184,6 +200,10 @@ async def _run_benchmark(config: BenchmarkConfig, args: argparse.Namespace) -> i
     sweep_id = getattr(args, "sweep_id", None) or ""
     skip_plots = bool(getattr(args, "skip_plots", False) or sweep_id)
 
+    if getattr(args, "warmup", False):
+        await _run_warmup(config, count=3)
+        await asyncio.sleep(1.0)
+
     start_epoch = time.time()
     start_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
     storage.insert_run({
@@ -207,7 +227,17 @@ async def _run_benchmark(config: BenchmarkConfig, args: argparse.Namespace) -> i
     runner = LoadRunner(config, tokens, assignment_id, run_id)
     results: list[ClientSubmissionResult] = []
 
-    if args.arrival_mode == "stepped-poisson":
+    if args.arrival_mode == "adaptive-poisson":
+        results = await runner.run_adaptive_poisson(
+            start_rate=float(getattr(args, "start_rate", 10.0)),
+            rate_delta=float(getattr(args, "rate_delta", 5.0)),
+            max_rate=float(getattr(args, "max_rate", 0.0) or 0.0),
+            target_p95_s=float(getattr(args, "target_p95_s", 30.0)),
+            step_duration_s=args.step_duration_s,
+            min_completions=args.min_completions,
+            confirmation_steps=int(getattr(args, "confirmation_steps", 1)),
+        )
+    elif args.arrival_mode == "stepped-poisson":
         rates = [float(r.strip()) for r in args.rates.split(",") if r.strip()]
         results = await runner.run_stepped_poisson(
             rates_per_minute=rates,
@@ -339,7 +369,7 @@ def _run_sweep_report(config: BenchmarkConfig, sweep_id: str | None = None) -> i
                s.p95_llm_exec_ms
         FROM step_summaries s
         JOIN runs r ON r.run_id = s.run_id
-        WHERE r.suite_name = 'obj3_vllm_sweep'
+        WHERE r.suite_name IN ('obj3_vllm_sweep', 'vllm_sweep')
     """
     params: list[Any] = []
     if sweep_id:
@@ -359,7 +389,7 @@ def _run_sweep_report(config: BenchmarkConfig, sweep_id: str | None = None) -> i
             )
 
     if df.empty:
-        console.print("[red]No Objective 3 vLLM sweep runs found in benchmarks.sqlite.[/red]")
+        console.print("[red]No vLLM sweep runs found in benchmarks.sqlite.[/red]")
         return 1
 
     # Extract MEM and SEQS from columns or hardware_tag (e.g. "rtx5070ti_mem0.88_seqs8")
@@ -395,7 +425,7 @@ def _run_sweep_report(config: BenchmarkConfig, sweep_id: str | None = None) -> i
     winner = valid_df.sort_values(by=["score"], ascending=False).iloc[0]
     winner_run_id = str(winner["run_id"])
 
-    table = Table(title="Objective 3: vLLM Hardware Parameter Sweep Comparison")
+    table = Table(title="vLLM Hardware Parameter Sweep Comparison")
     table.add_column("GPU Mem Util", justify="right", style="cyan")
     table.add_column("Max Seqs", justify="right", style="cyan")
     table.add_column("Throughput (subs/min)", justify="right", style="green")
@@ -476,21 +506,42 @@ def main() -> None:
     # smoke-test
     subparsers.add_parser("smoke-test", parents=[parent_parser], help="Execute minimal 2-request verification test")
 
+    # warmup
+    warmup_parser = subparsers.add_parser("warmup", parents=[parent_parser], help="Send warmup requests to initialize JIT and CUDA graphs")
+    warmup_parser.add_argument("--count", type=int, default=3, help="Number of warmup requests (default: 3)")
+
     # seed
     subparsers.add_parser("seed", parents=[parent_parser], help="Pre-seed virtual users and cache JWTs")
 
     # run
     run_parser = subparsers.add_parser("run", parents=[parent_parser], help="Run a benchmark suite")
-    run_parser.add_argument("--suite", required=True, choices=["obj1_bottleneck", "obj2_infinite_gpu", "obj3_vllm_sweep", "obj4_sla_curve", "custom"])
-    run_parser.add_argument("--arrival-mode", default="stepped-poisson", choices=["stepped-poisson", "closed-loop", "burst"])
+    run_parser.add_argument(
+        "--suite",
+        required=True,
+        choices=[
+            "sla_curve", "burst", "infinite_gpu", "vllm_sweep",
+            "obj1_bottleneck", "obj2_infinite_gpu", "obj3_vllm_sweep", "obj4_sla_curve", "custom"
+        ]
+    )
+    run_parser.add_argument(
+        "--arrival-mode",
+        default="stepped-poisson",
+        choices=["adaptive-poisson", "stepped-poisson", "closed-loop", "burst"]
+    )
     run_parser.add_argument("--rates", default="2,4,8,12,16", help="Comma-separated rates/min for stepped-poisson")
+    run_parser.add_argument("--start-rate", type=float, default=10.0, help="Initial arrival rate for adaptive-poisson (default: 10)")
+    run_parser.add_argument("--rate-delta", type=float, default=5.0, help="Rate step increment for adaptive-poisson (default: 5)")
+    run_parser.add_argument("--max-rate", type=float, default=0.0, help="Optional maximum rate ceiling for adaptive-poisson (default: 0 = unbounded)")
+    run_parser.add_argument("--target-p95-s", type=float, default=30.0, help="Saturation threshold in seconds for adaptive-poisson (default: 30)")
+    run_parser.add_argument("--confirmation-steps", type=int, default=1, help="Steps to run after crossing target-p95-s before stopping (default: 1)")
     run_parser.add_argument("--concurrency", default="5,10,20,35,50", help="Comma-separated concurrent users for closed-loop")
     run_parser.add_argument("--bursts", default="10,20,30", help="Comma-separated burst sizes for burst mode")
     run_parser.add_argument("--step-duration-s", type=float, default=120.0, help="Duration of each step in seconds")
-    run_parser.add_argument("--min-completions", type=int, default=10, help="Minimum completions per step")
-    run_parser.add_argument("--burst-window-s", type=float, default=5.0, help="Window duration for burst mode")
+    run_parser.add_argument("--min-completions", type=int, default=8, help="Minimum completions per step")
+    run_parser.add_argument("--burst-window-s", type=float, default=2.0, help="Window duration for burst mode in seconds")
+    run_parser.add_argument("--warmup", action="store_true", default=False, help="Send 3 warmup requests prior to benchmark execution")
     run_parser.add_argument("--cold-start", action="store_true", help="Flag if testing cold start from min replicas")
-    run_parser.add_argument("--vllm-gpu-mem", type=float, default=0.80, help="Configured VLLM_GPU_MEMORY_UTILIZATION")
+    run_parser.add_argument("--vllm-gpu-mem", type=float, default=0.88, help="Configured VLLM_GPU_MEMORY_UTILIZATION")
     run_parser.add_argument("--vllm-max-seqs", type=int, default=4, help="Configured VLLM_MAX_NUM_SEQS")
     run_parser.add_argument("--sweep-id", default="", help="Group ID for a multi-point parameter sweep")
     run_parser.add_argument("--skip-plots", action="store_true", help="Record to SQLite only without per-run plots")
@@ -539,6 +590,9 @@ def main() -> None:
 
     if args.command == "smoke-test":
         sys.exit(asyncio.run(_run_smoke_test(config)))
+
+    elif args.command == "warmup":
+        sys.exit(asyncio.run(_run_warmup(config, args.count)))
 
     elif args.command == "seed":
         seeder = Seeder(config)

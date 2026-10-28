@@ -14,6 +14,7 @@ from typing import Any, Callable, Coroutine
 from urllib.parse import urlparse
 
 import httpx
+import numpy as np
 import websockets
 
 from benchmarks.config import BenchmarkConfig
@@ -335,6 +336,103 @@ class LoadRunner:
                 self.step_windows[step_label] = (step_start_epoch, step_end_epoch)
                 duration_actual = step_end_epoch - step_start_epoch
                 logger.info("Completed plateau %s: %d submissions collected in %.1fs.", step_label, len(step_results), duration_actual)
+                await asyncio.sleep(2.0)
+
+        return all_results
+
+    # =========================================================================
+    # Arrival Pattern 1B: Adaptive Stepped Poisson (Knee-Finding)
+    # =========================================================================
+    async def run_adaptive_poisson(
+        self,
+        start_rate: float = 10.0,
+        rate_delta: float = 5.0,
+        max_rate: float = 0.0,
+        target_p95_s: float = 30.0,
+        step_duration_s: float = 90.0,
+        min_completions: int = 8,
+        confirmation_steps: int = 1,
+        on_result: Callable[[ClientSubmissionResult], Coroutine[Any, Any, None]] | None = None,
+    ) -> list[ClientSubmissionResult]:
+        """Dynamically ramp Poisson arrival rate until p95 exceeds target_p95_s, plus confirmation."""
+        all_results: list[ClientSubmissionResult] = []
+        client_limits = httpx.Limits(max_connections=300, max_keepalive_connections=100, keepalive_expiry=30.0)
+
+        current_rate = start_rate
+        confirmation_done = 0
+
+        async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0, limits=client_limits) as client:
+            while max_rate <= 0 or current_rate <= max_rate:
+                step_label = f"poisson_{current_rate:.1f}rpm"
+                logger.info(
+                    "Starting adaptive plateau: %s (duration: %.0fs, target p95: %.1fs)...",
+                    step_label, step_duration_s, target_p95_s
+                )
+
+                lam = current_rate / 60.0
+                step_start_perf = time.perf_counter()
+                step_start_epoch = time.time()
+                in_flight: set[asyncio.Task] = set()
+                step_results: list[ClientSubmissionResult] = []
+                dispatched_count = 0
+
+                while (time.perf_counter() - step_start_perf < step_duration_s) or (dispatched_count < min_completions):
+                    inter_arrival_s = -math.log(random.random()) / lam if lam > 0 else 1.0
+
+                    task = asyncio.create_task(self.execute_single_submission(step_label, client))
+                    dispatched_count += 1
+                    in_flight.add(task)
+
+                    def make_done_callback(t: asyncio.Task) -> Callable[[asyncio.Task], None]:
+                        def done_cb(res_task: asyncio.Task) -> None:
+                            in_flight.discard(res_task)
+                            if not res_task.cancelled() and res_task.exception() is None:
+                                res = res_task.result()
+                                step_results.append(res)
+                                all_results.append(res)
+                                if on_result:
+                                    asyncio.create_task(on_result(res))
+                        return done_cb
+
+                    task.add_done_callback(make_done_callback(task))
+                    await asyncio.sleep(inter_arrival_s)
+
+                if in_flight:
+                    logger.info("Draining %d in-flight submissions for step %s...", len(in_flight), step_label)
+                    await asyncio.gather(*in_flight, return_exceptions=True)
+
+                step_end_epoch = time.time()
+                self.step_windows[step_label] = (step_start_epoch, step_end_epoch)
+                duration_actual = step_end_epoch - step_start_epoch
+
+                # Calculate step p95 latency
+                e2e_vals = [r.client_e2e_ms for r in step_results]
+                step_p95_s = (float(np.percentile(e2e_vals, 95)) / 1000.0) if e2e_vals else 0.0
+                step_p50_s = (float(np.percentile(e2e_vals, 50)) / 1000.0) if e2e_vals else 0.0
+
+                logger.info(
+                    "Completed plateau %s: %d subs in %.1fs | p50: %.2fs, p95: %.2fs (SLA Target: %.1fs)",
+                    step_label, len(step_results), duration_actual, step_p50_s, step_p95_s, target_p95_s
+                )
+
+                if step_p95_s >= target_p95_s:
+                    if confirmation_done < confirmation_steps:
+                        confirmation_done += 1
+                        logger.info(
+                            "Knee reached (p95=%.2fs >= %.1fs). Running %d confirmation step(s) at higher load...",
+                            step_p95_s, target_p95_s, confirmation_steps - confirmation_done + 1
+                        )
+                        current_rate += rate_delta
+                        await asyncio.sleep(2.0)
+                        continue
+                    else:
+                        logger.info(
+                            "Adaptive saturation limit confirmed (p95=%.2fs >= %.1fs). Halting ramp.",
+                            step_p95_s, target_p95_s
+                        )
+                        break
+
+                current_rate += rate_delta
                 await asyncio.sleep(2.0)
 
         return all_results

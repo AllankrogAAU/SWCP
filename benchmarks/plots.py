@@ -1,4 +1,4 @@
-"""Automated report-ready Matplotlib chart generation for the 4 benchmark objectives."""
+"""Automated report-ready Matplotlib chart generation for SWCP benchmarks."""
 
 from __future__ import annotations
 
@@ -33,19 +33,27 @@ def plot_obj1_bottleneck_stacked(
     sum_df: pd.DataFrame,
     output_path: Path,
 ) -> None:
-    """Objective 1: Stacked bar chart proving vLLM dominates total delay at high load."""
+    """Stacked bar chart proving vLLM dominates total delay at high load (mean additive)."""
     fig, ax = plt.subplots(figsize=(9, 5.5), dpi=300)
 
-    if sum_df.empty:
-        grouped = sub_df.groupby("step_label").agg({
+    # Use mean stage timings across actual submissions for true additive stacking
+    if not sub_df.empty and "step_label" in sub_df.columns:
+        grouped = sub_df.groupby("step_label", as_index=False).agg({
             "http_enqueue_ms": "mean",
             "sandbox_queue_wait_ms": "mean",
             "sandbox_exec_ms": "mean",
             "llm_queue_wait_ms": "mean",
             "llm_exec_ms": "mean",
-        }).reset_index()
-    else:
+            "client_e2e_ms": "mean",
+        })
+    elif not sum_df.empty:
         grouped = sum_df.copy()
+    else:
+        grouped = pd.DataFrame()
+
+    if grouped.empty:
+        plt.close(fig)
+        return
 
     if "target_load" in grouped.columns:
         grouped = grouped.sort_values("target_load")
@@ -71,8 +79,8 @@ def plot_obj1_bottleneck_stacked(
     ax.bar(x, llm_wait, width, bottom=enqueue + sb_wait + sb_exec, label="LLM Queue Wait", color="#f97316")
     ax.bar(x, llm_exec, width, bottom=enqueue + sb_wait + sb_exec + llm_wait, label="vLLM Inference", color="#dc2626")
 
-    ax.set_ylabel("Latency (ms)")
-    ax.set_title("Objective 1: End-to-End Pipeline Latency Breakdown by Stage")
+    ax.set_ylabel("Mean Latency (ms)")
+    ax.set_title("Pipeline Latency Breakdown by Stage (Mean Additive)")
     ax.set_xticks(x)
     ax.set_xticklabels(steps, rotation=15, ha="right")
     ax.legend(loc="upper left", frameon=True)
@@ -89,18 +97,36 @@ def plot_obj2_infinite_gpu_scaling(
     sum_df: pd.DataFrame,
     output_path: Path,
 ) -> None:
-    """Objective 2: Multi-panel plot isolating non-GPU service bottlenecks and autoscaling."""
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 7.5), sharex=True, dpi=300)
+    """Multi-panel stacked area plot isolating non-GPU service bottlenecks and autoscaling."""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9.5, 8.0), sharex=True, dpi=300)
 
-    if sum_df.empty:
-        grouped = sub_df.groupby("step_label").agg({
-            "target_load": "mean" if "target_load" in sub_df else lambda s: 1.0,
+    if not sub_df.empty and "step_label" in sub_df.columns:
+        grouped = sub_df.groupby("step_label", as_index=False).agg({
+            "http_enqueue_ms": "mean",
             "sandbox_queue_wait_ms": "mean",
             "sandbox_exec_ms": "mean",
-            "http_enqueue_ms": "mean",
-        }).reset_index()
-    else:
+            "llm_queue_wait_ms": "mean",
+            "llm_exec_ms": "mean",
+            "client_e2e_ms": ["mean", lambda v: np.percentile(v, 50), lambda v: np.percentile(v, 95)],
+        })
+        grouped.columns = [
+            "step_label", "http_enqueue_ms", "sandbox_queue_wait_ms", "sandbox_exec_ms",
+            "llm_queue_wait_ms", "llm_exec_ms", "mean_e2e_ms", "p50_e2e_ms", "p95_e2e_ms"
+        ]
+    elif not sum_df.empty:
         grouped = sum_df.copy()
+    else:
+        grouped = pd.DataFrame()
+
+    if grouped.empty:
+        plt.close(fig)
+        return
+
+    # Merge replica counts from sum_df if available
+    if not sum_df.empty and "step_label" in sum_df.columns:
+        rep_cols = ["step_label", "max_replicas_sandbox", "max_replicas_llm_worker", "max_replicas_core_api"]
+        avail_reps = [c for c in rep_cols if c in sum_df.columns]
+        grouped = pd.merge(grouped, sum_df[avail_reps], on="step_label", how="left")
 
     if "target_load" in grouped.columns:
         grouped = grouped.sort_values("target_load")
@@ -113,18 +139,44 @@ def plot_obj2_infinite_gpu_scaling(
     steps = grouped["step_label"].tolist() if "step_label" in grouped else [f"Step {i}" for i in range(len(grouped))]
     x = np.arange(len(steps))
 
-    sb_wait = grouped.get("sandbox_queue_wait_ms", grouped.get("p95_sandbox_wait_ms", pd.Series([0.0] * len(steps)))).fillna(0)
-    sb_exec = grouped.get("sandbox_exec_ms", grouped.get("p95_sandbox_exec_ms", pd.Series([0.0] * len(steps)))).fillna(0)
-    enqueue = grouped.get("http_enqueue_ms", grouped.get("mean_enqueue_ms", pd.Series([0.0] * len(steps)))).fillna(0)
+    enqueue = grouped.get("http_enqueue_ms", pd.Series([0.0] * len(steps))).fillna(0).to_numpy()
+    sb_wait = grouped.get("sandbox_queue_wait_ms", pd.Series([0.0] * len(steps))).fillna(0).to_numpy()
+    sb_exec = grouped.get("sandbox_exec_ms", pd.Series([0.0] * len(steps))).fillna(0).to_numpy()
+    llm_wait = grouped.get("llm_queue_wait_ms", pd.Series([0.0] * len(steps))).fillna(0).to_numpy()
+    llm_exec = grouped.get("llm_exec_ms", pd.Series([0.0] * len(steps))).fillna(0).to_numpy()
 
-    ax1.plot(x, sb_wait, marker="o", color="#0284c7", label="Sandbox Queue Wait (p95)", linewidth=2)
-    ax1.plot(x, sb_exec, marker="s", color="#16a34a", label="Sandbox Execution (p95)", linewidth=2)
-    ax1.plot(x, enqueue, marker="^", color="#64748b", label="API Gateway / Postgres Lock", linewidth=2)
-    ax1.set_ylabel("Service Latency (ms)")
-    ax1.set_title("Objective 2: Service Latency Growth Under Infinite GPU Compute")
-    ax1.legend(loc="upper left")
+    p50_vals = grouped.get("p50_e2e_ms", pd.Series([0.0] * len(steps))).fillna(0).to_numpy()
+    p95_vals = grouped.get("p95_e2e_ms", pd.Series([0.0] * len(steps))).fillna(0).to_numpy()
+
+    # Top Panel: Stacked Area Chart (contributing service latencies)
+    ax1.stackplot(
+        x,
+        enqueue,
+        sb_wait,
+        sb_exec,
+        llm_wait,
+        llm_exec,
+        labels=[
+            "API Gateway / DB Enqueue",
+            "Sandbox Queue Wait",
+            "Sandbox Exec (gVisor)",
+            "LLM Queue Wait",
+            "Mock LLM (5ms)",
+        ],
+        colors=["#94a3b8", "#38bdf8", "#0284c7", "#f97316", "#dc2626"],
+        alpha=0.75,
+    )
+
+    # Total E2E Latency Overlay Lines
+    ax1.plot(x, p50_vals, marker="o", color="#1e3a8a", linewidth=2.2, label="Total Client p50 (Median)")
+    ax1.plot(x, p95_vals, marker="s", color="#b91c1c", linewidth=2.5, linestyle="--", label="Total Client p95 (Tail)")
+
+    ax1.set_ylabel("Latency (ms)")
+    ax1.set_title("Service Latency Growth & Pod Scaling Under Load (Infinite GPU)")
+    ax1.legend(loc="upper left", frameon=True, fontsize=8.5)
     ax1.grid(True, linestyle="--", alpha=0.7)
 
+    # Bottom Panel: Active Pod Replicas
     rep_sb = grouped.get("max_replicas_sandbox", pd.Series([3] * len(steps))).fillna(3)
     rep_llm = grouped.get("max_replicas_llm_worker", pd.Series([2] * len(steps))).fillna(2)
     rep_core = grouped.get("max_replicas_core_api", pd.Series([2] * len(steps))).fillna(2)
@@ -149,7 +201,7 @@ def plot_obj3_vllm_tuning_matrix(
     sum_df: pd.DataFrame,
     output_path: Path,
 ) -> None:
-    """Objective 3: vLLM tuning parameter sweep throughput vs latency Pareto frontier."""
+    """vLLM hardware tuning parameter sweep throughput vs latency Pareto frontier."""
     fig, ax = plt.subplots(figsize=(9, 6), dpi=300)
 
     if sum_df.empty:
@@ -195,7 +247,7 @@ def plot_obj3_vllm_tuning_matrix(
 
     ax.set_xlabel(x_label)
     ax.set_ylabel("p95 End-to-End Latency (s)")
-    ax.set_title("Objective 3: vLLM Hardware Tuning (Throughput vs. p95 Latency)")
+    ax.set_title("vLLM Hardware Parameter Tuning (Throughput vs. p95 Latency)")
     ax.grid(True, linestyle="--", alpha=0.7)
 
     plt.tight_layout()
@@ -208,7 +260,7 @@ def plot_obj4_sla_capacity_curve(
     sum_df: pd.DataFrame,
     output_path: Path,
 ) -> None:
-    """Objective 4: SLA capacity curve plotting p50 and p95 with 5s, 10s, 15s, 20s thresholds."""
+    """SLA capacity curve plotting p50 and p95 with 5s, 10s, 15s, 20s, 30s thresholds."""
     fig, ax = plt.subplots(figsize=(9, 6), dpi=300)
 
     if sum_df.empty:
@@ -236,6 +288,7 @@ def plot_obj4_sla_capacity_curve(
         (10, "#f59e0b", "10s SLA"),
         (15, "#f97316", "15s SLA"),
         (20, "#dc2626", "20s SLA"),
+        (30, "#7f1d1d", "30s SLA"),
     ]
     for threshold, color, label in sla_levels:
         ax.axhline(threshold, color=color, linestyle="--", linewidth=1.2, alpha=0.85, label=f"{label} threshold")
@@ -254,8 +307,44 @@ def plot_obj4_sla_capacity_curve(
 
     ax.set_xlabel("Submission Arrival Rate (submissions/min)")
     ax.set_ylabel("End-to-End Latency (seconds)")
-    ax.set_title("Objective 4: System Capacity vs. Acceptable SLA Latency Curves")
-    ax.set_ylim(bottom=0, top=max(25.0, float(p95_s.max() * 1.25)))
+    ax.set_title("System Capacity vs. Acceptable SLA Latency Curves")
+    ax.set_ylim(bottom=0, top=max(35.0, float(p95_s.max() * 1.25)))
+    ax.legend(loc="upper left", frameon=True)
+    ax.grid(True, linestyle="--", alpha=0.7)
+
+    plt.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    logger.info("Saved %s", output_path)
+
+
+def plot_burst_drain(
+    sum_df: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    """Classroom deadline burst shockwave absorption and drain latency."""
+    fig, ax = plt.subplots(figsize=(9, 5.5), dpi=300)
+    if sum_df.empty:
+        plt.close(fig)
+        return
+
+    df = sum_df.copy()
+    if "step_label" in df.columns:
+        df["burst_size"] = df["step_label"].apply(
+            lambda s: int(re.search(r"burst_([0-9]+)", str(s)).group(1)) if re.search(r"burst_([0-9]+)", str(s)) else 0
+        )
+        df = df.sort_values("burst_size")
+
+    x = df.get("burst_size", pd.Series(range(len(df)))).to_numpy()
+    p50_s = (df.get("p50_e2e_ms", pd.Series([0.0] * len(df))) / 1000.0).to_numpy()
+    p95_s = (df.get("p95_e2e_ms", pd.Series([0.0] * len(df))) / 1000.0).to_numpy()
+
+    ax.plot(x, p50_s, marker="o", color="#0284c7", linewidth=2.2, label="Median p50 Latency (s)")
+    ax.plot(x, p95_s, marker="s", color="#dc2626", linewidth=2.5, label="Tail p95 Latency (s)")
+
+    ax.set_xlabel("Burst Size (Simultaneous Submissions)")
+    ax.set_ylabel("End-to-End Latency (seconds)")
+    ax.set_title("Classroom Deadline Burst Absorption & Drain Time")
     ax.legend(loc="upper left", frameon=True)
     ax.grid(True, linestyle="--", alpha=0.7)
 
@@ -271,7 +360,7 @@ def generate_all_plots(
     output_dir: Path,
     suite_name: str | None = None,
 ) -> list[Path]:
-    """Read data for run_id from SQLite and generate only the plots matching the suite."""
+    """Read data for run_id from SQLite and generate charts for the suite."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
     with sqlite3.connect(db_path) as conn:
@@ -282,25 +371,29 @@ def generate_all_plots(
             suite_name = row[0] if row else None
 
     generated: list[Path] = []
-    if suite_name in ("obj1_bottleneck", "obj4_sla_curve", "custom"):
-        p1 = output_dir / "obj1_bottleneck_stacked.png"
-        p4 = output_dir / "obj4_sla_capacity_curve.png"
+    if suite_name in ("sla_curve", "obj4_sla_curve", "obj1_bottleneck", "custom"):
+        p1 = output_dir / "pipeline_latency_breakdown_stacked.png"
+        p4 = output_dir / "sla_capacity_curve.png"
         plot_obj1_bottleneck_stacked(sub_df, sum_df, p1)
         plot_obj4_sla_capacity_curve(sum_df, p4)
         generated.extend([p1, p4])
-    elif suite_name == "obj2_infinite_gpu":
-        p2 = output_dir / "obj2_infinite_gpu_scaling.png"
+    elif suite_name in ("burst",):
+        p_burst = output_dir / "burst_absorption_curve.png"
+        plot_burst_drain(sum_df, p_burst)
+        generated.append(p_burst)
+    elif suite_name in ("infinite_gpu", "obj2_infinite_gpu"):
+        p2 = output_dir / "service_scaling_stacked_area.png"
         plot_obj2_infinite_gpu_scaling(sub_df, sum_df, p2)
         generated.append(p2)
-    elif suite_name == "obj3_vllm_sweep":
-        p3 = output_dir / "obj3_vllm_tuning_matrix.png"
+    elif suite_name in ("vllm_sweep", "obj3_vllm_sweep"):
+        p3 = output_dir / "vllm_tuning_matrix.png"
         plot_obj3_vllm_tuning_matrix(sum_df, p3)
         generated.append(p3)
     else:
-        p1 = output_dir / "obj1_bottleneck_stacked.png"
-        p2 = output_dir / "obj2_infinite_gpu_scaling.png"
-        p3 = output_dir / "obj3_vllm_tuning_matrix.png"
-        p4 = output_dir / "obj4_sla_capacity_curve.png"
+        p1 = output_dir / "pipeline_latency_breakdown_stacked.png"
+        p2 = output_dir / "service_scaling_stacked_area.png"
+        p3 = output_dir / "vllm_tuning_matrix.png"
+        p4 = output_dir / "sla_capacity_curve.png"
         plot_obj1_bottleneck_stacked(sub_df, sum_df, p1)
         plot_obj2_infinite_gpu_scaling(sub_df, sum_df, p2)
         plot_obj3_vllm_tuning_matrix(sum_df, p3)

@@ -230,24 +230,23 @@ class TelemetryCollector:
             if vals:
                 snapshot.mean_tok_per_s = sum(vals) / len(vals)
 
-        # 3. Query replica counts per service
+        # 3. Query replica counts per service via container_cpu_usage_seconds_total
         rep_data = self._query_prom_range(
-            'count by (app_kubernetes_io_name) (kube_pod_status_phase{namespace="swcp",phase="Running"})',
+            'count by (pod) (container_cpu_usage_seconds_total{namespace="swcp",container!="",container!="POD"})',
             start_epoch, end_epoch, step_s
         )
         if rep_data:
             for series in rep_data:
-                name = series.get("metric", {}).get("app_kubernetes_io_name", "")
+                name = series.get("metric", {}).get("pod", "")
                 vals = [int(float(v[1])) for v in series.get("values", [])]
                 if not vals:
                     continue
-                max_val = max(vals)
-                if "sandbox" in name:
-                    snapshot.max_replicas_sandbox = max(snapshot.max_replicas_sandbox, max_val)
+                if "c-sandbox" in name:
+                    snapshot.max_replicas_sandbox += 1
                 elif "llm-worker" in name:
-                    snapshot.max_replicas_llm_worker = max(snapshot.max_replicas_llm_worker, max_val)
+                    snapshot.max_replicas_llm_worker += 1
                 elif "core-api" in name:
-                    snapshot.max_replicas_core_api = max(snapshot.max_replicas_core_api, max_val)
+                    snapshot.max_replicas_core_api += 1
 
         return snapshot
 

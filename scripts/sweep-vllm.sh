@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # sweep-vllm.sh
-# Automates Objective 3 (vLLM Hardware Parameter Sweep) across customizable
+# Automates vLLM Hardware Parameter Sweep across customizable
 # ranges or lists of VLLM_GPU_MEMORY_UTILIZATION and VLLM_MAX_NUM_SEQS.
 #
 # Examples:
@@ -158,7 +158,7 @@ drain_pipeline() {
 }
 
 if [ "$REPORT_ONLY" -eq 1 ]; then
-  echo "=== Generating Objective 3 Sweep Table & Consolidated Plot from SQLite ==="
+  echo "=== Generating vLLM Sweep Table & Consolidated Plot from SQLite ==="
   if [ -n "$SWEEP_ID" ]; then
     run_in_container sweep-report --sweep-id "$SWEEP_ID"
   else
@@ -216,7 +216,7 @@ fi
 
 echo ""
 echo "=================================================================="
-echo " Starting Objective 3 vLLM Sweep ($SWEEP_ID)"
+echo " Starting vLLM Parameter Sweep ($SWEEP_ID)"
 echo " Total configurations to test: ${#TEST_PAIRS[@]} -> ${TEST_PAIRS[*]}"
 echo " Target rate: ${RATE}/min | Duration: ${DURATION}s | Min completions: ${MIN_COMPLETIONS}"
 echo "=================================================================="
@@ -250,6 +250,11 @@ for cfg in "${TEST_PAIRS[@]}"; do
     echo "Warning: vLLM failed to start within 300s for MEM=$MEM, SEQS=$SEQS (likely OOM). Skipping..." >&2
     continue
   fi
+
+  # Warmup: Execute 3 requests to eliminate cold-start CUDA graph and JIT compilation latency
+  echo ">>> Warming up vLLM (3 requests) to eliminate CUDA graph/JIT compilation cold-start latency..."
+  run_in_container warmup --count 3 --target-url "$TARGET_URL" || true
+  drain_pipeline
 
   # 3. Record this point into SQLite (--skip-plots avoids creating per-point folders/images)
   run_in_container run \
