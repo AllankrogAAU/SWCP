@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import CodeEditorBox from './Components/CodeEditorBox.vue'
 import AiFeedbackpanel from './Components/AiFeedbackpanel.vue'
 import AssignmentList from './Components/AssignmentList.vue'
@@ -8,6 +8,7 @@ import {
   getAccessToken,
   getAssignments,
   getAssignmentState,
+  saveAssignmentState,
   getSubmissionHistory,
   getSubmission,
   login,
@@ -31,6 +32,7 @@ const selected = computed(() =>
   assignments.value.find((assignment) => assignment.id === selectedId.value),
 )
 const code = ref('#include <stdio.h>\n\nint main(void) {\n    return 0;\n}')
+const lastSavedAt = ref('')
 const feedback = ref('')
 const busyAction = ref<'hint' | 'run' | 'submit' | null>(null)
 const error = ref('')
@@ -51,6 +53,7 @@ let socket: WebSocket | undefined
 let reconnectTimer: number | undefined
 let reconnectAttempts = 0
 let pollGeneration = 0
+let autosaveTimer: number | undefined
 
 async function selectAssignment(id: string) {
   console.log('SELECT ASSIGNMENT', id)
@@ -65,6 +68,7 @@ async function selectAssignment(id: string) {
     console.log('STATE', state)
 
     code.value = state.currentCode
+    lastSavedAt.value = state.updatedAtUtc
   } catch (error) {
     console.error('FAILED TO LOAD STATE', error)
 
@@ -293,6 +297,21 @@ function formatTerminalOutput(output: unknown): string {
   return lines.join('\n') || JSON.stringify(output, null, 2)
 }
 
+watch(code, () => {
+  if (!selectedId.value) return
+
+  window.clearTimeout(autosaveTimer)
+
+  autosaveTimer = window.setTimeout(async () => {
+    try {
+      await saveAssignmentState(selectedId.value, code.value)
+      lastSavedAt.value = new Date().toISOString()
+    } catch (error) {
+      console.error('AUTOSAVE FAILED', error)
+    }
+  }, 1000)
+})
+
 onMounted(async () => {
   if (authenticated.value) {
     try {
@@ -389,6 +408,11 @@ onBeforeUnmount(() => {
 
               <v-row class="mt-2">
                 <v-col cols="12" md="7">
+                  <div v-if="lastSavedAt" class="text-caption text-grey mb-2">
+                    Last saved:
+                    {{ new Date(lastSavedAt).toLocaleString() }}
+                  </div>
+
                   <CodeEditorBox
                     v-model="code"
                     :busy-action="busyAction"
