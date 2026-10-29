@@ -68,3 +68,16 @@ public sealed class Submission
         return document.RootElement.Clone();
     }
 }
+
+public sealed class UserAssignmentState
+{
+    public Guid UserId { get; set; }
+
+    public Guid AssignmentId { get; set; }
+
+    public string CurrentCode { get; set; } = "";
+
+    public bool? TaskSolved { get; set; }
+
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+}   

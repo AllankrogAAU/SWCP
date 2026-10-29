@@ -2,16 +2,22 @@ using System.Text.Json;
 using coreApi.Data;
 using coreApi.Models;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 
 namespace coreApi.Endpoints;
 
 public static class AssignmentEndpoints
 {
+    private sealed record SaveAssignmentStateRequest(
+        string CurrentCode);
+
     public static RouteGroupBuilder MapAssignmentEndpoints(this IEndpointRouteBuilder endpoints)
     {
         var group = endpoints.MapGroup("/api/assignments").WithTags("Assignments").RequireAuthorization();
         group.MapGet("/", List);
         group.MapGet("/{id:guid}", Get);
+        group.MapGet("/{id:guid}/state", GetState);
+        group.MapPut("/{id:guid}/state", SaveState);
         group.MapPost("/", Create).RequireAuthorization("TeacherOnly");
         return group;
     }
@@ -29,6 +35,79 @@ public static class AssignmentEndpoints
     {
         var assignment = await database.Assignments.SingleOrDefaultAsync(item => item.Id == id, cancellationToken);
         return assignment is null ? Results.NotFound() : Results.Ok(ToResponse(assignment));
+    }
+
+    private static async Task<IResult> GetState(
+        Guid id,
+        ClaimsPrincipal principal,
+        CoreDbContext database,
+        CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(
+            principal.FindFirstValue(ClaimTypes.NameIdentifier),
+            out var userId))
+        {
+            return Results.Unauthorized();
+        }
+
+        var state = await database.UserAssignmentStates
+            .AsNoTracking()
+            .SingleOrDefaultAsync(
+                x => x.UserId == userId &&
+                    x.AssignmentId == id,
+                cancellationToken);
+
+        if (state is null)
+        {
+            return Results.NotFound();
+        }
+
+        return Results.Ok(new
+        {
+            state.CurrentCode,
+            state.UpdatedAtUtc
+        });
+    }
+
+    private static async Task<IResult> SaveState(
+        Guid id,
+        SaveAssignmentStateRequest request,
+        ClaimsPrincipal principal,
+        CoreDbContext database,
+        CancellationToken cancellationToken)
+    {
+        if(!Guid.TryParse(
+            principal.FindFirstValue(ClaimTypes.NameIdentifier), 
+            out var userId))
+        {
+            return Results.Unauthorized();
+        }
+
+        var state = await database.UserAssignmentStates.SingleOrDefaultAsync(
+            x => x.UserId == userId && x.AssignmentId == id, cancellationToken);
+
+           if (state is null)
+                {
+                    state = new UserAssignmentState
+                    {
+                        UserId = userId,
+                        AssignmentId = id,
+                        CurrentCode = request.CurrentCode,
+                        UpdatedAtUtc = DateTimeOffset.UtcNow
+                    };
+
+                    database.UserAssignmentStates.Add(state);
+                }
+                else
+                {
+                    state.CurrentCode = request.CurrentCode;
+                    state.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                }
+
+           await database.SaveChangesAsync(cancellationToken);
+
+           return Results.NoContent();     
+        
     }
 
     private static async Task<IResult> Create(
