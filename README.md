@@ -77,9 +77,11 @@ npm run test:unit -- --run
 3. Submit source to `POST /api/submissions/` with an assignment ID and
 	`llmBackend` (`azure` or `local`). The Core API stores the submission and
 	publishes a `sandbox.tasks` JetStream task, returning `202` and its ID.
-4. The trusted sandbox worker consumes the task and calls the
-	existing `apps/cSandbox/evaluation/evaluator.py` without changing evaluator
-	or sandbox internals. It publishes `sandbox.results`.
+4. The trusted sandbox worker compiles and lints the submission once, then
+	runs it once for each teacher-provided test case, passing the case's stdin
+	and applying its timeout and memory limits. It publishes the per-case
+	results to `sandbox.results`. Assignments without test cases keep the
+	single-run behavior.
 5. Core stores compiler/runtime output. Compile failures complete immediately;
 	successful compilation builds a prompt and publishes `llm.tasks.azure` or
 	`llm.tasks.local`.
@@ -88,12 +90,53 @@ npm run test:unit -- --run
 7. The frontend receives `notifications.<submissionId>` over WebSocket and also
 	polls `GET /api/submissions/{id}` as a fallback.
 
-The worker adapter accepts compiler flags and test cases, but the existing
-evaluator currently performs one compile and one run. The adapter reports that
-limitation rather than changing the sandbox logic. The sandbox worker mounts
-the Docker socket so its adapter can create isolated per-submission containers;
-this is a development-only privilege and should be replaced by the planned
-Kubernetes/gVisor worker deployment later.
+Assignment test cases are returned by the assignment API so students can use
+them to understand and check the expected behavior. A test passes only when
+the program exits successfully and its stdout exactly matches the expected
+stdout. Compiler flags are accepted by the worker contract but are not yet
+applied.
+
+Teachers can create assignments with a `testCases` array using
+`POST /api/assignments/`. To replace the tests on an existing assignment, send
+`PUT /api/assignments/{assignmentId}/test-cases` with a teacher access token:
+
+```json
+{
+  "testCases": [
+    {
+      "stdin": "2 3\n",
+      "expectedStdout": "5\n",
+      "timeoutMilliseconds": 2000,
+      "memoryLimitMegabytes": 64
+    }
+  ]
+}
+```
+
+The endpoint replaces the assignment's full test-case list; pass an empty array
+to clear it. Test cases are stored with their assignment in PostgreSQL's
+`Assignments.TestCasesJson` JSONB column and are used for subsequent submissions.
+
+For function-based assignments where the student's C source does not define
+`main`, teachers can provide trusted C harness source in the optional
+`harnessSource` field when creating an assignment. The harness declares and
+calls the required student function and provides `main`; Core compiles it with
+the student's source. To set or replace it later, use the teacher-only
+`PUT /api/assignments/{assignmentId}/harness` endpoint with
+`{"harnessSource":"...C source..."}`. Send `null` or an empty string to remove
+the harness. Harness source is stored in the assignment row and limited to
+64 KB UTF-8. Teachers can retrieve it with
+`GET /api/assignments/{assignmentId}/harness`; it is not included in the
+student-facing assignment response.
+
+For example, students can submit `int add(int a, int b) { return a + b; }`,
+while the teacher's harness declares `int add(int, int);` and defines `main`
+to read two integers, call `add`, and print its result. Saved test cases supply
+the harness input and compare its output as usual.
+
+The frontend Run action accepts standard input, which is passed to the program
+(or to the harness `main`) for one execution. Submit and Hint continue to run
+the assignment's saved test cases independently.
 
 ## Local Model
 

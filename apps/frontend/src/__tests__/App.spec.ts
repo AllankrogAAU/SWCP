@@ -22,10 +22,10 @@ vi.mock('../services/api', () => api)
 
 vi.mock('../Components/CodeEditorBox.vue', () => ({
   default: {
-    props: ['busyAction', 'terminalOutput'],
-    emits: ['submit', 'hint', 'run'],
+    props: ['busyAction', 'terminalOutput', 'modelValue', 'standardInput'],
+    emits: ['submit', 'hint', 'run', 'update:standardInput'],
     template:
-      '<div><button data-test="submit" :disabled="busyAction !== null" @click="$emit(\'submit\')">Submit</button><button data-test="hint" :disabled="busyAction !== null" @click="$emit(\'hint\')">Hint</button><button data-test="run" :disabled="busyAction !== null" @click="$emit(\'run\')">Run</button><pre>{{ terminalOutput }}</pre></div>',
+      '<div><textarea data-test="stdin" :value="standardInput" @input="$emit(\'update:standardInput\', $event.target.value)" /><button data-test="submit" :disabled="busyAction !== null" @click="$emit(\'submit\')">Submit</button><button data-test="hint" :disabled="busyAction !== null" @click="$emit(\'hint\')">Hint</button><button data-test="run" :disabled="busyAction !== null" @click="$emit(\'run\')">Run</button><pre>{{ terminalOutput }}</pre></div>',
   },
 }))
 
@@ -120,9 +120,15 @@ describe('App', () => {
       taskSolved: null,
       errorMessage: null,
     })
+    await wrapper.get('[data-test="stdin"]').setValue('2 3\n')
     await wrapper.get('[data-test="run"]').trigger('click')
     await flushPromises()
-    expect(api.runSource).toHaveBeenCalledWith('assignment-id', expect.any(String), 'azure')
+    expect(api.runSource).toHaveBeenCalledWith(
+      'assignment-id',
+      expect.any(String),
+      'azure',
+      '2 3\n',
+    )
     expect(api.getSubmission).toHaveBeenCalledWith('run-id')
     expect(wrapper.text()).toContain('program output')
     expect(wrapper.text()).not.toContain('This must not be displayed.')

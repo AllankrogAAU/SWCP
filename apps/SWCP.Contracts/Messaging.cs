@@ -50,7 +50,9 @@ public sealed record SandboxTask(
     [property: JsonPropertyName("source")] string Source,
     [property: JsonPropertyName("compilerFlags")] IReadOnlyList<string> CompilerFlags,
     [property: JsonPropertyName("testCases")] IReadOnlyList<SandboxTestCase> TestCases,
-    [property: JsonPropertyName("traceParent")] string? TraceParent = null);
+    [property: JsonPropertyName("traceParent")] string? TraceParent = null,
+    [property: JsonPropertyName("harnessSource")] string? HarnessSource = null,
+    [property: JsonPropertyName("runStdin")] string RunStdin = "");
 
 public sealed record SandboxTestCase(
     [property: JsonPropertyName("stdin")] string Stdin,

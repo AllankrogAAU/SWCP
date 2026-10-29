@@ -100,7 +100,14 @@ def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
     token = context.attach(ctx) if ctx else None
     try:
         with tracer.start_as_current_span("sandbox.execute_code"):
-            result = evaluate(task.source, provider, Limits())
+            result = evaluate(
+                task.source,
+                provider,
+                Limits(),
+                task.testCases,
+                task.harnessSource,
+                task.runStdin,
+            )
             status = result.status.value
             compiled = status not in {"compile_error", "compile_timeout"}
 
@@ -110,29 +117,48 @@ def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
                 if not compiled and result.compile_stderr:
                     compile_span.set_attribute("compile.error", result.compile_stderr[:500])
 
-            test_results = []
+            test_results: list[SandboxTestResult] = []
             if compiled:
-                with tracer.start_as_current_span("sandbox.run_binary") as exec_span:
-                    exec_span.set_attribute("run.duration_ms", result.run_ms or 0)
-                    exec_span.set_attribute("run.exit_code", result.exit_code or 0)
-                    exec_span.set_attribute("run.passed", status == "success" and result.exit_code == 0)
-
-                test_results.append(
-                    SandboxTestResult(
-                        passed=status == "success" and result.exit_code == 0,
-                        stdout=result.stdout or "",
-                        stderr=result.stderr or "",
-                        exitCode=result.exit_code,
-                        durationMilliseconds=result.run_ms,
-                        memoryConsumedMegabytes=None,
+                if task.testCases:
+                    for index, (test_case, run) in enumerate(
+                        zip(task.testCases, result.test_runs, strict=True)
+                    ):
+                        passed = run.rc == 0 and run.stdout == test_case.expectedStdout
+                        with tracer.start_as_current_span("sandbox.run_test") as test_span:
+                            test_span.set_attribute("test.index", index)
+                            test_span.set_attribute("run.duration_ms", run.duration_ms)
+                            test_span.set_attribute("run.exit_code", run.rc)
+                            test_span.set_attribute("run.passed", passed)
+                        test_results.append(
+                            SandboxTestResult(
+                                passed=passed,
+                                stdout=run.stdout,
+                                stderr=run.stderr,
+                                exitCode=run.rc,
+                                durationMilliseconds=run.duration_ms,
+                                memoryConsumedMegabytes=None,
+                            )
+                        )
+                else:
+                    passed = status == "success" and result.exit_code == 0
+                    with tracer.start_as_current_span("sandbox.run_binary") as exec_span:
+                        exec_span.set_attribute("run.duration_ms", result.run_ms or 0)
+                        exec_span.set_attribute("run.exit_code", result.exit_code or 0)
+                        exec_span.set_attribute("run.passed", passed)
+                    test_results.append(
+                        SandboxTestResult(
+                            passed=passed,
+                            stdout=result.stdout or "",
+                            stderr=result.stderr or "",
+                            exitCode=result.exit_code,
+                            durationMilliseconds=result.run_ms,
+                            memoryConsumedMegabytes=None,
+                        )
                     )
-                )
 
             limitations = []
             if task.compilerFlags:
                 limitations.append("compiler-flags-not-yet-applied")
-            if task.testCases:
-                limitations.append("per-test-case-execution-not-yet-implemented")
 
             return SandboxResult(
                 submissionId=task.submissionId,

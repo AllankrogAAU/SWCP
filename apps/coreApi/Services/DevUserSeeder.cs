@@ -37,7 +37,28 @@ public static class DevUserSeeder
             [
                 new SandboxTestCase("2 3\n", "5\n", 2000, 64),
                 new SandboxTestCase("-4 9\n", "5\n", 2000, 64)
-            ])
+            ]),
+        new(
+            Guid.Parse("a5555555-5555-4555-8555-555555555555"),
+            "Implement an Add Function",
+            "Implement int add(int left, int right). Submit the function only; the harness provides main.",
+            "Check that add returns the correct sum for positive and negative inputs.",
+            [
+                new SandboxTestCase("2 3\n", "5\n", 2000, 64),
+                new SandboxTestCase("-4 9\n", "5\n", 2000, 64)
+            ],
+            """
+            #include <stdio.h>
+            int add(int left, int right);
+
+            int main(void) {
+                int left;
+                int right;
+                if (scanf("%d %d", &left, &right) != 2) return 2;
+                printf("%d\n", add(left, right));
+                return 0;
+            }
+            """)
     ];
 
     public static async Task SeedSampleAssignmentAsync(IServiceProvider services)
@@ -57,6 +78,7 @@ public static class DevUserSeeder
                 Description = assignment.Description,
                 TaskFocus = assignment.TaskFocus,
                 TestCasesJson = JsonSerializer.Serialize(assignment.TestCases),
+                HarnessSource = assignment.HarnessSource,
                 CreatedAtUtc = DateTimeOffset.UtcNow
             })
             .ToArray();
@@ -75,7 +97,8 @@ public static class DevUserSeeder
         string Title,
         string Description,
         string TaskFocus,
-        IReadOnlyList<SandboxTestCase> TestCases);
+        IReadOnlyList<SandboxTestCase> TestCases,
+        string? HarnessSource = null);
 
     public static async Task SeedAsync(IServiceProvider services, IConfiguration configuration)
     {

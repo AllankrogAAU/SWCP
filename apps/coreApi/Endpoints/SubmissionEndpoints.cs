@@ -45,6 +45,12 @@ public static class SubmissionEndpoints
             return Results.BadRequest(new { error = "Source code must be non-empty and at most 1 MB UTF-8." });
         }
 
+        if (request.StandardInput is null ||
+            System.Text.Encoding.UTF8.GetByteCount(request.StandardInput) > 64 * 1024)
+        {
+            return Results.BadRequest(new { error = "Standard input must be a string of at most 64 KB UTF-8." });
+        }
+
         var backend = request.LlmBackend.Trim().ToLowerInvariant();
         if (backend is not ("azure" or "local"))
         {
@@ -72,6 +78,7 @@ public static class SubmissionEndpoints
             SourceCode = request.SourceCode,
             Action = action,
             LlmBackend = backend,
+            StandardInput = request.StandardInput,
             Status = SubmissionStatus.PENDING,
             CreatedAtUtc = DateTimeOffset.UtcNow,
             UpdatedAtUtc = DateTimeOffset.UtcNow
@@ -117,14 +124,18 @@ public static class SubmissionEndpoints
 
         try
         {
-            var testCases = JsonSerializer.Deserialize<List<SandboxTestCase>>(assignment.TestCasesJson) ?? [];
+            var testCases = action == "run"
+                ? []
+                : JsonSerializer.Deserialize<List<SandboxTestCase>>(assignment.TestCasesJson) ?? [];
             await publisher.PublishSandboxTaskAsync(new SandboxTask(
                 submission.Id,
                 assignment.Id,
                 submission.SourceCode,
                 ["-Wall", "-Wextra", "-O2", "-std=c11"],
                 testCases,
-                traceParent), cancellationToken);
+                traceParent,
+                assignment.HarnessSource,
+                action == "run" ? submission.StandardInput : ""), cancellationToken);
             logger.LogInformation(
                 "Pipeline stage completed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {queue_publish_ms} {status} {backend} {attempt}",
                 "pipeline.stage.completed", "submission_enqueue", submission.Id, TraceId(traceParent), requestTimer.ElapsedMilliseconds,
@@ -165,7 +176,12 @@ public static class SubmissionEndpoints
         SubmissionEvents events,
         ILoggerFactory loggerFactory,
         CancellationToken cancellationToken) =>
-        Create(new CreateSubmissionRequest(request.AssignmentId, request.SourceCode, request.LlmBackend, "run"),
+        Create(new CreateSubmissionRequest(
+                request.AssignmentId,
+                request.SourceCode,
+                request.LlmBackend,
+                "run",
+                request.StandardInput),
             principal, database, publisher, events, loggerFactory, cancellationToken);
 
     private static async Task<IResult> Get(

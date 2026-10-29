@@ -26,6 +26,7 @@ class SandboxReport:
     compile: PhaseResult | None
     lint: PhaseResult | None
     run: PhaseResult | None
+    test_runs: tuple[PhaseResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -39,3 +40,4 @@ class EvaluationResult:
     stdout: str | None = None
     stderr: str | None = None
     run_ms: int | None = None
+    test_runs: tuple[PhaseResult, ...] = ()

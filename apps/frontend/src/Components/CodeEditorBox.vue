@@ -2,6 +2,7 @@
 import { CodeEditor } from 'monaco-editor-vue3'
 
 const code = defineModel<string>({ required: true })
+const standardInput = defineModel<string>('standardInput', { required: true })
 
 defineProps<{
   busyAction: 'hint' | 'run' | 'submit' | null
@@ -17,6 +18,16 @@ defineEmits<{ submit: []; hint: []; run: [] }>()
 
       <v-card-text>
         <CodeEditor v-model:value="code" language="C" theme="vs-dark" height="400px" />
+        <v-textarea
+          v-model="standardInput"
+          class="mt-4"
+          label="Standard input for Run"
+          hint="Text entered here is sent to your program's stdin."
+          persistent-hint
+          rows="3"
+          auto-grow
+          :disabled="busyAction !== null"
+        />
       </v-card-text>
 
       <v-card-actions class="action-row">

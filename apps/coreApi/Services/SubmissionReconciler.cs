@@ -64,13 +64,17 @@ public sealed class SubmissionReconciler(
             submission.RetryCount++;
             submission.Status = SubmissionStatus.SANDBOX_QUEUED;
             submission.UpdatedAtUtc = DateTimeOffset.UtcNow;
-            var cases = System.Text.Json.JsonSerializer.Deserialize<List<SandboxTestCase>>(assignment.TestCasesJson) ?? [];
+            var cases = submission.Action == "run"
+                ? []
+                : System.Text.Json.JsonSerializer.Deserialize<List<SandboxTestCase>>(assignment.TestCasesJson) ?? [];
             await publisher.PublishSandboxTaskAsync(new SandboxTask(
                 submission.Id,
                 assignment.Id,
                 submission.SourceCode,
                 ["-Wall", "-Wextra", "-O2", "-std=c11"],
-                cases), cancellationToken, submission.RetryCount);
+                cases,
+                HarnessSource: assignment.HarnessSource,
+                RunStdin: submission.Action == "run" ? submission.StandardInput : ""), cancellationToken, submission.RetryCount);
             await events.PublishAsync(submission, "retry", "Recovered and requeued by Core API", 5, cancellationToken);
         }
 
