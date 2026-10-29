@@ -32,3 +32,59 @@ spec:
         metricName: vllm_num_requests_running
         query: sum(vllm:num_requests_running{namespace="swcp"}) or vector(0)
         threshold: "4"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: llm-worker-autoscaler
+  namespace: swcp
+  labels:
+    app.kubernetes.io/name: llm-worker
+    app.kubernetes.io/part-of: swcp
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: llm-worker
+  minReplicaCount: 2
+  maxReplicaCount: 12
+  cooldownPeriod: 300
+  pollingInterval: 15
+  advanced:
+    restoreToOriginalReplicaCount: true
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 15
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 30
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 60
+  triggers:
+    # Scale on NATS JetStream pending + ack-pending lag for local LLM tasks.
+    # Safe on single-GPU setups because NATS consumer MaxAckPending is capped at VLLM_MAX_NUM_SEQS.
+    - type: nats-jetstream
+      metadata:
+        natsServerMonitoringEndpoint: "nats.swcp.svc.cluster.local:8222"
+        account: "$G"
+        stream: "LLM_TASKS"
+        consumer: "llm-local-workers"
+        lagThreshold: "4"
+        activationLagThreshold: "1"
+        useHttps: "false"
+    # Scale on NATS JetStream lag for Azure LLM tasks.
+    - type: nats-jetstream
+      metadata:
+        natsServerMonitoringEndpoint: "nats.swcp.svc.cluster.local:8222"
+        account: "$G"
+        stream: "LLM_TASKS"
+        consumer: "llm-azure-workers"
+        lagThreshold: "8"
+        activationLagThreshold: "1"
+        useHttps: "false"

@@ -80,84 +80,48 @@ spec:
           value: 1
           periodSeconds: 120
 ---
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
 metadata:
-  name: c-sandbox
+  name: c-sandbox-autoscaler
   namespace: swcp
   labels:
+    app.kubernetes.io/name: c-sandbox
     app.kubernetes.io/part-of: swcp
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
     name: c-sandbox
-  minReplicas: 3
-  maxReplicas: 16
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 50
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 80
-  behavior:
-    scaleUp:
-      stabilizationWindowSeconds: 30
-      policies:
-        - type: Pods
-          value: 4
-          periodSeconds: 30
-    scaleDown:
-      stabilizationWindowSeconds: 300
-      policies:
-        - type: Pods
-          value: 1
-          periodSeconds: 120
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: llm-worker
-  namespace: swcp
-  labels:
-    app.kubernetes.io/part-of: swcp
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: llm-worker
-  minReplicas: 2
-  maxReplicas: 12
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 80
-  behavior:
-    scaleUp:
-      stabilizationWindowSeconds: 30
-      policies:
-        - type: Pods
-          value: 2
-          periodSeconds: 60
-    scaleDown:
-      stabilizationWindowSeconds: 300
-      policies:
-        - type: Pods
-          value: 1
-          periodSeconds: 60
+  minReplicaCount: 3
+  maxReplicaCount: 16
+  cooldownPeriod: 120
+  pollingInterval: 10
+  advanced:
+    restoreToOriginalReplicaCount: true
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Pods
+              value: 4
+              periodSeconds: 15
+        scaleDown:
+          stabilizationWindowSeconds: 180
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 60
+  triggers:
+    # Event-driven queue lag autoscaling for gVisor C sandbox workers.
+    # Eliminates CPU-based metric inaccuracy caused by gVisor userspace virtualization.
+    - type: nats-jetstream
+      metadata:
+        natsServerMonitoringEndpoint: "nats.swcp.svc.cluster.local:8222"
+        account: "$G"
+        stream: "SANDBOX_TASKS"
+        consumer: "c-sandbox-workers"
+        lagThreshold: "4"
+        activationLagThreshold: "1"
+        useHttps: "false"

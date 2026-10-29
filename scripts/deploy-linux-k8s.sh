@@ -51,6 +51,11 @@ if ! kubectl get deployment metrics-server -n kube-system -o jsonpath='{.spec.te
   kubectl patch deployment metrics-server -n kube-system --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kubelet-insecure-tls"}]' || true
 fi
 
+if ! kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+  echo "=== Ensuring KEDA is installed ==="
+  kubectl apply --server-side -f https://github.com/kedacore/keda/releases/download/v2.16.1/keda-2.16.1.yaml >/dev/null 2>&1 || true
+fi
+
 if ! kubectl get deployment ingress-nginx-controller -n ingress-nginx >/dev/null 2>&1; then
   echo "=== Ensuring Ingress-NGINX is installed with hostNetwork ==="
   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.1/deploy/static/provider/cloud/deploy.yaml >/dev/null 2>&1 || true
@@ -96,23 +101,27 @@ elif [ "$TARGET_SERVICE" = "c-sandbox" ]; then
     "ghcr.io/allankrogaau/c-sandbox-worker:latest|apps/cSandbox/Dockerfile.worker|apps/cSandbox"
     "ghcr.io/allankrogaau/c-sandbox-runtime:latest|apps/cSandbox/Dockerfile|apps/cSandbox"
   )
+elif [ "$TARGET_SERVICE" = "vllm" ]; then
+  images_to_build=()
 elif [ -n "${IMAGE_MAP[$TARGET_SERVICE]:-}" ]; then
   images_to_build=("${IMAGE_MAP[$TARGET_SERVICE]}")
 else
-  echo "Unknown service '$TARGET_SERVICE'. Available services: ${!IMAGE_MAP[*]}, 'c-sandbox', or 'all'" >&2
+  echo "Unknown service '$TARGET_SERVICE'. Available services: ${!IMAGE_MAP[*]}, 'c-sandbox', 'vllm', or 'all'" >&2
   exit 1
 fi
 
-echo "=== Building and importing images ==="
-for entry in "${images_to_build[@]}"; do
-  IFS='|' read -r image dockerfile context <<< "$entry"
-  echo "--> Building $image from $dockerfile..."
-  $DOCKER_CMD build -t "$image" -f "$dockerfile" "$context"
-  echo "--> Importing $image into k3s containerd..."
-  sudo crictl rmi "$image" >/dev/null 2>&1 || true
-  $CTR_CMD images rm "$image" >/dev/null 2>&1 || true
-  $DOCKER_CMD save "$image" | $CTR_CMD images import -
-done
+if [ "${#images_to_build[@]}" -gt 0 ]; then
+  echo "=== Building and importing images ==="
+  for entry in "${images_to_build[@]}"; do
+    IFS='|' read -r image dockerfile context <<< "$entry"
+    echo "--> Building $image from $dockerfile..."
+    $DOCKER_CMD build -t "$image" -f "$dockerfile" "$context"
+    echo "--> Importing $image into k3s containerd..."
+    sudo crictl rmi "$image" >/dev/null 2>&1 || true
+    $CTR_CMD images rm "$image" >/dev/null 2>&1 || true
+    $DOCKER_CMD save "$image" | $CTR_CMD images import -
+  done
+fi
 
 echo "=== Applying namespace and storage class ==="
 kubectl apply -f k8s/00-namespace.yaml
@@ -138,10 +147,15 @@ kubectl apply -f k8s/03-nats.yaml
 kubectl apply -f k8s/04-core-api.yaml
 kubectl apply -f k8s/
 
+read_env_var() {
+  local key="$1"
+  grep -E "^[[:space:]]*${key}[[:space:]]*=" "$ROOT/.env" | tail -n1 | cut -d= -f2- | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]"'\''\r]+//; s/[[:space:]"'\''\r]+$//' || true
+}
+
 echo "=== Patching secrets and configs from .env ==="
 if [ -f "$ROOT/.env" ]; then
   # 1. Postgres password
-  PG_PASS="$(grep -E '^[[:space:]]*POSTGRES_PASSWORD[[:space:]]*=' "$ROOT/.env" | cut -d= -f2- | tr -d ' "\r\n' || true)"
+  PG_PASS="$(read_env_var POSTGRES_PASSWORD)"
   if [ -n "$PG_PASS" ]; then
     kubectl patch secret postgres-credentials -n swcp --type=merge -p "{\"stringData\":{\"POSTGRES_PASSWORD\":\"$PG_PASS\"}}" || true
   fi
@@ -159,9 +173,12 @@ if [ -f "$ROOT/.env" ]; then
   fi
 
   # 3. Seed development users for core-api
-  SEED_DEV="$(grep -E '^[[:space:]]*SEED_DEVELOPMENT_USERS[[:space:]]*=' "$ROOT/.env" | cut -d= -f2- | tr -d ' "\r\n' || true)"
-  DEV_TEACHER_EMAIL="$(grep -E '^[[:space:]]*DEV_TEACHER_EMAIL[[:space:]]*=' "$ROOT/.env" | cut -d= -f2- | tr -d ' "\r\n' || true)"
-  DEV_TEACHER_PASS="$(grep -E '^[[:space:]]*DEV_TEACHER_PASSWORD[[:space:]]*=' "$ROOT/.env" | cut -d= -f2- | tr -d ' "\r\n' || true)"
+  SEED_DEV="$(read_env_var SEED_DEVELOPMENT_USERS)"
+  DEV_TEACHER_EMAIL="$(read_env_var DEV_TEACHER_USERNAME)"
+  if [ -z "$DEV_TEACHER_EMAIL" ]; then
+    DEV_TEACHER_EMAIL="$(read_env_var DEV_TEACHER_EMAIL)"
+  fi
+  DEV_TEACHER_PASS="$(read_env_var DEV_TEACHER_PASSWORD)"
 
   if [ -n "$SEED_DEV" ]; then
     kubectl patch configmap core-api-config -n swcp --type=merge -p "{\"data\":{\"SeedDevelopmentUsers\":\"$SEED_DEV\",\"DevelopmentUsers__TeacherUsername\":\"$DEV_TEACHER_EMAIL\"}}" || true
@@ -170,9 +187,44 @@ if [ -f "$ROOT/.env" ]; then
     kubectl patch secret core-api-secrets -n swcp --type=merge -p "{\"stringData\":{\"DevelopmentUsers__TeacherPassword\":\"$DEV_TEACHER_PASS\"}}" || true
   fi
 
-  # 4. Dynamic CORS allowed origins for api-gateway
+  # 4. Local vLLM and llm-worker concurrency settings from .env
+  LLM_MODEL_PATH_VAL="$(read_env_var LLM_MODEL_PATH)"
+  LLM_MODEL_NAME_VAL="$(read_env_var LLM_MODEL_NAME)"
+  LOCAL_LLM_PORT_VAL="$(read_env_var LOCAL_LLM_PORT)"
+  VLLM_QUANTIZATION_VAL="$(read_env_var VLLM_QUANTIZATION)"
+  VLLM_KV_CACHE_DTYPE_VAL="$(read_env_var VLLM_KV_CACHE_DTYPE)"
+  VLLM_MAX_MODEL_LEN_VAL="$(read_env_var VLLM_MAX_MODEL_LEN)"
+  VLLM_GPU_MEM_VAL="$(read_env_var VLLM_GPU_MEMORY_UTILIZATION)"
+  VLLM_MAX_SEQS_VAL="$(read_env_var VLLM_MAX_NUM_SEQS)"
+  LLM_LOCAL_MAX_CONCURRENT_VAL="$(read_env_var LLM_LOCAL_MAX_CONCURRENT)"
+  LLM_LOCAL_MAX_ACK_PENDING_VAL="$(read_env_var LLM_LOCAL_MAX_ACK_PENDING)"
+
+  VLLM_CM_PATCH=""
+  [ -n "$LLM_MODEL_PATH_VAL" ] && VLLM_CM_PATCH+="\"LLM_MODEL_PATH\":\"$LLM_MODEL_PATH_VAL\","
+  [ -n "$LLM_MODEL_NAME_VAL" ] && VLLM_CM_PATCH+="\"LLM_MODEL_NAME\":\"$LLM_MODEL_NAME_VAL\","
+  [ -n "$LOCAL_LLM_PORT_VAL" ] && VLLM_CM_PATCH+="\"VLLM_PORT\":\"$LOCAL_LLM_PORT_VAL\","
+  [ -n "$VLLM_QUANTIZATION_VAL" ] && VLLM_CM_PATCH+="\"VLLM_QUANTIZATION\":\"$VLLM_QUANTIZATION_VAL\","
+  [ -n "$VLLM_KV_CACHE_DTYPE_VAL" ] && VLLM_CM_PATCH+="\"VLLM_KV_CACHE_DTYPE\":\"$VLLM_KV_CACHE_DTYPE_VAL\","
+  [ -n "$VLLM_MAX_MODEL_LEN_VAL" ] && VLLM_CM_PATCH+="\"VLLM_MAX_MODEL_LEN\":\"$VLLM_MAX_MODEL_LEN_VAL\","
+  [ -n "$VLLM_GPU_MEM_VAL" ] && VLLM_CM_PATCH+="\"VLLM_GPU_MEMORY_UTILIZATION\":\"$VLLM_GPU_MEM_VAL\","
+  [ -n "$VLLM_MAX_SEQS_VAL" ] && VLLM_CM_PATCH+="\"VLLM_MAX_NUM_SEQS\":\"$VLLM_MAX_SEQS_VAL\","
+  if [ -n "$VLLM_CM_PATCH" ]; then
+    kubectl patch configmap vllm-config -n swcp --type=merge -p "{\"data\":{${VLLM_CM_PATCH%,}}}" || true
+  fi
+
+  EFFECTIVE_MAX_CONCURRENT="${LLM_LOCAL_MAX_CONCURRENT_VAL:-${VLLM_MAX_SEQS_VAL:-}}"
+  EFFECTIVE_MAX_ACK_PENDING="${LLM_LOCAL_MAX_ACK_PENDING_VAL:-${EFFECTIVE_MAX_CONCURRENT:-}}"
+  LLM_WORKER_CM_PATCH=""
+  [ -n "$LLM_MODEL_NAME_VAL" ] && LLM_WORKER_CM_PATCH+="\"LocalLlm__ModelName\":\"$LLM_MODEL_NAME_VAL\","
+  [ -n "$EFFECTIVE_MAX_CONCURRENT" ] && LLM_WORKER_CM_PATCH+="\"LocalLlm__MaxConcurrent\":\"$EFFECTIVE_MAX_CONCURRENT\","
+  [ -n "$EFFECTIVE_MAX_ACK_PENDING" ] && LLM_WORKER_CM_PATCH+="\"LocalLlm__MaxAckPending\":\"$EFFECTIVE_MAX_ACK_PENDING\","
+  if [ -n "$LLM_WORKER_CM_PATCH" ]; then
+    kubectl patch configmap llm-worker-config -n swcp --type=merge -p "{\"data\":{${LLM_WORKER_CM_PATCH%,}}}" || true
+  fi
+
+  # 5. Dynamic CORS allowed origins for api-gateway
   cors_origins=()
-  CORS_ENV="$(grep -E '^[[:space:]]*ADDITIONAL_CORS_ORIGINS[[:space:]]*=' "$ROOT/.env" | cut -d= -f2- | tr -d ' "\r\n' || true)"
+  CORS_ENV="$(read_env_var ADDITIONAL_CORS_ORIGINS)"
   if [ -n "$CORS_ENV" ]; then
     IFS=',' read -ra ADDR <<< "$CORS_ENV"
     for origin in "${ADDR[@]}"; do
@@ -205,6 +257,11 @@ if [ -f "$ROOT/.env" ]; then
   fi
 fi
 
+# Ensure vllm models volume points to the repo's apps/localLLM/models directory on this host
+if [ -d "$ROOT/apps/localLLM/models" ]; then
+  kubectl patch deployment vllm -n swcp --type=json -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/volumes/0/hostPath/path\",\"value\":\"$ROOT/apps/localLLM/models\"}]" >/dev/null 2>&1 || true
+fi
+
 # Ensure sandbox runtime class matches node capability
 if kubectl get nodes -l swcp.io/gvisor=true --no-headers 2>/dev/null | grep -q .; then
   echo "gVisor detected on node; sandbox pods will use 'gvisor' RuntimeClass."
@@ -228,6 +285,10 @@ elif [ "$TARGET_SERVICE" = "c-sandbox" ] || [ "$TARGET_SERVICE" = "c-sandbox-wor
   kubectl delete pods -n swcp-sandbox --all --grace-period=0 --force >/dev/null 2>&1 || true
   echo "Restarting deployment/c-sandbox..."
   kubectl rollout restart deployment/c-sandbox -n swcp || true
+elif [ "$TARGET_SERVICE" = "vllm" ]; then
+  echo "Restarting deployment/vllm and deployment/llm-worker..."
+  kubectl rollout restart deployment/vllm -n swcp || true
+  kubectl rollout restart deployment/llm-worker -n swcp || true
 elif [ "$TARGET_SERVICE" != "postgres" ]; then
   echo "Restarting deployment/$TARGET_SERVICE..."
   kubectl rollout restart "deployment/$TARGET_SERVICE" -n swcp || true
@@ -241,6 +302,9 @@ if [ "$TARGET_SERVICE" = "all" ]; then
   kubectl rollout status deployment/frontend -n swcp --timeout=120s || true
 elif [ "$TARGET_SERVICE" = "c-sandbox" ] || [ "$TARGET_SERVICE" = "c-sandbox-worker" ] || [ "$TARGET_SERVICE" = "c-sandbox-runtime" ]; then
   kubectl rollout status deployment/c-sandbox -n swcp --timeout=120s || true
+elif [ "$TARGET_SERVICE" = "vllm" ]; then
+  kubectl rollout status deployment/llm-worker -n swcp --timeout=120s || true
+  kubectl rollout status deployment/vllm -n swcp --timeout=300s || true
 elif [ "$TARGET_SERVICE" != "postgres" ]; then
   kubectl rollout status "deployment/$TARGET_SERVICE" -n swcp --timeout=120s || true
 fi
@@ -255,4 +319,3 @@ echo "Deployment finished!"
 echo "Backend and Frontend are accessible on host port 80."
 echo "To share via Tailscale, run: bash scripts/expose-frontend.sh"
 echo "=========================================================="
-

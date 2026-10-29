@@ -29,7 +29,7 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                 {
                     "type": "object",
                     "properties": {
-                        "feedback": { "type": "string" },
+                        "feedback": { "type": "string", "maxLength": 1500 },
                         "taskSolved": { "type": ["boolean", "null"] }
                     },
                     "required": ["feedback", "taskSolved"],
@@ -115,6 +115,21 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
 
     private async Task<LlmCompletion> CompleteLocalAsync(LlmTask task, CancellationToken cancellationToken)
     {
+        if (configuration.GetValue<bool>("LocalLlm:MockEnabled"))
+        {
+            var delayMs = Math.Max(0, configuration.GetValue<int?>("LocalLlm:MockLatencyMs") ?? 5);
+            if (delayMs > 0)
+            {
+                await Task.Delay(delayMs, cancellationToken);
+            }
+
+            var solved = task.EvaluationMode == "submit" && !task.SandboxFailed ? true : (bool?)null;
+            return new LlmCompletion(
+                "Mock LLM feedback for infinite-GPU bottleneck benchmarking.",
+                new LlmTokenUsage(250, 80, 330),
+                solved);
+        }
+
         var modelName = configuration["LocalLlm:ModelName"] ?? configuration["LLM_MODEL_NAME"];
         if (string.IsNullOrWhiteSpace(modelName))
         {
@@ -133,6 +148,8 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             temperature = task.Parameters.Temperature,
             max_tokens = task.Parameters.MaxTokens,
             top_p = task.Parameters.TopP,
+            presence_penalty = 0.3,
+            frequency_penalty = 0.3,
             response_format = new
             {
                 type = "json_schema",
@@ -160,12 +177,13 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             ?? throw new InvalidOperationException("Local LLM returned an empty response.");
         var root = document.RootElement;
         var choice = root.GetProperty("choices")[0];
-        if (choice.TryGetProperty("finish_reason", out var finishReason) && finishReason.GetString() == "length")
+        var isLengthFinish = choice.TryGetProperty("finish_reason", out var finishReason) && finishReason.GetString() == "length";
+        var content = choice.GetProperty("message").GetProperty("content").GetString() ?? string.Empty;
+        if (isLengthFinish)
         {
-            throw new JsonException("The local LLM reached its output token limit before completing the structured response.");
+            content = RecoverTruncatedJson(content, task);
         }
 
-        var content = choice.GetProperty("message").GetProperty("content").GetString() ?? string.Empty;
         LlmTokenUsage? usage = null;
         if (root.TryGetProperty("usage", out var tokenUsage))
         {
@@ -203,6 +221,34 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
         }
 
         return new LlmCompletion(feedbackElement.GetString()!, usage, taskSolved);
+    }
+
+    private static string RecoverTruncatedJson(string content, LlmTask task)
+    {
+        try
+        {
+            using var testDoc = JsonDocument.Parse(content);
+            return content;
+        }
+        catch (JsonException)
+        {
+            var feedback = content;
+            var keyIdx = content.IndexOf("\"feedback\":", StringComparison.OrdinalIgnoreCase);
+            if (keyIdx >= 0)
+            {
+                var valStart = content.IndexOf('\"', keyIdx + 11);
+                if (valStart >= 0)
+                {
+                    feedback = content[(valStart + 1)..];
+                }
+            }
+            feedback = feedback.TrimEnd('\\', '\"', ',', ' ', '\r', '\n', '\t') + "... [response truncated for length]";
+            return JsonSerializer.Serialize(new
+            {
+                feedback,
+                taskSolved = (bool?)null
+            });
+        }
     }
 
     private static string GetStructuredResponseSchema(LlmTask task, bool constrainHintFeedback) =>

@@ -27,17 +27,17 @@ public static class SubmissionPromptBuilder
         "or a complete solution. Do not judge whether the assignment is solved. Set taskSolved to null.";
 
     private const string FailedSubmitInstructions =
-        "The sandbox reported a compilation or runtime failure. Focus on explaining the failure and how the student " +
-        "can debug it educationally. Do not judge whether the assignment is solved. Set taskSolved to null.";
+        "The sandbox reported a compilation or runtime failure. Explain the failure educationally in no more than 3 sentences. " +
+        "Do not provide full replacement code or extended debug tutorials. Do not judge whether the assignment is solved. Set taskSolved to null.";
 
     private const string SuccessfulSubmitInstructions =
-        "Review the code for significant non-crashing quality issues first. If significant issues exist, explain them " +
-        "and set taskSolved to null. If no significant issues exist, compare the program with the assignment " +
+        "Review the code for significant non-crashing quality issues first. If significant issues exist, explain them concisely " +
+        "in no more than 3 sentences and set taskSolved to null. If no significant issues exist, compare the program with the assignment " +
         "description and set taskSolved to true or false based on whether it is correctly solved. Do not give away the solution.";
 
-    private static readonly LlmInferenceParameters HintParameters = new(0.2, 2048, 1.0);
-    private static readonly LlmInferenceParameters FailedSubmitParameters = new(0.2, 2048, 1.0);
-    private static readonly LlmInferenceParameters SuccessfulSubmitParameters = new(0.2, 2048, 1.0);
+    private static readonly LlmInferenceParameters HintParameters = new(0.2, 4096, 1.0);
+    private static readonly LlmInferenceParameters FailedSubmitParameters = new(0.2, 4096, 1.0);
+    private static readonly LlmInferenceParameters SuccessfulSubmitParameters = new(0.2, 4096, 1.0);
 
 
     public static SubmissionPrompt Build(Assignment assignment, Submission submission, SandboxResult sandboxResult)
