@@ -3,6 +3,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from contracts import SandboxTestCase
+from contracts import SandboxTestCase, StaticAnalysisWarning
 from evaluation.result import EvaluationResult, SandboxReport, Status
 from sandbox.interface import Limits, SandboxError, SandboxProvider
 
@@ -27,6 +28,20 @@ def to_result(report: SandboxReport) -> EvaluationResult:
     lint_output = None
     if report.lint is not None:
         lint_output = "lint timed out" if report.lint.timed_out else report.lint.stderr
+        if not report.lint.timed_out:
+            static_analysis = parse_static_analysis(report.lint.stderr)
+            return EvaluationResult(
+                status=Status.COMPILE_TIMEOUT,
+                static_analysis=static_analysis,
+                **base,
+                **compile_fields,
+            )
+            return EvaluationResult(
+                status=Status.COMPILE_ERROR,
+                static_analysis=static_analysis,
+                **base,
+                **compile_fields,
+            )
     if report.test_runs:
         return EvaluationResult(
             status=(
@@ -51,8 +66,18 @@ def to_result(report: SandboxReport) -> EvaluationResult:
     }
     if run.timed_out:
         return EvaluationResult(status=Status.RUN_TIMEOUT, **base, **run_fields)
+            return EvaluationResult(
+                status=Status.RUN_TIMEOUT,
+                static_analysis=static_analysis,
+                **base,
+                **run_fields,
+            )
     return EvaluationResult(
-        status=Status.SUCCESS, exit_code=run.rc, **base, **run_fields
+        status=Status.SUCCESS,
+        exit_code=run.rc,
+        static_analysis=static_analysis,
+        **base,
+        **run_fields,
     )
 
 

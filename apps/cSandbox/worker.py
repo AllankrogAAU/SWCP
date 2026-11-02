@@ -1,3 +1,4 @@
+                staticAnalysis=result.static_analysis,
 import asyncio
 import contextlib
 import json

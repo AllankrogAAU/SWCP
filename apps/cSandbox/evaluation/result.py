@@ -36,6 +36,7 @@ class EvaluationResult:
     compile_stderr: str | None = None
     compile_ms: int | None = None
     lint_output: str | None = None
+    static_analysis: tuple[StaticAnalysisWarning, ...] = ()
     exit_code: int | None = None
     stdout: str | None = None
     stderr: str | None = None
