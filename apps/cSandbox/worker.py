@@ -1,4 +1,3 @@
-                staticAnalysis=result.static_analysis,
 import asyncio
 import contextlib
 import json
@@ -170,7 +169,7 @@ def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
                     exitCode=None if compiled else 1,
                     durationMilliseconds=result.compile_ms,
                 ),
-                staticAnalysis=[],
+                staticAnalysis=list(result.static_analysis),
                 testResults=test_results,
                 errorClassification=";".join([status, *limitations]),
             )
