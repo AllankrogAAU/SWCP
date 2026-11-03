@@ -53,6 +53,25 @@ public sealed class SubmissionPromptBuilderTests
     }
 
     [Fact]
+    public void Build_SuccessfulCompile_PresentsDiagnosticsAsNonFatalWarnings()
+    {
+        var assignment = CreateAssignment();
+        var submission = CreateSubmission("submit");
+        var sandboxResult = CreateSandboxResult() with
+        {
+            Compilation = new CompilationResult(true, "", "unused variable warning", 0, 15),
+            LintOutput = "style warning"
+        };
+
+        var prompt = SubmissionPromptBuilder.Build(assignment, submission, sandboxResult);
+
+        Assert.Contains("Non-fatal compiler/lint warnings (compilation succeeded)", prompt.UserPrompt);
+        Assert.Contains("unused variable warning", prompt.UserPrompt);
+        Assert.Contains("style warning", prompt.UserPrompt);
+        Assert.False(prompt.SandboxFailed);
+    }
+
+    [Fact]
     public void Build_HintAction_IncludesHintInstructions()
     {
         var assignment = CreateAssignment();
@@ -79,6 +98,24 @@ public sealed class SubmissionPromptBuilderTests
     }
 
     [Fact]
+    public void Build_RawCodeOnly_ExcludesAssignmentAndSandboxContext()
+    {
+        var assignment = CreateAssignment("Do not expose this focus");
+        var submission = CreateSubmission("submit", "int main() { return 0; }");
+        submission.ContextMode = "raw_code_only";
+        var sandboxResult = CreateSandboxResult(compileSuccess: false);
+
+        var prompt = SubmissionPromptBuilder.Build(assignment, submission, sandboxResult);
+
+        Assert.Equal("raw_code_only", prompt.ContextMode);
+        Assert.DoesNotContain("Fibonacci", prompt.UserPrompt);
+        Assert.DoesNotContain("sandbox output", prompt.UserPrompt, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Do not expose this focus", prompt.SystemPrompt);
+        Assert.Contains("int main()", prompt.UserPrompt);
+        Assert.Contains("set taskSolved to null", prompt.SystemPrompt);
+    }
+
+    [Fact]
     public void Build_UnsupportedAction_ThrowsArgumentException()
     {
         var assignment = CreateAssignment();
@@ -91,4 +128,3 @@ public sealed class SubmissionPromptBuilderTests
         Assert.Contains("Only Hint and Submit actions create LLM prompts", exception.Message);
     }
 }
-

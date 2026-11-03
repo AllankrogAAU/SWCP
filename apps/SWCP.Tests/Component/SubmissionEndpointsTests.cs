@@ -45,6 +45,48 @@ public sealed class SubmissionEndpointsTests : IClassFixture<CoreApiTestFixture>
     }
 
     [Fact]
+    public async Task CreateSubmission_ValidateAction_UsesAssignmentProfileAndSkipsLlm()
+    {
+        var student = await _fixture.SeedUserAsync("student_validate", "pass123", UserRole.Student);
+        var assignment = await _fixture.SeedAssignmentAsync(
+            "CodeNet validation assignment",
+            compilerProfile: CompilerProfiles.CodeNetGnu11);
+        var token = _fixture.GenerateJwt(student);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/submissions");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        request.Content = JsonContent.Create(new CreateSubmissionRequest(
+            assignment.Id, "int main() { return 0; }", "local", "validate"));
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var responseBody = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var task = _fixture.TaskPublisher.PublishedSandboxTasks
+            .FirstOrDefault(candidate => candidate.SubmissionId == responseBody.GetProperty("submissionId").GetGuid());
+        Assert.NotNull(task);
+        Assert.Equal(new[] { "-std=gnu11", "-Wall", "-Wextra", "-O2", "-lm" }, task.CompilerFlags);
+        Assert.DoesNotContain(_fixture.TaskPublisher.PublishedLlmTasks, llm => llm.SubmissionId == task.SubmissionId);
+    }
+
+    [Fact]
+    public async Task CreateSubmission_ValidateAction_RejectsStandardAssignment()
+    {
+        var student = await _fixture.SeedUserAsync("student_validate_standard", "pass123", UserRole.Student);
+        var assignment = await _fixture.SeedAssignmentAsync("Standard assignment");
+        var token = _fixture.GenerateJwt(student);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/submissions");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        request.Content = JsonContent.Create(new CreateSubmissionRequest(
+            assignment.Id, "int main() { return 0; }", "local", "validate"));
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
     public async Task CreateSubmission_Unauthenticated_Returns401Unauthorized()
     {
         var response = await _client.PostAsJsonAsync("/api/submissions", new CreateSubmissionRequest(

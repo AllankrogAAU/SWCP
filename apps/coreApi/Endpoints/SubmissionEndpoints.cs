@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using coreApi.Data;
 using coreApi.Models;
 using coreApi.Services;
@@ -11,6 +12,8 @@ namespace coreApi.Endpoints;
 
 public static class SubmissionEndpoints
 {
+    private static readonly Regex AzureModelKeyPattern = new("^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$", RegexOptions.CultureInvariant);
+
     public static RouteGroupBuilder MapSubmissionEndpoints(this IEndpointRouteBuilder endpoints)
     {
         var group = endpoints.MapGroup("/api/submissions").WithTags("Submissions").RequireAuthorization();
@@ -57,10 +60,25 @@ public static class SubmissionEndpoints
             return Results.BadRequest(new { error = "LlmBackend must be 'azure' or 'local'." });
         }
 
-        var action = request.Action.Trim().ToLowerInvariant();
-        if (action is not ("submit" or "hint" or "run"))
+        var contextMode = request.ContextMode?.Trim().ToLowerInvariant();
+        if (contextMode is not ("with_context_transfer" or "raw_code_only"))
         {
-            return Results.BadRequest(new { error = "Action must be 'submit', 'hint', or 'run'." });
+            return Results.BadRequest(new { error = "ContextMode must be 'with_context_transfer' or 'raw_code_only'." });
+        }
+
+        var azureModelKey = string.IsNullOrWhiteSpace(request.AzureModelKey)
+            ? null
+            : request.AzureModelKey.Trim();
+        if (azureModelKey is not null &&
+            (backend != "azure" || !AzureModelKeyPattern.IsMatch(azureModelKey)))
+        {
+            return Results.BadRequest(new { error = "AzureModelKey must be a valid configured model key for the Azure backend." });
+        }
+
+        var action = request.Action.Trim().ToLowerInvariant();
+        if (action is not ("submit" or "hint" or "run" or "validate"))
+        {
+            return Results.BadRequest(new { error = "Action must be 'submit', 'hint', 'run', or 'validate'." });
         }
 
         var assignment = await database.Assignments
@@ -68,6 +86,10 @@ public static class SubmissionEndpoints
         if (assignment is null)
         {
             return Results.NotFound(new { error = "Assignment not found." });
+        }
+        if (action == "validate" && assignment.CompilerProfile != CompilerProfiles.CodeNetGnu11)
+        {
+            return Results.BadRequest(new { error = "Validate is available only for CodeNet benchmark assignments." });
         }
 
         var submission = new Submission
@@ -79,6 +101,8 @@ public static class SubmissionEndpoints
             Action = action,
             LlmBackend = backend,
             StandardInput = request.StandardInput,
+            ContextMode = contextMode,
+            AzureModelKey = azureModelKey,
             Status = SubmissionStatus.PENDING,
             CreatedAtUtc = DateTimeOffset.UtcNow,
             UpdatedAtUtc = DateTimeOffset.UtcNow
@@ -131,7 +155,7 @@ public static class SubmissionEndpoints
                 submission.Id,
                 assignment.Id,
                 submission.SourceCode,
-                ["-Wall", "-Wextra", "-O2", "-std=c11"],
+                CompilerProfiles.FlagsFor(assignment.CompilerProfile),
                 testCases,
                 traceParent,
                 assignment.HarnessSource,
@@ -165,7 +189,13 @@ public static class SubmissionEndpoints
         SubmissionEvents events,
         ILoggerFactory loggerFactory,
         CancellationToken cancellationToken) =>
-        Create(new CreateSubmissionRequest(request.AssignmentId, request.SourceCode, request.LlmBackend, "hint"),
+        Create(new CreateSubmissionRequest(
+                request.AssignmentId,
+                request.SourceCode,
+                request.LlmBackend,
+                "hint",
+                ContextMode: request.ContextMode,
+                AzureModelKey: request.AzureModelKey),
             principal, database, publisher, events, loggerFactory, cancellationToken);
 
     private static Task<IResult> Run(
@@ -181,7 +211,9 @@ public static class SubmissionEndpoints
                 request.SourceCode,
                 request.LlmBackend,
                 "run",
-                request.StandardInput),
+                request.StandardInput,
+                request.ContextMode,
+                request.AzureModelKey),
             principal, database, publisher, events, loggerFactory, cancellationToken);
 
     private static async Task<IResult> Get(

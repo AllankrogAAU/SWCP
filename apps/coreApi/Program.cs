@@ -76,6 +76,7 @@ builder.Services.AddSingleton<NatsTaskPublisher>();
 builder.Services.AddSingleton<SubmissionEvents>();
 builder.Services.AddHostedService<SandboxResultConsumer>();
 builder.Services.AddHostedService<LlmResultConsumer>();
+builder.Services.AddHostedService<LlmFeedbackStreamConsumer>();
 builder.Services.AddHostedService<SubmissionProgressConsumer>();
 builder.Services.AddHostedService<SubmissionReconciler>();
 builder.Services.AddOpenApi();

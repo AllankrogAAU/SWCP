@@ -60,6 +60,7 @@ public sealed class SandboxResultConsumer(
 
     private async Task ProcessResultAsync(SandboxResult result, string? traceParent, CancellationToken cancellationToken)
     {
+        result = SandboxResultSanitizer.Sanitize(result);
         using var activity = ActivitySource.StartActivity(
             "process sandbox.results",
             ActivityKind.Consumer,
@@ -99,7 +100,7 @@ public sealed class SandboxResultConsumer(
             return;
         }
 
-        if (submission.Action == "run")
+        if (submission.Action is "run" or "validate")
         {
             submission.Status = SubmissionStatus.COMPLETED;
             await database.SaveChangesAsync(cancellationToken);
@@ -110,7 +111,13 @@ public sealed class SandboxResultConsumer(
                 (long)(DateTimeOffset.UtcNow - submission.CreatedAtUtc).TotalMilliseconds,
                 "completed", submission.LlmBackend,
                 result.Compilation.Success ? "sandbox_run_completed" : "sandbox_compile_failed");
-            await events.PublishAsync(submission, "completed", "Sandbox run completed", 100, cancellationToken, traceParent);
+            await events.PublishAsync(
+                submission,
+                "completed",
+                submission.Action == "validate" ? "Sandbox validation completed" : "Sandbox run completed",
+                100,
+                cancellationToken,
+                traceParent);
             return;
         }
 
@@ -124,7 +131,8 @@ public sealed class SandboxResultConsumer(
         var queueTimer = System.Diagnostics.Stopwatch.StartNew();
         await publisher.PublishLlmTaskAsync(
             new LlmTask(submission.Id, submission.LlmBackend, prompt.SystemPrompt, prompt.UserPrompt,
-                prompt.Parameters, traceParent, prompt.EvaluationMode, prompt.SandboxFailed),
+                prompt.Parameters, traceParent, prompt.EvaluationMode, prompt.SandboxFailed,
+                prompt.ContextMode, submission.AzureModelKey),
             cancellationToken);
         logger.LogInformation(
             "Pipeline stage queued {event_name} {stage} {submission_id} {trace_id} {queue_publish_ms} {status} {backend}",

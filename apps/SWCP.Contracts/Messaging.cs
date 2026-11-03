@@ -17,6 +17,7 @@ public static class Messaging
     public const string LlmAzureTaskSubject = "llm.tasks.azure";
     public const string LlmLocalTaskSubject = "llm.tasks.local";
     public const string LlmResultSubject = "llm.results";
+    public const string LlmFeedbackStreamSubject = "llm.feedback.stream";
     public const string SandboxTasksDlqSubject = "sandbox.tasks.dlq";
     public const string LlmTasksDlqSubject = "llm.tasks.dlq";
     public const string SandboxTaskConsumer = "c-sandbox-workers";
@@ -65,7 +66,8 @@ public sealed record SandboxResult(
     [property: JsonPropertyName("compilation")] CompilationResult Compilation,
     [property: JsonPropertyName("staticAnalysis")] IReadOnlyList<StaticAnalysisWarning> StaticAnalysis,
     [property: JsonPropertyName("testResults")] IReadOnlyList<SandboxTestResult> TestResults,
-    [property: JsonPropertyName("errorClassification")] string? ErrorClassification = null);
+    [property: JsonPropertyName("errorClassification")] string? ErrorClassification = null,
+    [property: JsonPropertyName("lintOutput")] string? LintOutput = null);
 
 public sealed record CompilationResult(
     [property: JsonPropertyName("success")] bool Success,
@@ -96,7 +98,9 @@ public sealed record LlmTask(
     [property: JsonPropertyName("parameters")] LlmInferenceParameters Parameters,
     [property: JsonPropertyName("traceParent")] string? TraceParent = null,
     [property: JsonPropertyName("evaluationMode")] string EvaluationMode = "submit",
-    [property: JsonPropertyName("sandboxFailed")] bool SandboxFailed = false);
+    [property: JsonPropertyName("sandboxFailed")] bool SandboxFailed = false,
+    [property: JsonPropertyName("contextMode")] string ContextMode = "with_context_transfer",
+    [property: JsonPropertyName("azureModelKey")] string? AzureModelKey = null);
 
 public sealed record LlmInferenceParameters(
     [property: JsonPropertyName("temperature")] double Temperature,
@@ -111,6 +115,14 @@ public sealed record LlmResult(
     [property: JsonPropertyName("error")] string? Error,
     [property: JsonPropertyName("taskSolved")] bool? TaskSolved = null);
 
+public sealed record LlmFeedbackStreamMessage(
+    [property: JsonPropertyName("submissionId")] Guid SubmissionId,
+    [property: JsonPropertyName("eventType")] string EventType,
+    [property: JsonPropertyName("delta")] string Delta,
+    [property: JsonPropertyName("attempt")] int Attempt,
+    [property: JsonPropertyName("sequence")] int Sequence,
+    [property: JsonPropertyName("traceParent")] string? TraceParent = null);
+
 public sealed record LlmTokenUsage(
     [property: JsonPropertyName("promptTokens")] int PromptTokens,
     [property: JsonPropertyName("completionTokens")] int CompletionTokens,
@@ -122,7 +134,9 @@ public sealed record SubmissionNotification(
     [property: JsonPropertyName("stage")] string Stage,
     [property: JsonPropertyName("message")] string Message,
     [property: JsonPropertyName("percentComplete")] int PercentComplete,
-    [property: JsonPropertyName("timestampUtc")] DateTimeOffset TimestampUtc);
+    [property: JsonPropertyName("timestampUtc")] DateTimeOffset TimestampUtc,
+    [property: JsonPropertyName("attempt")] int? Attempt = null,
+    [property: JsonPropertyName("sequence")] int? Sequence = null);
 
 public sealed record SubmissionWorkStarted(
     [property: JsonPropertyName("submissionId")] Guid SubmissionId,

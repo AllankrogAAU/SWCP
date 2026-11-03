@@ -187,7 +187,34 @@ public sealed class Worker(
             }
             await nats.PublishAsync(Messaging.WorkStartedSubject, new SubmissionWorkStarted(
                 task.SubmissionId, "llm-worker", "llm", DateTimeOffset.UtcNow), headers: headers, cancellationToken: stoppingToken);
-            var completion = await processor.CompleteAsync(task, stoppingToken);
+            var streamAttempt = checked((int)attempt);
+            var streamSequence = 0;
+            await nats.PublishAsync(
+                Messaging.LlmFeedbackStreamSubject,
+                new LlmFeedbackStreamMessage(
+                    task.SubmissionId,
+                    "reset",
+                    string.Empty,
+                    streamAttempt,
+                    streamSequence++,
+                    task.TraceParent),
+                cancellationToken: stoppingToken);
+            var completion = await processor.CompleteStreamingAsync(
+                task,
+                async (delta, cancellationToken) =>
+                {
+                    await nats.PublishAsync(
+                        Messaging.LlmFeedbackStreamSubject,
+                        new LlmFeedbackStreamMessage(
+                            task.SubmissionId,
+                            "delta",
+                            delta,
+                            streamAttempt,
+                            streamSequence++,
+                            task.TraceParent),
+                        cancellationToken: cancellationToken);
+                },
+                stoppingToken);
             stageTimer.Stop();
             var promptTokens = completion.TokenUsage?.PromptTokens;
             var completionTokens = completion.TokenUsage?.CompletionTokens;

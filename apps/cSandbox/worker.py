@@ -107,9 +107,11 @@ def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
                 task.testCases,
                 task.harnessSource,
                 task.runStdin,
+                task.compilerFlags or ["-Wall", "-Wextra"],
             )
             status = result.status.value
             compiled = status not in {"compile_error", "compile_timeout"}
+            dynamic_classification = status
 
             with tracer.start_as_current_span("sandbox.compile") as compile_span:
                 compile_span.set_attribute("compile.duration_ms", result.compile_ms or 0)
@@ -123,7 +125,41 @@ def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
                     for index, (test_case, run) in enumerate(
                         zip(task.testCases, result.test_runs, strict=True)
                     ):
-                        passed = run.rc == 0 and run.stdout == test_case.expectedStdout
+                        memory_consumed = (
+                            run.memory_kb / 1024
+                            if run.memory_kb is not None
+                            else None
+                        )
+                        memory_error = run.stderr.casefold()
+                        memory_exceeded = (
+                            (
+                                run.memory_kb is not None
+                                and run.memory_kb >= test_case.memoryLimitMegabytes * 1024
+                            )
+                            or any(
+                                marker in memory_error
+                                for marker in (
+                                    "cannot allocate memory",
+                                    "out of memory",
+                                    "memory exhausted",
+                                    "failed to allocate",
+                                    "failed to map segment",
+                                )
+                            )
+                        )
+                        passed = (
+                            run.rc == 0
+                            and run.stdout == test_case.expectedStdout
+                            and not memory_exceeded
+                        )
+                        if run.timed_out:
+                            dynamic_classification = "run_timeout"
+                        elif memory_exceeded:
+                            dynamic_classification = "memory_limit_exceeded"
+                        elif run.rc != 0 and dynamic_classification == status:
+                            dynamic_classification = "runtime_error"
+                        elif not passed and dynamic_classification == status:
+                            dynamic_classification = "wrong_answer"
                         with tracer.start_as_current_span("sandbox.run_test") as test_span:
                             test_span.set_attribute("test.index", index)
                             test_span.set_attribute("run.duration_ms", run.duration_ms)
@@ -136,11 +172,15 @@ def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
                                 stderr=run.stderr,
                                 exitCode=run.rc,
                                 durationMilliseconds=run.duration_ms,
-                                memoryConsumedMegabytes=None,
+                                memoryConsumedMegabytes=memory_consumed,
                             )
                         )
                 else:
                     passed = status == "success" and result.exit_code == 0
+                    if status == "run_timeout":
+                        dynamic_classification = "run_timeout"
+                    elif result.exit_code not in (0, None):
+                        dynamic_classification = "runtime_error"
                     with tracer.start_as_current_span("sandbox.run_binary") as exec_span:
                         exec_span.set_attribute("run.duration_ms", result.run_ms or 0)
                         exec_span.set_attribute("run.exit_code", result.exit_code or 0)
@@ -156,22 +196,19 @@ def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
                         )
                     )
 
-            limitations = []
-            if task.compilerFlags:
-                limitations.append("compiler-flags-not-yet-applied")
-
             return SandboxResult(
                 submissionId=task.submissionId,
                 compilation=CompilationResult(
                     success=compiled,
                     stdout=result.compile_stdout or "",
                     stderr=result.compile_stderr or "",
-                    exitCode=None if compiled else 1,
+                    exitCode=result.compile_exit_code,
                     durationMilliseconds=result.compile_ms,
                 ),
                 staticAnalysis=[],
                 testResults=test_results,
-                errorClassification=";".join([status, *limitations]),
+                errorClassification=dynamic_classification,
+                lintOutput=result.lint_output,
             )
     finally:
         if token:

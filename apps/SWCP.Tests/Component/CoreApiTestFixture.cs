@@ -80,6 +80,7 @@ public sealed class CoreApiTestFixture : WebApplicationFactory<coreApi.Program>
                 .Where(s => s.ServiceType == typeof(IHostedService) &&
                             (s.ImplementationType == typeof(SandboxResultConsumer) ||
                              s.ImplementationType == typeof(LlmResultConsumer) ||
+                             s.ImplementationType == typeof(LlmFeedbackStreamConsumer) ||
                              s.ImplementationType == typeof(SubmissionProgressConsumer) ||
                              s.ImplementationType == typeof(SubmissionReconciler)))
                 .ToList();
@@ -110,7 +111,10 @@ public sealed class CoreApiTestFixture : WebApplicationFactory<coreApi.Program>
         return user;
     }
 
-    public async Task<Assignment> SeedAssignmentAsync(string title, string? taskFocus = null)
+    public async Task<Assignment> SeedAssignmentAsync(
+        string title,
+        string? taskFocus = null,
+        string compilerProfile = CompilerProfiles.Standard)
     {
         using var scope = Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<CoreDbContext>();
@@ -122,6 +126,7 @@ public sealed class CoreApiTestFixture : WebApplicationFactory<coreApi.Program>
             Description = "Test Assignment Description",
             TaskFocus = taskFocus ?? string.Empty,
             TestCasesJson = "[]",
+            CompilerProfile = compilerProfile,
             CreatedAtUtc = DateTimeOffset.UtcNow
         };
         db.Assignments.Add(assignment);

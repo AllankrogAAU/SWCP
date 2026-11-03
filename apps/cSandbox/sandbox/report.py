@@ -32,11 +32,16 @@ def parse_report(raw: str) -> SandboxReport:
         except ValueError:
             parsed[phase] = None
             continue
+        try:
+            memory_kb = int(fields[f"{phase}_memory_kb"])
+        except (KeyError, ValueError):
+            memory_kb = None
         parsed[phase] = PhaseResult(
             rc=rc_value,
             duration_ms=duration,
             stdout=_decode(fields.get(f"{phase}_stdout", "")),
             stderr=_decode(fields.get(f"{phase}_stderr", "")),
+            memory_kb=memory_kb,
         )
     test_runs: list[PhaseResult] = []
     index = 0
@@ -46,12 +51,17 @@ def parse_report(raw: str) -> SandboxReport:
             duration = int(fields.get(f"test_{index}_ms", "0"))
         except ValueError:
             break
+        try:
+            memory_kb = int(fields[f"test_{index}_memory_kb"])
+        except (KeyError, ValueError):
+            memory_kb = None
         test_runs.append(
             PhaseResult(
                 rc=rc_value,
                 duration_ms=duration,
                 stdout=_decode(fields.get(f"test_{index}_stdout", "")),
                 stderr=_decode(fields.get(f"test_{index}_stderr", "")),
+                memory_kb=memory_kb,
             )
         )
         index += 1

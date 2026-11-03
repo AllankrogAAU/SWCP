@@ -31,6 +31,13 @@ namespace coreApi.Data.Migrations
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("CompilerProfile")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasDefaultValue("standard")
+                        .HasColumnType("character varying(32)");
+
                     b.Property<string>("Description")
                         .IsRequired()
                         .HasColumnType("text");
@@ -77,6 +84,17 @@ namespace coreApi.Data.Migrations
                         .HasMaxLength(16)
                         .HasDefaultValue("submit")
                         .HasColumnType("character varying(16)");
+
+                    b.Property<string>("AzureModelKey")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ContextMode")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasDefaultValue("with_context_transfer")
+                        .HasColumnType("character varying(32)");
 
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");

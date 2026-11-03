@@ -15,13 +15,11 @@ defineEmits<{
     <v-card-title>AI feedback</v-card-title>
 
     <v-card-text>
-      <!-- Loading -->
-      <div v-if="loading" class="d-flex align-center ga-3">
+      <div v-if="loading && !feedback" class="d-flex align-center ga-3">
         <v-progress-circular indeterminate size="24" />
         <span>Reviewing your code...</span>
       </div>
 
-      <!-- Error -->
       <v-alert v-else-if="error" type="error" variant="tonal">
         {{ error }}
         <template #append>
@@ -29,8 +27,13 @@ defineEmits<{
         </template>
       </v-alert>
 
-      <!-- Feedback -->
-      <div v-else-if="feedback" class="feedback-text">{{ feedback }}</div>
+      <template v-else-if="feedback">
+        <div class="feedback-text">{{ feedback }}</div>
+        <div v-if="loading" class="d-flex align-center ga-2 mt-3 text-medium-emphasis">
+          <v-progress-circular indeterminate size="16" />
+          <span>Streaming feedback...</span>
+        </div>
+      </template>
 
       <!-- Empty state -->
       <div v-else class="text-medium-emphasis">

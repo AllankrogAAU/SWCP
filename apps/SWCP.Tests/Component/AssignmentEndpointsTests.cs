@@ -89,6 +89,44 @@ public sealed class AssignmentEndpointsTests : IClassFixture<CoreApiTestFixture>
         Assert.NotNull(created);
         Assert.Equal("Teacher Created Task", created.Title);
         Assert.Equal("Focus on memory safety", created.TaskFocus);
+        Assert.Equal(CompilerProfiles.Standard, created.CompilerProfile);
+    }
+
+    [Fact]
+    public async Task CreateAssignment_CodenetCompilerProfile_IsReturned()
+    {
+        var teacher = await _fixture.SeedUserAsync("teacher_gnu11", "pass123", UserRole.Teacher);
+        var token = _fixture.GenerateJwt(teacher);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/assignments");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        request.Content = JsonContent.Create(new CreateAssignmentRequest(
+            "CodeNet Task", "Description", string.Empty, JsonDocument.Parse("[]").RootElement,
+            CompilerProfile: CompilerProfiles.CodeNetGnu11));
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var created = await response.Content.ReadFromJsonAsync<AssignmentResponse>();
+        Assert.NotNull(created);
+        Assert.Equal(CompilerProfiles.CodeNetGnu11, created.CompilerProfile);
+    }
+
+    [Fact]
+    public async Task CreateAssignment_UnsupportedCompilerProfile_Returns400BadRequest()
+    {
+        var teacher = await _fixture.SeedUserAsync("teacher_bad_profile", "pass123", UserRole.Teacher);
+        var token = _fixture.GenerateJwt(teacher);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/assignments");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        request.Content = JsonContent.Create(new CreateAssignmentRequest(
+            "Invalid Profile Task", "Description", string.Empty, JsonDocument.Parse("[]").RootElement,
+            CompilerProfile: "unknown"));
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Fact]

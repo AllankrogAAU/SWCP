@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { flushPromises } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import App from '../App.vue'
 
 const api = vi.hoisted(() => ({
@@ -87,6 +88,74 @@ describe('App', () => {
     expect(api.getSubmission).toHaveBeenCalledWith('submission-id')
     expect(wrapper.text()).toContain('Looks good.')
     expect(wrapper.html()).toContain('Task judged correctly solved')
+  })
+
+  it('renders streamed feedback deltas while the submission is still processing', async () => {
+    api.getAccessToken.mockReturnValue('test-token')
+    api.getSubmission.mockResolvedValue({
+      submissionId: 'submission-id',
+      assignmentId: 'assignment-id',
+      action: 'submit',
+      status: 'LLM_PROCESSING',
+      llmFeedback: null,
+      sandboxOutput: null,
+      taskSolved: null,
+      errorMessage: null,
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+
+    const onNotification = api.openSubmissionSocket.mock.calls[0]?.[1] as
+      | ((notification: {
+          eventType: string
+          stage: string
+          message: string
+          attempt: number
+          sequence: number
+          submissionId: string
+          percentComplete: number
+          timestampUtc: string
+        }) => void)
+      | undefined
+    expect(onNotification).toBeDefined()
+    onNotification!({
+      submissionId: 'submission-id',
+      eventType: 'feedback.reset',
+      stage: 'LLM_PROCESSING',
+      message: '',
+      percentComplete: 90,
+      timestampUtc: new Date().toISOString(),
+      attempt: 1,
+      sequence: 0,
+    })
+    onNotification!({
+      submissionId: 'submission-id',
+      eventType: 'feedback.delta',
+      stage: 'LLM_PROCESSING',
+      message: 'Inspect the loop',
+      percentComplete: 90,
+      timestampUtc: new Date().toISOString(),
+      attempt: 1,
+      sequence: 1,
+    })
+    onNotification!({
+      submissionId: 'submission-id',
+      eventType: 'feedback.delta',
+      stage: 'LLM_PROCESSING',
+      message: ' condition.',
+      percentComplete: 90,
+      timestampUtc: new Date().toISOString(),
+      attempt: 1,
+      sequence: 2,
+    })
+
+    await nextTick()
+    expect(wrapper.text()).toContain('Inspect the loop condition.')
+    expect(wrapper.text()).toContain('Streaming feedback...')
+    wrapper.unmount()
   })
 
   it('tracks Hint results as feedback and Run results as terminal output only', async () => {

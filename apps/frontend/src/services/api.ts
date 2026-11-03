@@ -57,6 +57,8 @@ export interface SubmissionNotification {
   message: string
   percentComplete: number
   timestampUtc: string
+  attempt?: number | null
+  sequence?: number | null
 }
 
 interface ApiProblem {

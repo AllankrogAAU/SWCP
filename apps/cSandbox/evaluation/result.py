@@ -15,6 +15,7 @@ class PhaseResult:
     duration_ms: int
     stdout: str
     stderr: str
+    memory_kb: int | None = None
 
     @property
     def timed_out(self) -> bool:
@@ -34,6 +35,7 @@ class EvaluationResult:
     status: Status
     compile_stdout: str | None = None
     compile_stderr: str | None = None
+    compile_exit_code: int | None = None
     compile_ms: int | None = None
     lint_output: str | None = None
     exit_code: int | None = None

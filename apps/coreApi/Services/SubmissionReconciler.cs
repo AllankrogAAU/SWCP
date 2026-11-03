@@ -71,7 +71,7 @@ public sealed class SubmissionReconciler(
                 submission.Id,
                 assignment.Id,
                 submission.SourceCode,
-                ["-Wall", "-Wextra", "-O2", "-std=c11"],
+                CompilerProfiles.FlagsFor(assignment.CompilerProfile),
                 cases,
                 HarnessSource: assignment.HarnessSource,
                 RunStdin: submission.Action == "run" ? submission.StandardInput : ""), cancellationToken, submission.RetryCount);

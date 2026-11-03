@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using Azure;
 using Azure.AI.OpenAI;
@@ -57,9 +58,20 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             _ => throw new InvalidOperationException($"Unsupported LLM backend '{task.Backend}'.")
         };
 
+    public Task<LlmCompletion> CompleteStreamingAsync(
+        LlmTask task,
+        Func<string, CancellationToken, ValueTask>? onFeedbackDelta,
+        CancellationToken cancellationToken) =>
+        task.Backend switch
+        {
+            "azure" => CompleteAzureStreamingAsync(task, onFeedbackDelta, cancellationToken),
+            "local" => CompleteLocalStreamingAsync(task, onFeedbackDelta, cancellationToken),
+            _ => throw new InvalidOperationException($"Unsupported LLM backend '{task.Backend}'.")
+        };
+
     private async Task<LlmCompletion> CompleteAzureAsync(LlmTask task, CancellationToken cancellationToken)
     {
-        var modelKey = configuration["AzureAIFoundry:DefaultModel"] ?? "Gpt6Sol";
+        var modelKey = task.AzureModelKey ?? configuration["AzureAIFoundry:DefaultModel"] ?? "Gpt6Sol";
         var (client, deployment) = _azureClients.GetOrAdd(modelKey, key =>
         {
             var settings = configuration.GetSection($"AzureAIFoundry:Models:{key}");
@@ -123,7 +135,11 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                 await Task.Delay(delayMs, cancellationToken);
             }
 
-            var solved = task.EvaluationMode == "submit" && !task.SandboxFailed ? true : (bool?)null;
+            var solved = task.EvaluationMode == "submit" &&
+                !task.SandboxFailed &&
+                task.ContextMode != "raw_code_only"
+                    ? true
+                    : (bool?)null;
             return new LlmCompletion(
                 "Mock LLM feedback for infinite-GPU bottleneck benchmarking.",
                 new LlmTokenUsage(250, 80, 330),
@@ -196,6 +212,292 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
         return ParseCompletion(content, usage, task);
     }
 
+    private async Task<LlmCompletion> CompleteAzureStreamingAsync(
+        LlmTask task,
+        Func<string, CancellationToken, ValueTask>? onFeedbackDelta,
+        CancellationToken cancellationToken)
+    {
+        var modelKey = task.AzureModelKey ?? configuration["AzureAIFoundry:DefaultModel"] ?? "Gpt6Sol";
+        var (client, deployment) = _azureClients.GetOrAdd(modelKey, key =>
+        {
+            var settings = configuration.GetSection($"AzureAIFoundry:Models:{key}");
+            var endpoint = settings["Endpoint"];
+            var apiKey = settings["ApiKey"];
+            var configuredDeployment = settings["Deployment"];
+            if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(apiKey) ||
+                string.IsNullOrWhiteSpace(configuredDeployment))
+            {
+                throw new InvalidOperationException(
+                    $"Azure AI Foundry configuration for '{key}' must include Endpoint, ApiKey, and Deployment.");
+            }
+
+            var azureClient = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(apiKey));
+            return (azureClient.GetChatClient(configuredDeployment), configuredDeployment);
+        });
+
+        var options = new ChatCompletionOptions
+        {
+            MaxOutputTokenCount = task.Parameters.MaxTokens,
+            ResponseFormat = ChatResponseFormat.CreateJsonSchemaFormat(
+                StructuredResponseFormatName,
+                BinaryData.FromString(GetStructuredResponseSchema(task, constrainHintFeedback: false)),
+                jsonSchemaIsStrict: true)
+        };
+#pragma warning disable AOAI001
+        options.SetNewMaxCompletionTokensPropertyEnabled();
+#pragma warning restore AOAI001
+        ChatMessage[] messages =
+        [
+            new SystemChatMessage(task.SystemPrompt),
+            new UserChatMessage(task.UserPrompt)
+        ];
+
+        var rawContent = new StringBuilder();
+        var feedbackParser = onFeedbackDelta is null ? null : new FeedbackJsonStreamParser();
+        LlmTokenUsage? usage = null;
+        try
+        {
+            await foreach (var update in client.CompleteChatStreamingAsync(messages, options, cancellationToken))
+            {
+                foreach (var contentPart in update.ContentUpdate)
+                {
+                    var content = contentPart.Text;
+                    if (!string.IsNullOrEmpty(content))
+                    {
+                        rawContent.Append(content);
+                        var feedbackDelta = feedbackParser?.Append(content);
+                        if (!string.IsNullOrEmpty(feedbackDelta))
+                        {
+                            await onFeedbackDelta!(feedbackDelta, cancellationToken);
+                        }
+                    }
+                }
+
+                if (update.Usage is { } updateUsage)
+                {
+                    usage = new LlmTokenUsage(
+                        updateUsage.InputTokenCount,
+                        updateUsage.OutputTokenCount,
+                        updateUsage.TotalTokenCount);
+                }
+            }
+        }
+        catch (ClientResultException exception) when (exception.Status == (int)HttpStatusCode.TooManyRequests)
+        {
+            throw new RetryableLlmException(TimeSpan.FromSeconds(30), exception);
+        }
+        catch (ClientResultException exception) when (exception.Status >= 500)
+        {
+            throw new RetryableLlmException(TimeSpan.FromSeconds(5), exception);
+        }
+
+        feedbackParser?.Complete();
+        return ParseCompletion(rawContent.ToString(), usage, task);
+    }
+
+    private async Task<LlmCompletion> CompleteLocalStreamingAsync(
+        LlmTask task,
+        Func<string, CancellationToken, ValueTask>? onFeedbackDelta,
+        CancellationToken cancellationToken)
+    {
+        if (configuration.GetValue<bool>("LocalLlm:MockEnabled"))
+        {
+            var delayMs = Math.Max(0, configuration.GetValue<int?>("LocalLlm:MockLatencyMs") ?? 5);
+            if (delayMs > 0)
+            {
+                await Task.Delay(delayMs, cancellationToken);
+            }
+
+            const string mockFeedback = "Mock LLM feedback for infinite-GPU bottleneck benchmarking.";
+            if (onFeedbackDelta is not null)
+            {
+                for (var offset = 0; offset < mockFeedback.Length; offset += 16)
+                {
+                    await onFeedbackDelta(
+                        mockFeedback.Substring(offset, Math.Min(16, mockFeedback.Length - offset)),
+                        cancellationToken);
+                }
+            }
+
+            var solved = task.EvaluationMode == "submit" &&
+                !task.SandboxFailed &&
+                task.ContextMode != "raw_code_only"
+                    ? true
+                    : (bool?)null;
+            return new LlmCompletion(mockFeedback, new LlmTokenUsage(250, 80, 330), solved);
+        }
+
+        var modelName = configuration["LocalLlm:ModelName"] ?? configuration["LLM_MODEL_NAME"];
+        if (string.IsNullOrWhiteSpace(modelName))
+        {
+            throw new InvalidOperationException("Local LLM model name is not configured.");
+        }
+
+        var client = httpClientFactory.CreateClient("LocalLlm");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions")
+        {
+            Content = JsonContent.Create(new
+            {
+                model = modelName,
+                messages = new[]
+                {
+                    new { role = "system", content = task.SystemPrompt },
+                    new { role = "user", content = task.UserPrompt }
+                },
+                temperature = task.Parameters.Temperature,
+                max_tokens = task.Parameters.MaxTokens,
+                top_p = task.Parameters.TopP,
+                presence_penalty = 0.3,
+                frequency_penalty = 0.3,
+                stream = true,
+                stream_options = new { include_usage = true },
+                response_format = new
+                {
+                    type = "json_schema",
+                    json_schema = new
+                    {
+                        name = StructuredResponseFormatName,
+                        schema = ParseStructuredResponseSchema(task)
+                    }
+                }
+            })
+        };
+
+        using var response = await client.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+        if ((int)response.StatusCode == 429)
+        {
+            var delay = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(10);
+            throw new RetryableLlmException(delay, new HttpRequestException("Local LLM returned 429."));
+        }
+
+        if ((int)response.StatusCode >= 500)
+        {
+            throw new RetryableLlmException(
+                TimeSpan.FromSeconds(5),
+                new HttpRequestException($"Local LLM returned {(int)response.StatusCode}."));
+        }
+
+        response.EnsureSuccessStatusCode();
+        var rawContent = new StringBuilder();
+        var feedbackParser = onFeedbackDelta is null ? null : new FeedbackJsonStreamParser();
+        LlmTokenUsage? usage = null;
+        var truncated = false;
+        var streamEnded = false;
+        var eventData = new StringBuilder();
+        await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var reader = new StreamReader(responseStream);
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
+        {
+            if (line.Length == 0)
+            {
+                if (eventData.Length == 0) continue;
+                if (await ProcessLocalStreamEventAsync(
+                    eventData.ToString(),
+                    rawContent,
+                    feedbackParser,
+                    onFeedbackDelta,
+                    cancellationToken,
+                    value => usage = value,
+                    value => truncated = value))
+                {
+                    streamEnded = true;
+                    break;
+                }
+
+                eventData.Clear();
+                continue;
+            }
+
+            if (line.StartsWith("data:", StringComparison.Ordinal))
+            {
+                if (eventData.Length > 0) eventData.Append('\n');
+                eventData.Append(line.AsSpan(5).TrimStart());
+            }
+        }
+
+        if (!streamEnded && eventData.Length > 0)
+        {
+            streamEnded = await ProcessLocalStreamEventAsync(
+                eventData.ToString(),
+                rawContent,
+                feedbackParser,
+                onFeedbackDelta,
+                cancellationToken,
+                value => usage = value,
+                value => truncated = value);
+        }
+
+        if (!streamEnded)
+        {
+            throw new InvalidOperationException("Local LLM stream ended without a [DONE] marker.");
+        }
+
+        var content = rawContent.ToString();
+        if (truncated)
+        {
+            content = RecoverTruncatedJson(content, task);
+        }
+        else
+        {
+            feedbackParser?.Complete();
+        }
+
+        return ParseCompletion(content, usage, task);
+    }
+
+    private static async Task<bool> ProcessLocalStreamEventAsync(
+        string eventData,
+        StringBuilder rawContent,
+        FeedbackJsonStreamParser? feedbackParser,
+        Func<string, CancellationToken, ValueTask>? onFeedbackDelta,
+        CancellationToken cancellationToken,
+        Action<LlmTokenUsage?> setUsage,
+        Action<bool> setTruncated)
+    {
+        if (eventData == "[DONE]") return true;
+
+        using var document = JsonDocument.Parse(eventData);
+        var root = document.RootElement;
+        if (root.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
+        {
+            setUsage(new LlmTokenUsage(
+                usage.GetProperty("prompt_tokens").GetInt32(),
+                usage.GetProperty("completion_tokens").GetInt32(),
+                usage.GetProperty("total_tokens").GetInt32()));
+        }
+
+        if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
+        {
+            return false;
+        }
+
+        var choice = choices[0];
+        if (choice.TryGetProperty("finish_reason", out var finishReason) &&
+            finishReason.ValueKind == JsonValueKind.String &&
+            finishReason.GetString() == "length")
+        {
+            setTruncated(true);
+        }
+
+        if (choice.TryGetProperty("delta", out var delta) &&
+            delta.TryGetProperty("content", out var contentElement) &&
+            contentElement.ValueKind == JsonValueKind.String)
+        {
+            var content = contentElement.GetString() ?? string.Empty;
+            rawContent.Append(content);
+            var feedbackDelta = feedbackParser?.Append(content);
+            if (!string.IsNullOrEmpty(feedbackDelta))
+            {
+                await onFeedbackDelta!(feedbackDelta, cancellationToken);
+            }
+        }
+
+        return false;
+    }
+
     private static LlmCompletion ParseCompletion(string content, LlmTokenUsage? usage, LlmTask task)
     {
         using var document = JsonDocument.Parse(content);
@@ -215,7 +517,9 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             JsonValueKind.False => false,
             _ => null
         };
-        if (task.EvaluationMode != "submit" || task.SandboxFailed)
+        if (task.EvaluationMode != "submit" ||
+            task.SandboxFailed ||
+            task.ContextMode == "raw_code_only")
         {
             taskSolved = null;
         }

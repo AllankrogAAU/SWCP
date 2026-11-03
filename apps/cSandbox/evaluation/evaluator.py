@@ -17,6 +17,7 @@ def to_result(report: SandboxReport) -> EvaluationResult:
     base: dict[str, Any] = {
         "compile_stdout": compile_.stdout,
         "compile_stderr": compile_.stderr,
+        "compile_exit_code": compile_.rc,
         "compile_ms": compile_.duration_ms,
     }
     if compile_.timed_out:
@@ -63,13 +64,16 @@ def evaluate(
     test_cases: Sequence[SandboxTestCase] = (),
     harness_source: str | None = None,
     run_stdin: str = "",
+    compiler_flags: Sequence[str] = (),
 ) -> EvaluationResult:
     limits = limits or Limits()
     last_error: SandboxError | None = None
     for attempt in (1, 2):
         sandbox = provider.acquire()
         try:
-            report = sandbox.run(source, limits, test_cases, harness_source, run_stdin)
+            report = sandbox.run(
+                source, limits, test_cases, harness_source, run_stdin, compiler_flags
+            )
             if (
                 test_cases
                 and report.compile is not None

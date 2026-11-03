@@ -74,6 +74,17 @@ public static class AssignmentEndpoints
             return Results.BadRequest(new { error = "Harness source must be at most 64 KB UTF-8." });
         }
 
+        if (string.IsNullOrWhiteSpace(request.CompilerProfile))
+        {
+            return Results.BadRequest(new { error = "CompilerProfile must not be empty." });
+        }
+
+        var compilerProfile = request.CompilerProfile.Trim().ToLowerInvariant();
+        if (!CompilerProfiles.IsSupported(compilerProfile))
+        {
+            return Results.BadRequest(new { error = "CompilerProfile must be 'standard' or 'codenet-gnu11'." });
+        }
+
         var assignment = new Assignment
         {
             Id = Guid.NewGuid(),
@@ -82,6 +93,7 @@ public static class AssignmentEndpoints
             TaskFocus = request.TaskFocus,
             TestCasesJson = JsonSerializer.Serialize(testCases, TestCaseJsonOptions),
             HarnessSource = NormalizeHarnessSource(request.HarnessSource),
+            CompilerProfile = compilerProfile,
             CreatedAtUtc = DateTimeOffset.UtcNow
         };
         database.Assignments.Add(assignment);
@@ -201,5 +213,6 @@ public static class AssignmentEndpoints
         assignment.Description,
         assignment.TaskFocus,
         JsonDocument.Parse(assignment.TestCasesJson).RootElement.Clone(),
-        assignment.CreatedAtUtc);
+        assignment.CreatedAtUtc,
+        assignment.CompilerProfile);
 }

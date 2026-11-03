@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import time
 from typing import Any
 import httpx
@@ -147,7 +148,15 @@ class Seeder:
 
     def _save_cache(self, tokens: list[str]) -> None:
         try:
-            with open(self.cache_path, "w", encoding="utf-8") as f:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            if self.cache_path.exists():
+                os.chmod(self.cache_path, 0o600)
+            descriptor = os.open(
+                self.cache_path,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                0o600,
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as f:
                 json.dump(
                     {
                         "target_url": self.config.target_url,
@@ -156,5 +165,6 @@ class Seeder:
                     f,
                     indent=2,
                 )
-        except Exception as e:
-            logger.warning("Could not write token cache: %s", e)
+            os.chmod(self.cache_path, 0o600)
+        except OSError as e:
+            raise RuntimeError(f"Could not securely write token cache at {self.cache_path}: {e}") from e

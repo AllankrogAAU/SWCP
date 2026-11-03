@@ -35,6 +35,14 @@ class ClientSubmissionResult:
     error_message: str | None = None
     terminal_via: str = "unknown"
     ws_events_count: int = 0
+    frontend_ttft_ms: float | None = None
+    streamed_feedback: str = ""
+    context_mode: str = "with_context_transfer"
+    azure_model_key: str | None = None
+    llm_feedback: str | None = None
+    sandbox_output: dict[str, Any] | None = None
+    task_solved: bool | None = None
+    response_collection_error: str | None = None
 
 
 class LoadRunner:
@@ -76,12 +84,19 @@ class LoadRunner:
         client: httpx.AsyncClient,
         archetype: str | None = None,
         timeout_s: float = 240.0,
+        *,
+        source_code: str | None = None,
+        assignment_id: str | None = None,
+        llm_backend: str | None = None,
+        context_mode: str = "with_context_transfer",
+        azure_model_key: str | None = None,
+        action: str = "submit",
     ) -> ClientSubmissionResult:
         """Execute one complete submission lifecycle guaranteed to have a dedicated user."""
         token = await self.user_queue.get()
         seq = await self._next_seq()
         archetype = archetype or pick_archetype(self.config.workload_weights)
-        c_code = get_workload_source(archetype, self.run_id, seq)
+        c_code = source_code if source_code is not None else get_workload_source(archetype, self.run_id, seq)
 
         t0 = time.perf_counter()
         submission_id = ""
@@ -90,10 +105,12 @@ class LoadRunner:
         try:
             # 1. Post submission to API
             payload = {
-                "assignmentId": self.assignment_id,
+                "assignmentId": assignment_id or self.assignment_id,
                 "sourceCode": c_code,
-                "llmBackend": self.config.llm_backend,
-                "action": "submit",
+                "llmBackend": llm_backend or self.config.llm_backend,
+                "action": action,
+                "contextMode": context_mode,
+                "azureModelKey": azure_model_key,
             }
             resp = await client.post(
                 "/api/submissions",
@@ -132,8 +149,17 @@ class LoadRunner:
 
             # 2. Concurrently wait via WebSocket and fallback Polling
             ws_url = self._resolve_ws_url(submission_id)
-            final_status, terminal_via, events_cnt, err = await self._wait_for_completion(
-                submission_id, ws_url, token, client, timeout_s=timeout_s
+            (
+                final_status,
+                terminal_via,
+                events_cnt,
+                err,
+                frontend_ttft_ms,
+                streamed_feedback,
+                final_response,
+                response_collection_error,
+            ) = await self._wait_for_completion(
+                submission_id, ws_url, token, client, t0, timeout_s=timeout_s
             )
 
             client_e2e_ms = (time.perf_counter() - t0) * 1000.0
@@ -149,6 +175,26 @@ class LoadRunner:
                 error_message=err,
                 terminal_via=terminal_via,
                 ws_events_count=events_cnt,
+                frontend_ttft_ms=frontend_ttft_ms,
+                streamed_feedback=streamed_feedback,
+                context_mode=context_mode,
+                azure_model_key=azure_model_key,
+                llm_feedback=(
+                    str(final_response["llmFeedback"])
+                    if final_response and final_response.get("llmFeedback") is not None
+                    else None
+                ),
+                sandbox_output=(
+                    final_response.get("sandboxOutput")
+                    if final_response and isinstance(final_response.get("sandboxOutput"), dict)
+                    else None
+                ),
+                task_solved=(
+                    final_response.get("taskSolved")
+                    if final_response and isinstance(final_response.get("taskSolved"), bool)
+                    else None
+                ),
+                response_collection_error=response_collection_error,
             )
         except Exception as exc:
             client_e2e_ms = (time.perf_counter() - t0) * 1000.0
@@ -163,6 +209,8 @@ class LoadRunner:
                 final_status="FAILED",
                 error_message=str(exc),
                 terminal_via="exception",
+                context_mode=context_mode,
+                azure_model_key=azure_model_key,
             )
         finally:
             # Always return the token back to user pool so user can be reused!
@@ -174,18 +222,26 @@ class LoadRunner:
         ws_url: str,
         token: str,
         client: httpx.AsyncClient,
+        submission_started: float,
         timeout_s: float,
-    ) -> tuple[str, str, int, str | None]:
+    ) -> tuple[str, str, int, str | None, float | None, str, dict[str, Any] | None, str | None]:
         """Dual-wait: WebSocket stream + periodic HTTP polling fallback."""
         event_count = 0
         terminal_status: str | None = None
         terminal_via = "timeout"
         error_msg: str | None = None
+        final_response: dict[str, Any] | None = None
+        response_collection_error: str | None = None
+        frontend_ttft_ms: float | None = None
+        streamed_feedback: list[str] = []
+        feedback_attempt = 0
+        feedback_sequence = 0
 
         done_event = asyncio.Event()
 
         async def ws_listener() -> None:
             nonlocal event_count, terminal_status, terminal_via, error_msg
+            nonlocal frontend_ttft_ms, feedback_attempt, feedback_sequence
             subprotocols = ["swcp", f"bearer.{token}"]
             headers = {"Authorization": f"Bearer {token}"}
 
@@ -214,6 +270,26 @@ class LoadRunner:
                             event_count += 1
                             try:
                                 data = json.loads(message)
+                                event_type = data.get("eventType")
+                                attempt = int(data.get("attempt") or 0)
+                                sequence = int(data.get("sequence") or 0)
+                                if event_type == "feedback.reset" and attempt >= feedback_attempt:
+                                    feedback_attempt = attempt
+                                    feedback_sequence = sequence
+                                    streamed_feedback.clear()
+                                elif event_type == "feedback.delta" and attempt >= feedback_attempt:
+                                    if attempt > feedback_attempt:
+                                        feedback_attempt = attempt
+                                        feedback_sequence = 0
+                                        streamed_feedback.clear()
+                                    if sequence <= feedback_sequence:
+                                        continue
+                                    feedback_sequence = sequence
+                                    delta = str(data.get("message") or "")
+                                    if delta:
+                                        if frontend_ttft_ms is None:
+                                            frontend_ttft_ms = (time.perf_counter() - submission_started) * 1000.0
+                                        streamed_feedback.append(delta)
                                 evt_type = str(data.get("eventType") or data.get("stage") or "").upper()
                                 if evt_type in ("COMPLETED", "FAILED"):
                                     terminal_status = evt_type
@@ -232,7 +308,7 @@ class LoadRunner:
                 await asyncio.sleep(2.0)
 
         async def poll_fallback() -> None:
-            nonlocal terminal_status, terminal_via, error_msg
+            nonlocal terminal_status, terminal_via, error_msg, final_response
             # Initial slight pause to allow WebSocket to establish first
             await asyncio.sleep(1.5)
             while not done_event.is_set():
@@ -244,6 +320,8 @@ class LoadRunner:
                     )
                     if r.status_code == 200:
                         data = r.json()
+                        if isinstance(data, dict):
+                            final_response = data
                         st = str(data.get("status") or data.get("Status") or "").upper()
                         if st in ("COMPLETED", "FAILED"):
                             if not done_event.is_set():
@@ -275,7 +353,32 @@ class LoadRunner:
             poll_task.cancel()
             await asyncio.gather(ws_task, poll_task, return_exceptions=True)
 
-        return terminal_status or "FAILED", terminal_via, event_count, error_msg
+        if final_response is None or terminal_via == "websocket":
+            try:
+                response = await client.get(
+                    f"/api/submissions/{submission_id}",
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=10.0,
+                )
+                if response.status_code == 200 and isinstance(response.json(), dict):
+                    final_response = response.json()
+                else:
+                    response_collection_error = (
+                        f"Final submission response returned HTTP {response.status_code}."
+                    )
+            except httpx.RequestError as exc:
+                response_collection_error = f"Could not retrieve final submission response: {exc}"
+
+        return (
+            terminal_status or "FAILED",
+            terminal_via,
+            event_count,
+            error_msg,
+            frontend_ttft_ms,
+            "".join(streamed_feedback),
+            final_response,
+            response_collection_error,
+        )
 
     # =========================================================================
     # Arrival Pattern 1: Stepped Poisson
@@ -523,4 +626,3 @@ class LoadRunner:
                 await asyncio.sleep(2.0)
 
         return all_results
-

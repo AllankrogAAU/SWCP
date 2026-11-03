@@ -9,7 +9,8 @@ public sealed record SubmissionPrompt(
     string UserPrompt,
     string EvaluationMode,
     bool SandboxFailed,
-    LlmInferenceParameters Parameters);
+    LlmInferenceParameters Parameters,
+    string ContextMode);
 
 public static class SubmissionPromptBuilder
 {
@@ -34,6 +35,13 @@ public static class SubmissionPromptBuilder
         "Review the code for significant non-crashing quality issues first. If significant issues exist, explain them concisely " +
         "in no more than 3 sentences and set taskSolved to null. If no significant issues exist, compare the program with the assignment " +
         "description and set taskSolved to true or false based on whether it is correctly solved. Do not give away the solution.";
+    private const string RawCodeOnlyInstructions =
+        "Review only the C source provided. Do not infer the assignment, execution results, or whether the task is solved. " +
+        "Give concise, actionable feedback and set taskSolved to null.";
+    private const string RawCodeOnlySystemPrompt =
+        "You are an expert C programming tutor. Give accurate, clear, actionable feedback based only on the source code. " +
+        "Return the explanation in the feedback field and the completion judgement in the taskSolved field. " +
+        "Do not put JSON or metadata inside the feedback text.";
 
     private static readonly LlmInferenceParameters HintParameters = new(0.2, 4096, 1.0);
     private static readonly LlmInferenceParameters FailedSubmitParameters = new(0.2, 4096, 1.0);
@@ -49,19 +57,31 @@ public static class SubmissionPromptBuilder
 
         var sandboxFailed = !sandboxResult.Compilation.Success || sandboxResult.TestResults.Any(test => !test.Passed);
         var evaluationMode = submission.Action;
+        var contextMode = submission.ContextMode;
+        if (contextMode is not ("with_context_transfer" or "raw_code_only"))
+        {
+            throw new ArgumentException($"Unsupported context mode '{contextMode}'.", nameof(submission));
+        }
+
+        var rawCodeOnly = contextMode == "raw_code_only";
         var flowInstructions = evaluationMode == "hint"
             ? HintInstructions
-            : sandboxFailed
-                ? FailedSubmitInstructions
-                : SuccessfulSubmitInstructions;
+            : rawCodeOnly
+                ? RawCodeOnlyInstructions
+                : sandboxFailed
+                    ? FailedSubmitInstructions
+                    : SuccessfulSubmitInstructions;
         var parameters = evaluationMode == "hint"
             ? HintParameters
             : sandboxFailed
                 ? FailedSubmitParameters
                 : SuccessfulSubmitParameters;
 
-        var systemPromptSections = new List<string> { BaseSystemPrompt };
-        if (!string.IsNullOrWhiteSpace(assignment.TaskFocus))
+        var systemPromptSections = new List<string>
+        {
+            rawCodeOnly ? RawCodeOnlySystemPrompt : BaseSystemPrompt
+        };
+        if (!rawCodeOnly && !string.IsNullOrWhiteSpace(assignment.TaskFocus))
         {
             systemPromptSections.Add(
             $"{TeacherFocusHeading}\n{assignment.TaskFocus.Trim()}");
@@ -69,9 +89,27 @@ public static class SubmissionPromptBuilder
         systemPromptSections.Add(flowInstructions);
 
         var systemPrompt = string.Join("\n\n", systemPromptSections);
-        var userPrompt =
-            $"Assignment:\n{assignment.Description}\n\nC source:\n```c\n{submission.SourceCode}\n```\n\nSandbox output:\n{JsonSerializer.Serialize(sandboxResult)}";
+        var userPrompt = rawCodeOnly
+            ? $"C source:\n```c\n{submission.SourceCode}\n```"
+            : $"Assignment:\n{assignment.Description}\n\nC source:\n```c\n{submission.SourceCode}\n```\n\nSandbox output:\n{JsonSerializer.Serialize(sandboxResult)}";
+        if (!rawCodeOnly && sandboxResult.Compilation.Success)
+        {
+            var diagnostics = new List<string>();
+            if (!string.IsNullOrWhiteSpace(sandboxResult.Compilation.Stderr))
+            {
+                diagnostics.Add(sandboxResult.Compilation.Stderr.Trim());
+            }
+            if (!string.IsNullOrWhiteSpace(sandboxResult.LintOutput))
+            {
+                diagnostics.Add(sandboxResult.LintOutput.Trim());
+            }
+            if (diagnostics.Count > 0)
+            {
+                var diagnosticText = string.Join("\n", diagnostics);
+                userPrompt += $"\n\nNon-fatal compiler/lint warnings (compilation succeeded):\n{diagnosticText}";
+            }
+        }
 
-        return new SubmissionPrompt(systemPrompt, userPrompt, evaluationMode, sandboxFailed, parameters);
+        return new SubmissionPrompt(systemPrompt, userPrompt, evaluationMode, sandboxFailed, parameters, contextMode);
     }
 }

@@ -7,13 +7,16 @@ CAP=${5:-65536}
 TEST_COUNT=${6:-0}
 HARNESS_LENGTH=${7:-0}
 RUN_INPUT_LENGTH=${8:-0}
-W=/tmp/w
+FLAGS_LENGTH=${9:-0}
+W="/tmp/w-$$"
 
 mkdir -p "$W" && cd "$W" || exit 90
+trap 'rm -rf "$W"' EXIT
+head -c "$FLAGS_LENGTH" > "$W/compiler.flags"
 head -c "$N" > submission.c
 head -c "$HARNESS_LENGTH" > harness.c
 head -c "$RUN_INPUT_LENGTH" > run.in
-shift 8
+shift 9
 
 now_ms() { date +%s%3N; }
 emit() { printf '%s=%s\n' "$1" "$2"; }
@@ -24,8 +27,23 @@ phase() {
     input=$3
     shift 3
     started=$(now_ms)
-    timeout -k 1 "$limit" "$@" < "$input" > "$W/$name.out" 2> "$W/$name.err"
+    if [ "$name" = compile ] && [ -s "$W/compiler.flags" ]; then
+        timeout -k 1 "$limit" "$@" < "$W/compiler.flags" > "$W/$name.out" 2> "$W/$name.err"
+    else
+        case "$name" in
+            run|test_*)
+                /usr/bin/time -f '%M' -o "$W/$name.memory_kb" \
+                    timeout -k 1 "$limit" "$@" < "$input" > "$W/$name.out" 2> "$W/$name.err"
+                ;;
+            *)
+                timeout -k 1 "$limit" "$@" < "$input" > "$W/$name.out" 2> "$W/$name.err"
+                ;;
+        esac
+    fi
     rc=$?
+    if [ "$name" = compile ] && [ -s "$W/compiler.exit" ]; then
+        rc=$(cat "$W/compiler.exit")
+    fi
     case "$name" in
         run|test_*)
             if [ "$rc" -eq 153 ]; then rc=124; fi
@@ -36,6 +54,9 @@ phase() {
     emit "${name}_ms" "$((finished - started))"
     emit "${name}_stdout" "$(head -c "$CAP" "$W/$name.out" | base64 -w0)"
     emit "${name}_stderr" "$(head -c "$CAP" "$W/$name.err" | base64 -w0)"
+    if [ -s "$W/$name.memory_kb" ]; then
+        emit "${name}_memory_kb" "$(tail -n 1 "$W/$name.memory_kb")"
+    fi
     return "$rc"
 }
 
@@ -46,9 +67,21 @@ milliseconds_to_seconds() {
 }
 
 if [ "$HARNESS_LENGTH" -gt 0 ]; then
-    phase compile "$COMPILE_TIMEOUT" /dev/null gcc -Wall -Wextra submission.c harness.c -o "$W/prog"
+    if [ -s "$W/compiler.flags" ]; then
+        phase compile "$COMPILE_TIMEOUT" /dev/null \
+            xargs -0 sh -c 'gcc "$@"; rc=$?; printf "%s\n" "$rc" > compiler.exit; exit 0' \
+            sh submission.c harness.c -o "$W/prog"
+    else
+        phase compile "$COMPILE_TIMEOUT" /dev/null gcc -Wall -Wextra submission.c harness.c -o "$W/prog"
+    fi
 else
-    phase compile "$COMPILE_TIMEOUT" /dev/null gcc -Wall -Wextra submission.c -o "$W/prog"
+    if [ -s "$W/compiler.flags" ]; then
+        phase compile "$COMPILE_TIMEOUT" /dev/null \
+            xargs -0 sh -c 'gcc "$@"; rc=$?; printf "%s\n" "$rc" > compiler.exit; exit 0' \
+            sh submission.c -o "$W/prog"
+    else
+        phase compile "$COMPILE_TIMEOUT" /dev/null gcc -Wall -Wextra submission.c -o "$W/prog"
+    fi
 fi
 if [ $? -ne 0 ]; then
     exit 0

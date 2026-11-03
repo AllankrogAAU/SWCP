@@ -36,6 +36,7 @@ public sealed class Assignment
     public string TaskFocus { get; set; } = string.Empty;
     public string TestCasesJson { get; set; } = "[]";
     public string? HarnessSource { get; set; }
+    public string CompilerProfile { get; set; } = CompilerProfiles.Standard;
     public DateTimeOffset CreatedAtUtc { get; set; }
 }
 
@@ -48,6 +49,8 @@ public sealed class Submission
     public string Action { get; set; } = "submit";
     public string LlmBackend { get; set; } = "azure";
     public string StandardInput { get; set; } = string.Empty;
+    public string ContextMode { get; set; } = "with_context_transfer";
+    public string? AzureModelKey { get; set; }
     public SubmissionStatus Status { get; set; }
     public int RetryCount { get; set; }
     public string? SandboxOutputJson { get; set; }

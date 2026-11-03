@@ -133,11 +133,18 @@ class KubePodSandbox:
         test_cases: Sequence[SandboxTestCase] = (),
         harness_source: str | None = None,
         run_stdin: str = "",
+        compiler_flags: Sequence[str] = (),
     ) -> SandboxReport:
+        if any("\x00" in flag for flag in compiler_flags):
+            raise ValueError("Compiler flags must not contain NUL characters.")
         source_data = source.encode("utf-8")
         harness_data = (harness_source or "").encode("utf-8")
         run_input_data = run_stdin.encode("utf-8")
-        input_data = bytearray(source_data)
+        flags_data = b"\0".join(flag.encode("utf-8") for flag in compiler_flags)
+        if flags_data:
+            flags_data += b"\0"
+        input_data = bytearray(flags_data)
+        input_data.extend(source_data)
         input_data.extend(harness_data)
         input_data.extend(run_input_data)
         command = [
@@ -150,6 +157,7 @@ class KubePodSandbox:
             str(len(test_cases)),
             str(len(harness_data)),
             str(len(run_input_data)),
+            str(len(flags_data)),
         ]
         for test_case in test_cases:
             case_input = test_case.stdin.encode("utf-8")

@@ -1,4 +1,8 @@
 import base64
+import os
+from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
@@ -20,8 +24,14 @@ def b64(text: str) -> str:
     return base64.b64encode(text.encode()).decode()
 
 
-def phase(rc: int = 0, out: str = "", err: str = "", ms: int = 5) -> PhaseResult:
-    return PhaseResult(rc=rc, duration_ms=ms, stdout=out, stderr=err)
+def phase(
+    rc: int = 0,
+    out: str = "",
+    err: str = "",
+    ms: int = 5,
+    memory_kb: int | None = None,
+) -> PhaseResult:
+    return PhaseResult(rc=rc, duration_ms=ms, stdout=out, stderr=err, memory_kb=memory_kb)
 
 
 class FakeSandbox:
@@ -36,6 +46,7 @@ class FakeSandbox:
         test_cases=(),
         harness_source=None,
         run_stdin="",
+        compiler_flags=(),
     ) -> SandboxReport:
         if isinstance(self.report, Exception):
             raise self.report
@@ -96,11 +107,20 @@ def test_parse_report_decodes_test_runs() -> None:
     assert report.test_runs == (phase(out="5\n", ms=7), phase(rc=124, ms=2000))
 
 
+def test_parse_report_reads_compile_exit_code_and_peak_memory() -> None:
+    report = parse_report(
+        "compile_rc=0\ncompile_ms=1\nrun_rc=0\nrun_ms=2\nrun_memory_kb=4096\n"
+    )
+    assert report.compile is not None and report.compile.rc == 0
+    assert report.run is not None and report.run.memory_kb == 4096
+
+
 def test_success() -> None:
     result = evaluate("x", FakeProvider(SandboxReport(phase(), phase(err="note"), phase(0, "ok"))))
     assert result.status is Status.SUCCESS
     assert result.exit_code == 0 and result.stdout == "ok"
     assert result.lint_output == "note"
+    assert result.compile_exit_code == 0
 
 
 def test_segfault_exit_code_preserved() -> None:
@@ -173,6 +193,66 @@ def test_worker_compares_each_test_case_output(monkeypatch) -> None:
 
     assert [test.passed for test in result.testResults] == [True, False]
     assert [test.stdout for test in result.testResults] == ["5\n", "13\n"]
+    assert result.errorClassification == "wrong_answer"
+
+
+def test_worker_classifies_test_memory_limit_exceeded(monkeypatch) -> None:
+    task = SandboxTask(
+        submissionId="00000000-0000-0000-0000-000000000001",
+        assignmentId="00000000-0000-0000-0000-000000000002",
+        source="int main(void) { return 0; }",
+        compilerFlags=["-std=gnu11"],
+        testCases=[
+            SandboxTestCase(
+                stdin="",
+                expectedStdout="ok\n",
+                timeoutMilliseconds=2000,
+                memoryLimitMegabytes=64,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "worker.evaluate",
+        lambda *_args: EvaluationResult(
+            status=Status.SUCCESS,
+            test_runs=(phase(out="ok\n", memory_kb=64 * 1024),),
+        ),
+    )
+
+    result = evaluate_task(task, object())
+
+    assert result.errorClassification == "memory_limit_exceeded"
+    assert result.testResults[0].passed is False
+    assert result.testResults[0].memoryConsumedMegabytes == 64
+
+
+def test_worker_classifies_memory_allocation_failure(monkeypatch) -> None:
+    task = SandboxTask(
+        submissionId="00000000-0000-0000-0000-000000000001",
+        assignmentId="00000000-0000-0000-0000-000000000002",
+        source="int main(void) { return 0; }",
+        compilerFlags=["-std=gnu11"],
+        testCases=[
+            SandboxTestCase(
+                stdin="",
+                expectedStdout="ok\n",
+                timeoutMilliseconds=2000,
+                memoryLimitMegabytes=64,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "worker.evaluate",
+        lambda *_args: EvaluationResult(
+            status=Status.SUCCESS,
+            test_runs=(phase(rc=126, err="Cannot allocate memory"),),
+        ),
+    )
+
+    result = evaluate_task(task, object())
+
+    assert result.errorClassification == "memory_limit_exceeded"
+    assert result.testResults[0].passed is False
 
 
 def test_worker_passes_assignment_harness_and_run_stdin(monkeypatch) -> None:
@@ -187,12 +267,13 @@ def test_worker_passes_assignment_harness_and_run_stdin(monkeypatch) -> None:
     )
     received = {}
 
-    def fake_evaluate(source, provider, limits, test_cases, harness_source, run_stdin):
+    def fake_evaluate(source, provider, limits, test_cases, harness_source, run_stdin, compiler_flags):
         received.update(
             source=source,
             test_cases=test_cases,
             harness_source=harness_source,
             run_stdin=run_stdin,
+            compiler_flags=compiler_flags,
         )
         return EvaluationResult(
             status=Status.SUCCESS,
@@ -211,6 +292,7 @@ def test_worker_passes_assignment_harness_and_run_stdin(monkeypatch) -> None:
         "test_cases": [],
         "harness_source": task.harnessSource,
         "run_stdin": "2 3\n",
+        "compiler_flags": ["-Wall", "-Wextra"],
     }
     assert result.testResults[0].stdout == "5\n"
 
@@ -284,16 +366,83 @@ def test_pod_sandbox_closes_stdin_after_sending_input(monkeypatch) -> None:
             self.closed = True
 
     websocket = FakeWebSocket()
-    monkeypatch.setattr("sandbox.k8s_pod.stream", lambda *_args, **_kwargs: websocket)
+    captured = {}
+
+    def fake_stream(*_args, **kwargs):
+        captured.update(kwargs)
+        return websocket
+
+    monkeypatch.setattr("sandbox.k8s_pod.stream", fake_stream)
     monkeypatch.setattr("sandbox.k8s_pod.client.ApiClient", lambda: object())
     monkeypatch.setattr("sandbox.k8s_pod.client.CoreV1Api", lambda _api: FakeApi())
 
     sandbox = KubePodSandbox(PodConfig(), "sbx-1", object())
-    sandbox.run("int main(void) { return 0; }", Limits(), run_stdin="input")
+    sandbox.run(
+        "int main(void) { return 0; }",
+        Limits(),
+        run_stdin="input",
+        compiler_flags=["-std=gnu11", "-lm"],
+    )
 
+    assert websocket.input.startswith(b"-std=gnu11\0-lm\0int main")
     assert websocket.input.endswith(b"input")
+    assert captured["command"][9] == str(len(b"-std=gnu11\0-lm\0"))
     assert websocket.closed_channel == 0
     assert websocket.closed
+
+
+def test_pod_sandbox_rejects_nul_in_compiler_flag() -> None:
+    sandbox = KubePodSandbox(PodConfig(), "sbx-1", object())
+    with pytest.raises(ValueError, match="NUL"):
+        sandbox.run("int main(void) { return 0; }", Limits(), compiler_flags=["-DNAME=bad\x00flag"])
+
+
+@pytest.mark.skipif(
+    not shutil.which("gcc") or not shutil.which("timeout") or not Path("/usr/bin/time").is_file(),
+    reason="GCC and GNU time are required for runtime-script verification",
+)
+def test_runtime_script_applies_flags_and_preserves_gcc_status(tmp_path: Path) -> None:
+    runner_script = Path(__file__).parents[1] / "runner" / "run-submission.sh"
+    cppcheck = tmp_path / "cppcheck"
+    cppcheck.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+    cppcheck.chmod(0o755)
+    environment = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}")
+    compiler_flags = b"-std=gnu11\0-Wall\0-Wextra\0-O2\0-lm\0"
+    source = (
+        b'#include <stdio.h>\n#warning "non-fatal diagnostic"\n'
+        b'int main(void) { puts("gnu11"); return 0; }\n'
+    )
+    arguments = [
+        "/bin/sh", str(runner_script), str(len(source)), "10", "10", "2",
+        "65536", "1", "0", "0", str(len(compiler_flags)), "0", "2000", "64",
+    ]
+
+    successful = subprocess.run(
+        arguments,
+        input=compiler_flags + source,
+        capture_output=True,
+        env=environment,
+        check=True,
+        text=False,
+    )
+    success_report = parse_report(successful.stdout.decode())
+    assert success_report.compile is not None and success_report.compile.rc == 0
+    assert "non-fatal diagnostic" in success_report.compile.stderr
+    assert success_report.test_runs[0].stdout == "gnu11\n"
+    assert success_report.test_runs[0].memory_kb is not None
+
+    broken_source = b"int main(void) {\n"
+    arguments[2] = str(len(broken_source))
+    failed = subprocess.run(
+        arguments,
+        input=compiler_flags + broken_source,
+        capture_output=True,
+        env=environment,
+        check=True,
+        text=False,
+    )
+    failure_report = parse_report(failed.stdout.decode())
+    assert failure_report.compile is not None and failure_report.compile.rc == 1
 
 
 def test_lint_timeout_is_reported_as_text() -> None:

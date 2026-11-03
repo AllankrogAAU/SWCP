@@ -51,6 +51,8 @@ let socket: WebSocket | undefined
 let reconnectTimer: number | undefined
 let reconnectAttempts = 0
 let pollGeneration = 0
+let feedbackAttempt = 0
+let feedbackSequence = 0
 
 function selectAssignment(id: string) {
   selectedId.value = id
@@ -107,6 +109,30 @@ function logout() {
 }
 
 function onProgress(notification: SubmissionNotification) {
+  if (notification.eventType === 'feedback.reset') {
+    const attempt = notification.attempt ?? feedbackAttempt + 1
+    if (attempt < feedbackAttempt) return
+    feedbackAttempt = attempt
+    feedbackSequence = notification.sequence ?? 0
+    feedback.value = ''
+    return
+  }
+
+  if (notification.eventType === 'feedback.delta') {
+    const attempt = notification.attempt ?? feedbackAttempt
+    if (attempt < feedbackAttempt) return
+    if (attempt > feedbackAttempt) {
+      feedbackAttempt = attempt
+      feedbackSequence = 0
+      feedback.value = ''
+    }
+    const sequence = notification.sequence
+    if (sequence !== undefined && sequence !== null && sequence <= feedbackSequence) return
+    feedbackSequence = sequence ?? feedbackSequence + 1
+    feedback.value += notification.message
+    return
+  }
+
   progress.value = notification.message
   if (notification.stage) status.value = notification.stage as SubmissionStatus
 }
@@ -169,6 +195,9 @@ function trackSubmission(
   action: SubmissionAction,
 ) {
   submissionId.value = accepted.submissionId
+  feedbackAttempt = 0
+  feedbackSequence = 0
+  feedback.value = ''
   status.value = accepted.status
   progress.value =
     action === 'run'

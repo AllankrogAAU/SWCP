@@ -43,4 +43,38 @@ public class SubmissionEvents
             headers: headers,
             cancellationToken: cancellationToken);
     }
+
+    public virtual async Task PublishFeedbackStreamAsync(
+        LlmFeedbackStreamMessage update,
+        CancellationToken cancellationToken)
+    {
+        if (_nats is null) return;
+
+        var eventType = update.EventType switch
+        {
+            "reset" => "feedback.reset",
+            "delta" => "feedback.delta",
+            _ => throw new ArgumentOutOfRangeException(nameof(update), update.EventType, "Unknown feedback stream event.")
+        };
+        var notification = new SubmissionNotification(
+            update.SubmissionId,
+            eventType,
+            "LLM_PROCESSING",
+            update.Delta,
+            90,
+            DateTimeOffset.UtcNow,
+            update.Attempt,
+            update.Sequence);
+        var headers = new NatsHeaders();
+        if (!string.IsNullOrWhiteSpace(update.TraceParent))
+        {
+            headers.Add(Messaging.TraceParentHeader, update.TraceParent);
+        }
+
+        await _nats.PublishAsync(
+            Messaging.NotificationSubject(update.SubmissionId),
+            notification,
+            headers: headers,
+            cancellationToken: cancellationToken);
+    }
 }

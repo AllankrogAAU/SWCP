@@ -29,6 +29,7 @@ class Sandbox(Protocol):
         test_cases: Sequence[SandboxTestCase] = (),
         harness_source: str | None = None,
         run_stdin: str = "",
+        compiler_flags: Sequence[str] = (),
     ) -> SandboxReport: ...
 
     def destroy(self) -> None: ...
