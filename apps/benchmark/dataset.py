@@ -17,6 +17,8 @@ from typing import Iterable
 PROBLEM_ID = re.compile(r"p\d{5}\Z")
 SUBMISSION_ID = re.compile(r"s\d{9}\Z")
 DEFAULT_STATUSES = ("AC", "CE", "RE", "WA", "TLE", "MLE")
+# Statuses used by the feedback-quality benchmark (20 unaltered submissions each by default).
+RUBRIC_STATUSES = ("CE", "RE", "WA", "AC")
 STATUS_MAP = {
     "accepted": "AC",
     "compile error": "CE",

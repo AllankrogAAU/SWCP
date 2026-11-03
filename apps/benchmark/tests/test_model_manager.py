@@ -6,10 +6,24 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from apps.benchmark.model_manager import LocalModelManager, ModelSpec
+from apps.benchmark.model_manager import MODELS, LocalModelManager, ModelSpec
 
 
 class ModelManagerTests(unittest.TestCase):
+    def test_installed_models_are_selectable_with_matching_local_paths(self) -> None:
+        expected = {
+            "qwen2.5-coder-3b": "Qwen2.5-Coder-3B-Instruct-AWQ",
+            "qwen2.5-coder-7b": "Qwen2.5-Coder-7B-Instruct-AWQ",
+            "qwen2.5-coder-14b": "Qwen2.5-Coder-14B-Instruct-AWQ",
+            "meta-llama-3.1-8b": "Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+            "deepseek-r1-distill-qwen-7b": "deepseek-r1-distill-qwen-7b-awq",
+        }
+
+        for key, path in expected.items():
+            with self.subTest(model=key):
+                self.assertEqual("local", MODELS[key].backend)
+                self.assertEqual(path, MODELS[key].vllm_path)
+
     def test_restore_removes_overrides_to_recover_configmap_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             model_root = Path(temp_dir)

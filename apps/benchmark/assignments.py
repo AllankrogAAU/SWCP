@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import base64
+import json
+import logging
 import os
+import time
 from typing import Any
 
 import httpx
 
 from apps.benchmark.dataset import CodeNetSample
+
+LOGGER = logging.getLogger(__name__)
 
 FIXTURE_TITLE = "[SWCP benchmark] Pipeline fixtures"
 FIXTURE_DESCRIPTION = (
@@ -20,6 +26,46 @@ FIXTURE_CASES = [{
     "timeoutMilliseconds": 2_000,
     "memoryLimitMegabytes": 128,
 }]
+
+
+def _jwt_expiry(token: str) -> float | None:
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return float(json.loads(base64.urlsafe_b64decode(payload))["exp"])
+    except (IndexError, KeyError, ValueError, TypeError):
+        return None
+
+
+def resolve_teacher_token(base_url: str, min_validity_seconds: float = 600.0) -> str:
+    """Return ``BENCHMARK_TEACHER_TOKEN`` while it is valid; otherwise log in as the dev teacher.
+
+    The fallback uses ``DEV_TEACHER_USERNAME``/``DEV_TEACHER_EMAIL`` and ``DEV_TEACHER_PASSWORD``
+    (the seeded development teacher), so long unattended runs do not fail on an expired JWT.
+    """
+    token = os.getenv("BENCHMARK_TEACHER_TOKEN")
+    expiry = _jwt_expiry(token) if token else None
+    if token and (expiry is None or expiry - time.time() > min_validity_seconds):
+        return token
+    username = os.getenv("DEV_TEACHER_USERNAME") or os.getenv("DEV_TEACHER_EMAIL")
+    password = os.getenv("DEV_TEACHER_PASSWORD")
+    if not username or not password:
+        raise RuntimeError(
+            "BENCHMARK_TEACHER_TOKEN is missing or expired; set a fresh teacher token or "
+            "DEV_TEACHER_USERNAME/DEV_TEACHER_EMAIL and DEV_TEACHER_PASSWORD."
+        )
+    response = httpx.post(
+        f"{base_url.rstrip('/')}/api/auth/login",
+        json={"username": username, "password": password},
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    data = response.json()
+    fresh = data.get("accessToken") or data.get("token")
+    if not fresh:
+        raise RuntimeError("Teacher login succeeded but returned no access token.")
+    LOGGER.info("BENCHMARK_TEACHER_TOKEN missing or expired; obtained a fresh teacher token by login.")
+    return str(fresh)
 
 
 class AssignmentProvisioner:

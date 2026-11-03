@@ -35,7 +35,7 @@ class GpuSampler:
             sampled_at = datetime.now(timezone.utc).isoformat()
             process = await asyncio.create_subprocess_exec(
                 "nvidia-smi",
-                "--query-gpu=index,name,memory.used,memory.total,utilization.gpu",
+                "--query-gpu=index,name,memory.used,memory.total,utilization.gpu,power.draw",
                 "--format=csv,noheader,nounits",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -47,9 +47,13 @@ class GpuSampler:
             if not lines:
                 raise RuntimeError("nvidia-smi returned no GPU samples.")
             for line in lines:
-                parts = [part.strip() for part in line.split(",", maxsplit=4)]
-                if len(parts) != 5:
+                parts = [part.strip() for part in line.split(",")]
+                if len(parts) < 5:
                     raise RuntimeError(f"Unexpected nvidia-smi sample: {line}")
+                try:
+                    power_watts = float(parts[5]) if len(parts) > 5 else None
+                except ValueError:
+                    power_watts = None
                 record = {
                     "record_type": "gpu_sample",
                     "model_key": model_key,
@@ -59,6 +63,7 @@ class GpuSampler:
                     "memory_used_mb": int(parts[2]),
                     "memory_total_mb": int(parts[3]),
                     "utilization_percent": int(parts[4]),
+                    "power_watts": power_watts,
                 }
                 self.samples.append(record)
                 writer.write(record)
@@ -226,6 +231,7 @@ def summarize_gpu_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
         return {"available": False, "error": "No GPU samples were collected."}
     memory = [int(sample["memory_used_mb"]) for sample in samples]
     utilization = [int(sample["utilization_percent"]) for sample in samples]
+    power = [float(sample["power_watts"]) for sample in samples if sample.get("power_watts") is not None]
     return {
         "available": True,
         "sample_count": len(samples),
@@ -234,4 +240,6 @@ def summarize_gpu_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "memory_mean_mb": sum(memory) / len(memory),
         "utilization_peak_percent": max(utilization),
         "utilization_mean_percent": sum(utilization) / len(utilization),
+        "power_mean_watts": sum(power) / len(power) if power else None,
+        "power_peak_watts": max(power) if power else None,
     }
