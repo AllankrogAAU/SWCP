@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from enum import Enum
 
+from contracts import StaticAnalysisWarning
+
 
 class Status(str, Enum):
     SUCCESS = "success"
