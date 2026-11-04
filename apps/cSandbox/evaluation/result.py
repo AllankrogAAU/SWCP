@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from enum import Enum
 
+from contracts import StaticAnalysisWarning
+
 
 class Status(str, Enum):
     SUCCESS = "success"
@@ -38,6 +40,7 @@ class EvaluationResult:
     compile_exit_code: int | None = None
     compile_ms: int | None = None
     lint_output: str | None = None
+    static_analysis: tuple[StaticAnalysisWarning, ...] = ()
     exit_code: int | None = None
     stdout: str | None = None
     stderr: str | None = None

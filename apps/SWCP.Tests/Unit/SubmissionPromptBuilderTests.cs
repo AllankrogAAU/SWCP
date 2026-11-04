@@ -47,7 +47,7 @@ public sealed class SubmissionPromptBuilderTests
         Assert.Equal("submit", prompt.EvaluationMode);
         Assert.False(prompt.SandboxFailed);
         Assert.Contains("Focus on recursive stack efficiency", prompt.SystemPrompt);
-        Assert.Contains("Review the code for significant non-crashing quality issues first", prompt.SystemPrompt);
+        Assert.Contains("Review the submission in priority order", prompt.SystemPrompt);
         Assert.Contains("int main()", prompt.UserPrompt);
         Assert.Contains("Fibonacci", prompt.UserPrompt);
     }
@@ -81,7 +81,7 @@ public sealed class SubmissionPromptBuilderTests
         var prompt = SubmissionPromptBuilder.Build(assignment, submission, sandboxResult);
 
         Assert.Equal("hint", prompt.EvaluationMode);
-        Assert.Contains("The student requested a hint. Give one concise next step", prompt.SystemPrompt);
+        Assert.Contains("The student requested a hint. Use the assignment, source, and available tool output", prompt.SystemPrompt);
     }
 
     [Fact]
@@ -126,5 +126,31 @@ public sealed class SubmissionPromptBuilderTests
             SubmissionPromptBuilder.Build(assignment, submission, sandboxResult));
 
         Assert.Contains("Only Hint and Submit actions create LLM prompts", exception.Message);
+    }
+
+    [Fact]
+    public void Build_CompactsSandboxOutput_WhileRetainingFailuresAndResourceEvidence()
+    {
+        var assignment = CreateAssignment();
+        var submission = CreateSubmission("submit");
+        var sandboxResult = new SandboxResult(
+            Guid.NewGuid(),
+            new CompilationResult(true, "", "", 0, 15),
+            [new StaticAnalysisWarning(10, 5, "warning", "unused variable")],
+            [
+                new SandboxTestResult(true, "passing output", "", 0, 10, 3.5),
+                new SandboxTestResult(false, "failure output", "runtime error", 1, 21, 182)
+            ],
+            "test_failure");
+
+        var prompt = SubmissionPromptBuilder.Build(assignment, submission, sandboxResult);
+
+        Assert.DoesNotContain("passing output", prompt.UserPrompt);
+        Assert.Contains("failure output", prompt.UserPrompt);
+        Assert.Contains("runtime error", prompt.UserPrompt);
+        Assert.Contains("unused variable", prompt.UserPrompt);
+        Assert.Contains("maxMemoryConsumedMegabytes", prompt.UserPrompt);
+        Assert.Contains("182", prompt.UserPrompt);
+        Assert.Contains("maxDurationMilliseconds", prompt.UserPrompt);
     }
 }

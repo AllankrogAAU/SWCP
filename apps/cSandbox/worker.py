@@ -205,7 +205,7 @@ def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
                     exitCode=result.compile_exit_code,
                     durationMilliseconds=result.compile_ms,
                 ),
-                staticAnalysis=[],
+                staticAnalysis=list(result.static_analysis),
                 testResults=test_results,
                 errorClassification=dynamic_classification,
                 lintOutput=result.lint_output,
