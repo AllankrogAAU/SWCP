@@ -4,12 +4,14 @@ import queue
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 from kubernetes.stream import stream
 
+from contracts import SandboxTestCase
 from evaluation.result import SandboxReport
 from sandbox.interface import Limits, SandboxError, SandboxStartError
 from sandbox.report import parse_report
@@ -124,18 +126,47 @@ class KubePodSandbox:
         self._api = api
         self.created_at = time.monotonic()
 
-    def run(self, source: str, limits: Limits) -> SandboxReport:
-        data = source.encode("utf-8")
+    def run(
+        self,
+        source: str,
+        limits: Limits,
+        test_cases: Sequence[SandboxTestCase] = (),
+        harness_source: str | None = None,
+        run_stdin: str = "",
+    ) -> SandboxReport:
+        source_data = source.encode("utf-8")
+        harness_data = (harness_source or "").encode("utf-8")
+        run_input_data = run_stdin.encode("utf-8")
+        input_data = bytearray(source_data)
+        input_data.extend(harness_data)
+        input_data.extend(run_input_data)
         command = [
             "run-submission",
-            str(len(data)),
+            str(len(source_data)),
             str(limits.compile_timeout_s),
             str(limits.lint_timeout_s),
             str(limits.run_timeout_s),
             str(limits.output_cap_bytes),
+            str(len(test_cases)),
+            str(len(harness_data)),
+            str(len(run_input_data)),
         ]
+        for test_case in test_cases:
+            case_input = test_case.stdin.encode("utf-8")
+            input_data.extend(case_input)
+            command.extend(
+                [
+                    str(len(case_input)),
+                    str(test_case.timeoutMilliseconds),
+                    str(test_case.memoryLimitMegabytes),
+                ]
+            )
         deadline_s = (
-            limits.compile_timeout_s + limits.lint_timeout_s + limits.run_timeout_s + 15
+            limits.compile_timeout_s
+            + limits.lint_timeout_s
+            + (limits.run_timeout_s if not test_cases else 0)
+            + sum(test_case.timeoutMilliseconds / 1000 + 1 for test_case in test_cases)
+            + 15
         )
         exec_api = client.CoreV1Api(client.ApiClient())
         try:
@@ -152,7 +183,8 @@ class KubePodSandbox:
                 _preload_content=False,
             )
             try:
-                ws.write_stdin(data)
+                ws.write_stdin(bytes(input_data))
+                ws.close_channel(0)
                 deadline = time.monotonic() + deadline_s
                 chunks: list[str] = []
                 while ws.is_open():

@@ -1,0 +1,477 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "title": "Pipeline Performance & Bottlenecks",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "50th and 95th percentile duration of each pipeline stage and total pipeline end-to-end. Spikes indicate processing slowdowns.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          },
+          "unit": "ms"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "last"
+          ],
+          "sortBy": "Last",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95, {namespace=\"swcp\"} | regexp `.*\"stage\":\\s*\"(?P<stage>[^\"]+)\".*\"duration_ms\":\\s*(?P<duration_ms>\\d+)` | unwrap duration_ms [5m]) by (stage)",
+          "legendFormat": "p95 {{stage}}"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.50, {namespace=\"swcp\"} | regexp `.*\"stage\":\\s*\"(?P<stage>[^\"]+)\".*\"duration_ms\":\\s*(?P<duration_ms>\\d+)` | unwrap duration_ms [5m]) by (stage)",
+          "legendFormat": "p50 {{stage}}"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95, {namespace=\"swcp\"} |= \"pipeline.completed\" | regexp `.*\"duration_ms\":\\s*(?P<duration_ms>\\d+)` | unwrap duration_ms [5m])",
+          "legendFormat": "p95 TOTAL Pipeline"
+        }
+      ],
+      "title": "Stage Duration Percentiles (p50 vs p95)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Time tasks sat waiting in NATS JetStream before worker pickup. Spikes indicate worker starvation under load.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 200
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          },
+          "unit": "ms"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "max",
+            "last"
+          ],
+          "sortBy": "Last",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95, {namespace=\"swcp\"} | regexp `.*\"stage\":\\s*\"(?P<stage>[^\"]+)\".*\"queue_wait_ms\":\\s*(?P<queue_wait_ms>\\d+)` | unwrap queue_wait_ms [5m]) by (stage)",
+          "legendFormat": "Queue Wait p95 ({{stage}})"
+        }
+      ],
+      "title": "NATS Queue Wait Time (Worker Pool Bottleneck)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "id": 101,
+      "title": "Throughput & Cluster Resources",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 10
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max",
+            "mean"
+          ],
+          "sortBy": "Last",
+          "sortDesc": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate({namespace=\"swcp\"} |= \"pipeline.stage.completed\" | regexp `.*\"stage\":\\s*\"(?P<stage>[^\"]+)\".*` [1m])) by (stage)",
+          "legendFormat": "{{stage}} completed/s"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate({namespace=\"swcp\"} |= \"pipeline.stage.failed\" | regexp `.*\"stage\":\\s*\"(?P<stage>[^\"]+)\".*` [1m])) by (stage)",
+          "legendFormat": "{{stage}} FAILED/s"
+        }
+      ],
+      "title": "Pipeline Stage Throughput (Rate/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "percent"
+        }
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 10
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max",
+            "mean"
+          ],
+          "sortBy": "Last",
+          "sortDesc": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"swcp\", container!=\"\", container!=\"POD\"}[1m])) by (${group_by}) ${cpu_multiplier}",
+          "legendFormat": "{{${group_by}}}"
+        }
+      ],
+      "title": "SWCP CPU Usage (${group_by})",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 10
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "sortBy": "Last",
+          "sortDesc": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(container_memory_working_set_bytes{namespace=\"swcp\", container!=\"\", container!=\"POD\"}) by (${group_by})",
+          "legendFormat": "{{${group_by}}}"
+        }
+      ],
+      "title": "SWCP Working Set Memory (${group_by})",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "id": 102,
+      "title": "Live Trace & Log Explorer",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "id": 6,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "{namespace=\"swcp\"} |= \"pipeline.\""
+        }
+      ],
+      "title": "Pipeline Events Stream (Click any TraceID badge to view Tempo waterfall)",
+      "type": "logs"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": [
+    "swcp",
+    "stress-test",
+    "pipeline"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m"
+    ]
+  },
+  "timezone": "browser",
+  "title": "SWCP Pipeline Stress Test & Timings",
+  "uid": "swcp-pipeline-timings",
+  "version": 3,
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "Microservice (container)",
+          "value": "container"
+        },
+        "hide": 0,
+        "label": "Group By",
+        "name": "group_by",
+        "options": [
+          {
+            "selected": true,
+            "text": "Microservice (container)",
+            "value": "container"
+          },
+          {
+            "selected": false,
+            "text": "Individual Pod (pod)",
+            "value": "pod"
+          }
+        ],
+        "query": "container,pod",
+        "skipUrlSync": false,
+        "type": "custom"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "% of Single Core (100% = 1 core)",
+          "value": "* 100"
+        },
+        "hide": 0,
+        "label": "CPU Scale",
+        "name": "cpu_multiplier",
+        "options": [
+          {
+            "selected": true,
+            "text": "% of Single Core (100% = 1 core)",
+            "value": "* 100"
+          },
+          {
+            "selected": false,
+            "text": "Cores (1.0 = 1 core)",
+            "value": "* 1"
+          },
+          {
+            "selected": false,
+            "text": "% of Host Total (16 Cores)",
+            "value": "* 6.25"
+          }
+        ],
+        "query": "* 100,* 1,* 6.25",
+        "skipUrlSync": false,
+        "type": "custom"
+      }
+    ]
+  }
+}

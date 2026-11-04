@@ -98,6 +98,10 @@ if ! kubectl get deployment metrics-server -n kube-system -o jsonpath='{.spec.te
   kubectl patch deployment metrics-server -n kube-system --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kubelet-insecure-tls"}]'
 fi
 
+if ! kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+  kubectl apply --server-side -f https://github.com/kedacore/keda/releases/download/v2.16.1/keda-2.16.1.yaml
+fi
+
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.1/deploy/static/provider/cloud/deploy.yaml
 
 # k3s's bundled servicelb (klipper) fulfils the controller's LoadBalancer
@@ -171,6 +175,11 @@ kubectl apply -f k8s/03-nats.yaml
 kubectl apply -f k8s/04-core-api.yaml
 kubectl apply -f k8s/
 
+read_env_var() {
+  local key="$1"
+  grep -E "^[[:space:]]*${key}[[:space:]]*=" "$ROOT/.env" | tail -n1 | cut -d= -f2- | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]"'\''\r]+//; s/[[:space:]"'\''\r]+$//' || true
+}
+
 if [ -f "$ROOT/.env" ]; then
   PATCH_ENTRIES=""
   while IFS= read -r line || [ -n "$line" ]; do
@@ -181,6 +190,43 @@ if [ -f "$ROOT/.env" ]; then
   done < "$ROOT/.env"
   if [ -n "$PATCH_ENTRIES" ]; then
     kubectl patch secret llm-worker-secrets -n swcp --type=merge -p "{\"stringData\":{${PATCH_ENTRIES%,}}}"
+  fi
+
+  LLM_MODEL_PATH_VAL="$(read_env_var LLM_MODEL_PATH)"
+  LLM_MODEL_NAME_VAL="$(read_env_var LLM_MODEL_NAME)"
+  LOCAL_LLM_PORT_VAL="$(read_env_var LOCAL_LLM_PORT)"
+  VLLM_QUANTIZATION_VAL="$(read_env_var VLLM_QUANTIZATION)"
+  VLLM_KV_CACHE_DTYPE_VAL="$(read_env_var VLLM_KV_CACHE_DTYPE)"
+  VLLM_MAX_MODEL_LEN_VAL="$(read_env_var VLLM_MAX_MODEL_LEN)"
+  VLLM_GPU_MEM_VAL="$(read_env_var VLLM_GPU_MEMORY_UTILIZATION)"
+  VLLM_MAX_SEQS_VAL="$(read_env_var VLLM_MAX_NUM_SEQS)"
+  LLM_LOCAL_MAX_CONCURRENT_VAL="$(read_env_var LLM_LOCAL_MAX_CONCURRENT)"
+  LLM_LOCAL_MAX_ACK_PENDING_VAL="$(read_env_var LLM_LOCAL_MAX_ACK_PENDING)"
+
+  VLLM_CM_PATCH=""
+  [ -n "$LLM_MODEL_PATH_VAL" ] && VLLM_CM_PATCH+="\"LLM_MODEL_PATH\":\"$LLM_MODEL_PATH_VAL\","
+  [ -n "$LLM_MODEL_NAME_VAL" ] && VLLM_CM_PATCH+="\"LLM_MODEL_NAME\":\"$LLM_MODEL_NAME_VAL\","
+  [ -n "$LOCAL_LLM_PORT_VAL" ] && VLLM_CM_PATCH+="\"VLLM_PORT\":\"$LOCAL_LLM_PORT_VAL\","
+  [ -n "$VLLM_QUANTIZATION_VAL" ] && VLLM_CM_PATCH+="\"VLLM_QUANTIZATION\":\"$VLLM_QUANTIZATION_VAL\","
+  [ -n "$VLLM_KV_CACHE_DTYPE_VAL" ] && VLLM_CM_PATCH+="\"VLLM_KV_CACHE_DTYPE\":\"$VLLM_KV_CACHE_DTYPE_VAL\","
+  [ -n "$VLLM_MAX_MODEL_LEN_VAL" ] && VLLM_CM_PATCH+="\"VLLM_MAX_MODEL_LEN\":\"$VLLM_MAX_MODEL_LEN_VAL\","
+  [ -n "$VLLM_GPU_MEM_VAL" ] && VLLM_CM_PATCH+="\"VLLM_GPU_MEMORY_UTILIZATION\":\"$VLLM_GPU_MEM_VAL\","
+  [ -n "$VLLM_MAX_SEQS_VAL" ] && VLLM_CM_PATCH+="\"VLLM_MAX_NUM_SEQS\":\"$VLLM_MAX_SEQS_VAL\","
+  if [ -n "$VLLM_CM_PATCH" ]; then
+    kubectl patch configmap vllm-config -n swcp --type=merge -p "{\"data\":{${VLLM_CM_PATCH%,}}}"
+  fi
+
+  EFFECTIVE_MAX_CONCURRENT="${LLM_LOCAL_MAX_CONCURRENT_VAL:-${VLLM_MAX_SEQS_VAL:-}}"
+  EFFECTIVE_MAX_ACK_PENDING="${LLM_LOCAL_MAX_ACK_PENDING_VAL:-${EFFECTIVE_MAX_CONCURRENT:-}}"
+  LLM_WORKER_CM_PATCH=""
+  [ -n "$LLM_MODEL_NAME_VAL" ] && LLM_WORKER_CM_PATCH+="\"LocalLlm__ModelName\":\"$LLM_MODEL_NAME_VAL\","
+  [ -n "$EFFECTIVE_MAX_CONCURRENT" ] && LLM_WORKER_CM_PATCH+="\"LocalLlm__MaxConcurrent\":\"$EFFECTIVE_MAX_CONCURRENT\","
+  [ -n "$EFFECTIVE_MAX_ACK_PENDING" ] && LLM_WORKER_CM_PATCH+="\"LocalLlm__MaxAckPending\":\"$EFFECTIVE_MAX_ACK_PENDING\","
+  if [ -n "$LLM_WORKER_CM_PATCH" ]; then
+    kubectl patch configmap llm-worker-config -n swcp --type=merge -p "{\"data\":{${LLM_WORKER_CM_PATCH%,}}}"
+  fi
+
+  if [ -n "$PATCH_ENTRIES" ] || [ -n "$LLM_WORKER_CM_PATCH" ]; then
     kubectl rollout restart deployment/llm-worker -n swcp
   fi
 fi

@@ -80,6 +80,8 @@ services:
       Nats__Url: nats://nats:4222
       LocalLlm__BaseUrl: http://local-llm-server:8080
       LocalLlm__ModelName: ${LLM_MODEL_NAME:-}
+      LocalLlm__MaxConcurrent: ${LLM_LOCAL_MAX_CONCURRENT:-${VLLM_MAX_NUM_SEQS:-4}}
+      LocalLlm__MaxAckPending: ${LLM_LOCAL_MAX_ACK_PENDING:-${LLM_LOCAL_MAX_CONCURRENT:-${VLLM_MAX_NUM_SEQS:-4}}}
       AzureAIFoundry__DefaultModel: ${AzureAIFoundry__DefaultModel:-Gpt6Sol}
       AzureAIFoundry__Models__Gpt4o__Endpoint: ${AzureAIFoundry__Models__Gpt4o__Endpoint:-}
       AzureAIFoundry__Models__Gpt4o__ApiKey: ${AzureAIFoundry__Models__Gpt4o__ApiKey:-}

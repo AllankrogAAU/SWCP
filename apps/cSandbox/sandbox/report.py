@@ -38,4 +38,26 @@ def parse_report(raw: str) -> SandboxReport:
             stdout=_decode(fields.get(f"{phase}_stdout", "")),
             stderr=_decode(fields.get(f"{phase}_stderr", "")),
         )
-    return SandboxReport(compile=parsed["compile"], lint=parsed["lint"], run=parsed["run"])
+    test_runs: list[PhaseResult] = []
+    index = 0
+    while (rc := fields.get(f"test_{index}_rc")) is not None:
+        try:
+            rc_value = int(rc)
+            duration = int(fields.get(f"test_{index}_ms", "0"))
+        except ValueError:
+            break
+        test_runs.append(
+            PhaseResult(
+                rc=rc_value,
+                duration_ms=duration,
+                stdout=_decode(fields.get(f"test_{index}_stdout", "")),
+                stderr=_decode(fields.get(f"test_{index}_stderr", "")),
+            )
+        )
+        index += 1
+    return SandboxReport(
+        compile=parsed["compile"],
+        lint=parsed["lint"],
+        run=parsed["run"],
+        test_runs=tuple(test_runs),
+    )

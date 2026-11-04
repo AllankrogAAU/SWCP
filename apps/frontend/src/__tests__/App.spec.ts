@@ -22,10 +22,10 @@ vi.mock('../services/api', () => api)
 
 vi.mock('../Components/CodeEditorBox.vue', () => ({
   default: {
-    props: ['busyAction', 'terminalOutput'],
-    emits: ['submit', 'hint', 'run'],
+    props: ['busyAction', 'terminalOutput', 'modelValue', 'standardInput'],
+    emits: ['submit', 'hint', 'run', 'update:standardInput'],
     template:
-      '<div><button data-test="submit" :disabled="busyAction !== null" @click="$emit(\'submit\')">Submit</button><button data-test="hint" :disabled="busyAction !== null" @click="$emit(\'hint\')">Hint</button><button data-test="run" :disabled="busyAction !== null" @click="$emit(\'run\')">Run</button><pre>{{ terminalOutput }}</pre></div>',
+      '<div><textarea data-test="stdin" :value="standardInput" @input="$emit(\'update:standardInput\', $event.target.value)" /><button data-test="submit" :disabled="busyAction !== null" @click="$emit(\'submit\')">Submit</button><button data-test="hint" :disabled="busyAction !== null" @click="$emit(\'hint\')">Hint</button><button data-test="run" :disabled="busyAction !== null" @click="$emit(\'run\')">Run</button><pre>{{ terminalOutput }}</pre></div>',
   },
 }))
 
@@ -120,9 +120,15 @@ describe('App', () => {
       taskSolved: null,
       errorMessage: null,
     })
+    await wrapper.get('[data-test="stdin"]').setValue('2 3\n')
     await wrapper.get('[data-test="run"]').trigger('click')
     await flushPromises()
-    expect(api.runSource).toHaveBeenCalledWith('assignment-id', expect.any(String), 'azure')
+    expect(api.runSource).toHaveBeenCalledWith(
+      'assignment-id',
+      expect.any(String),
+      'azure',
+      '2 3\n',
+    )
     expect(api.getSubmission).toHaveBeenCalledWith('run-id')
     expect(wrapper.text()).toContain('program output')
     expect(wrapper.text()).not.toContain('This must not be displayed.')
@@ -159,6 +165,55 @@ describe('App', () => {
     expect((wrapper.get('[data-test="submit"]').element as HTMLButtonElement).disabled).toBe(true)
     expect((wrapper.get('[data-test="hint"]').element as HTMLButtonElement).disabled).toBe(true)
     expect((wrapper.get('[data-test="run"]').element as HTMLButtonElement).disabled).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('displays authentication error when login fails', async () => {
+    api.login.mockRejectedValueOnce(new Error('Invalid username or password.'))
+    const wrapper = mount(App)
+    await wrapper.find('v-form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Invalid username or password.')
+    expect(wrapper.text()).toContain('Sign in')
+    wrapper.unmount()
+  })
+
+  it('handles submission error gracefully and resets busy state', async () => {
+    const wrapper = mount(App)
+    await wrapper.find('v-form').trigger('submit')
+    await flushPromises()
+
+    api.submitSource.mockRejectedValueOnce(new Error('Network error during submit.'))
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Network error during submit.')
+    expect((wrapper.get('[data-test="submit"]').element as HTMLButtonElement).disabled).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('displays error and completes when submission polling returns FAILED status', async () => {
+    const wrapper = mount(App)
+    await wrapper.find('v-form').trigger('submit')
+    await flushPromises()
+
+    api.getSubmission.mockResolvedValueOnce({
+      submissionId: 'failed-id',
+      assignmentId: 'assignment-id',
+      action: 'submit',
+      status: 'FAILED',
+      errorMessage: 'Execution timed out in sandbox.',
+      sandboxOutput: null,
+      taskSolved: false,
+      llmFeedback: null,
+    })
+
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Execution timed out in sandbox.')
+    expect((wrapper.get('[data-test="submit"]').element as HTMLButtonElement).disabled).toBe(false)
     wrapper.unmount()
   })
 })

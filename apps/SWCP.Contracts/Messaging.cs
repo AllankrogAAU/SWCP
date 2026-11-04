@@ -25,6 +25,7 @@ public static class Messaging
     public const string LlmLocalTaskConsumer = "llm-local-workers";
     public const string LlmResultConsumer = "core-api-llm-results";
     public const string WorkStartedSubject = "submissions.work.started";
+    public const string WorkStartedQueueGroup = "core-api-work-started";
 
     public static string SandboxMessageId(Guid submissionId, int attempt = 0) => $"{submissionId:D}-sandbox-{attempt}";
     public static string LlmMessageId(Guid submissionId) => $"{submissionId:D}-llm";
@@ -49,7 +50,9 @@ public sealed record SandboxTask(
     [property: JsonPropertyName("source")] string Source,
     [property: JsonPropertyName("compilerFlags")] IReadOnlyList<string> CompilerFlags,
     [property: JsonPropertyName("testCases")] IReadOnlyList<SandboxTestCase> TestCases,
-    [property: JsonPropertyName("traceParent")] string? TraceParent = null);
+    [property: JsonPropertyName("traceParent")] string? TraceParent = null,
+    [property: JsonPropertyName("harnessSource")] string? HarnessSource = null,
+    [property: JsonPropertyName("runStdin")] string RunStdin = "");
 
 public sealed record SandboxTestCase(
     [property: JsonPropertyName("stdin")] string Stdin,

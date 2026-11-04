@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using coreApi.Data;
 using coreApi.Models;
@@ -15,6 +16,7 @@ public sealed class SandboxResultConsumer(
     NatsTaskPublisher publisher,
     SubmissionEvents events) : BackgroundService
 {
+    private static readonly ActivitySource ActivitySource = new("SWCP.CoreApi");
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await jetStream.CreateOrUpdateStreamAsync(
@@ -58,6 +60,11 @@ public sealed class SandboxResultConsumer(
 
     private async Task ProcessResultAsync(SandboxResult result, string? traceParent, CancellationToken cancellationToken)
     {
+        using var activity = ActivitySource.StartActivity(
+            "process sandbox.results",
+            ActivityKind.Consumer,
+            traceParent ?? string.Empty);
+
         await using var scope = scopeFactory.CreateAsyncScope();
         var database = scope.ServiceProvider.GetRequiredService<CoreDbContext>();
         var submission = await database.Submissions

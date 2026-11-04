@@ -1,6 +1,7 @@
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, Sequence
 
+from contracts import SandboxTestCase
 from evaluation.result import SandboxReport
 
 
@@ -21,7 +22,14 @@ class Limits:
 
 
 class Sandbox(Protocol):
-    def run(self, source: str, limits: Limits) -> SandboxReport: ...
+    def run(
+        self,
+        source: str,
+        limits: Limits,
+        test_cases: Sequence[SandboxTestCase] = (),
+        harness_source: str | None = None,
+        run_stdin: str = "",
+    ) -> SandboxReport: ...
 
     def destroy(self) -> None: ...
 

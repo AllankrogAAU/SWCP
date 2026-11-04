@@ -35,6 +35,9 @@ namespace coreApi.Data.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("HarnessSource")
+                        .HasColumnType("text");
+
                     b.Property<string>("TaskFocus")
                         .IsRequired()
                         .HasColumnType("text");
@@ -58,6 +61,15 @@ namespace coreApi.Data.Migrations
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
+
+                    b.Property<Guid>("AssignmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("StandardInput")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasDefaultValue("")
+                        .HasColumnType("text");
 
                     b.Property<string>("Action")
                         .IsRequired()

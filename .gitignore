@@ -481,3 +481,7 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# Benchmark results and local token caches
+benchmarks/results/
+!benchmarks/results/.gitkeep

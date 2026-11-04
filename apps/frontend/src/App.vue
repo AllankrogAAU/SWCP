@@ -33,6 +33,7 @@ const selected = computed(() =>
 )
 const code = ref('#include <stdio.h>\n\nint main(void) {\n    return 0;\n}')
 const lastSavedAt = ref('')
+const standardInput = ref('')
 const feedback = ref('')
 const busyAction = ref<'hint' | 'run' | 'submit' | null>(null)
 const error = ref('')
@@ -247,7 +248,12 @@ async function runCode() {
   terminalOutput.value = ''
   feedback.value = ''
   try {
-    const accepted = await runSource(selected.value.id, code.value, backend.value)
+    const accepted = await runSource(
+      selected.value.id,
+      code.value,
+      backend.value,
+      standardInput.value,
+    )
     trackSubmission(accepted, 'run')
   } catch (cause) {
     terminalOutput.value = cause instanceof Error ? cause.message : 'Run is not available yet.'
@@ -425,6 +431,7 @@ onBeforeUnmount(() => {
 
                   <CodeEditorBox
                     v-model="code"
+                    v-model:standard-input="standardInput"
                     :busy-action="busyAction"
                     :terminal-output="terminalOutput"
                     @submit="requestFeedback"

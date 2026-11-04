@@ -16,6 +16,7 @@ public sealed class SubmissionProgressConsumer(
     {
         await foreach (var message in nats.SubscribeAsync<SubmissionWorkStarted>(
             Messaging.WorkStartedSubject,
+            queueGroup: Messaging.WorkStartedQueueGroup,
             cancellationToken: stoppingToken))
         {
             var started = message.Data;
