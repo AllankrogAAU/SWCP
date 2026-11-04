@@ -93,6 +93,14 @@ Each run writes to `benchmarks/results/<run-id>/`:
 - `judgements.jsonl` and `judge_config.json`: raw judge output, derived metrics, and the judge configuration (without credentials)
 - `report_<timestamp>/`: the six publication figures and the CSV/LaTeX tables
 - `prometheus_<model>.json`: raw queried time series and per-query errors
+
+To read the feedback next to the judge's scores and rationale, export a Markdown review with the questions each model asked:
+
+```bash
+python -m apps.benchmark.inspect_judgements benchmarks/results/<run-id> --sort low --per-model 5 --status AC
+```
+
+`--sort` is `random` (default), `high` or `low` by mean Socratic sub-score. `--model` and `--status` can be repeated.
 - `summary.json` and `summary.csv`: latency percentiles and CodeNet sandbox-status agreement
 - `ttft_by_model.png`, `e2e_latency_by_model.png`, and `status_agreement.png` when matching data is available
 
