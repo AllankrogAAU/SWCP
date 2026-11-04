@@ -1,12 +1,33 @@
 import logging
+import re
 from collections.abc import Sequence
 from typing import Any
 
-from contracts import SandboxTestCase
+from contracts import SandboxTestCase, StaticAnalysisWarning
 from evaluation.result import EvaluationResult, SandboxReport, Status
 from sandbox.interface import Limits, SandboxError, SandboxProvider
 
 logger = logging.getLogger("c-sandbox-worker")
+_STATIC_ANALYSIS_PATTERN = re.compile(
+    r"^(?P<line>\d+):(?P<column>\d+):\s+(?P<severity>[^:]+):\s+"
+    r"(?P<message>.*?)(?:\s+\[[^]]+\])?$"
+)
+
+
+def parse_static_analysis(output: str) -> tuple[StaticAnalysisWarning, ...]:
+    warnings = []
+    for line in output.splitlines():
+        match = _STATIC_ANALYSIS_PATTERN.match(line)
+        if match is not None:
+            warnings.append(
+                StaticAnalysisWarning(
+                    line=int(match["line"]),
+                    column=int(match["column"]),
+                    severity=match["severity"].strip(),
+                    message=match["message"].strip(),
+                )
+            )
+    return tuple(warnings)
 
 
 def to_result(report: SandboxReport) -> EvaluationResult:
@@ -25,8 +46,11 @@ def to_result(report: SandboxReport) -> EvaluationResult:
         return EvaluationResult(status=Status.COMPILE_ERROR, **base)
 
     lint_output = None
+    static_analysis: tuple[StaticAnalysisWarning, ...] = ()
     if report.lint is not None:
         lint_output = "lint timed out" if report.lint.timed_out else report.lint.stderr
+        if not report.lint.timed_out:
+            static_analysis = parse_static_analysis(report.lint.stderr)
     if report.test_runs:
         return EvaluationResult(
             status=(
@@ -36,6 +60,7 @@ def to_result(report: SandboxReport) -> EvaluationResult:
             ),
             **base,
             lint_output=lint_output,
+            static_analysis=static_analysis,
             run_ms=sum(test_run.duration_ms for test_run in report.test_runs),
             test_runs=report.test_runs,
         )
@@ -50,9 +75,18 @@ def to_result(report: SandboxReport) -> EvaluationResult:
         "run_ms": run.duration_ms,
     }
     if run.timed_out:
-        return EvaluationResult(status=Status.RUN_TIMEOUT, **base, **run_fields)
+        return EvaluationResult(
+            status=Status.RUN_TIMEOUT,
+            static_analysis=static_analysis,
+            **base,
+            **run_fields,
+        )
     return EvaluationResult(
-        status=Status.SUCCESS, exit_code=run.rc, **base, **run_fields
+        status=Status.SUCCESS,
+        exit_code=run.rc,
+        static_analysis=static_analysis,
+        **base,
+        **run_fields,
     )
 
 

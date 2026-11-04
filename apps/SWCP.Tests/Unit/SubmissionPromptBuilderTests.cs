@@ -90,5 +90,31 @@ public sealed class SubmissionPromptBuilderTests
 
         Assert.Contains("Only Hint and Submit actions create LLM prompts", exception.Message);
     }
+
+    [Fact]
+    public void Build_CompactsSandboxOutput_WhileRetainingFailuresAndResourceEvidence()
+    {
+        var assignment = CreateAssignment();
+        var submission = CreateSubmission("submit");
+        var sandboxResult = new SandboxResult(
+            Guid.NewGuid(),
+            new CompilationResult(true, "", "", 0, 15),
+            [new StaticAnalysisWarning(10, 5, "warning", "unused variable")],
+            [
+                new SandboxTestResult(true, "passing output", "", 0, 10, 3.5),
+                new SandboxTestResult(false, "failure output", "runtime error", 1, 21, 182)
+            ],
+            "test_failure");
+
+        var prompt = SubmissionPromptBuilder.Build(assignment, submission, sandboxResult);
+
+        Assert.DoesNotContain("passing output", prompt.UserPrompt);
+        Assert.Contains("failure output", prompt.UserPrompt);
+        Assert.Contains("runtime error", prompt.UserPrompt);
+        Assert.Contains("unused variable", prompt.UserPrompt);
+        Assert.Contains("maxMemoryConsumedMegabytes", prompt.UserPrompt);
+        Assert.Contains("182", prompt.UserPrompt);
+        Assert.Contains("maxDurationMilliseconds", prompt.UserPrompt);
+    }
 }
 
