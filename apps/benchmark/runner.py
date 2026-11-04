@@ -62,9 +62,26 @@ def _git_value(*args: str) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+# Architecturally diverse default matrix (Qwen, Llama, Gemma, Mistral, R1-distill reasoning, Qwen scale ablation),
+# run serially on one GPU and closed by the Azure cloud baseline.
+DEFAULT_MODEL_MATRIX = (
+    "qwen2.5-coder-7b",
+    "meta-llama-3.1-8b",
+    "gemma-2-9b",
+    "mistral-nemo-12b",
+    "deepseek-r1-distill-llama-8b",
+    "qwen2.5-coder-14b",
+    "qwen2.5-coder-3b",
+    DEFAULT_CLOUD_MODEL,
+)
+
+
 def _model_list(values: list[str] | None) -> list[ModelSpec]:
-    """Requested models, or every installed local model followed by the GPT-6-sol baseline."""
-    keys = values or [spec.key for spec in installed_local_models()] + [DEFAULT_CLOUD_MODEL]
+    """Requested models, or the installed models of the default matrix followed by the GPT-6-sol baseline."""
+    installed = {spec.key for spec in installed_local_models()}
+    keys = values or [
+        key for key in DEFAULT_MODEL_MATRIX if MODELS[key].backend != "local" or key in installed
+    ]
     unknown = set(keys) - set(MODELS)
     if unknown:
         raise ValueError(f"Unknown models: {', '.join(sorted(unknown))}")
@@ -187,6 +204,7 @@ async def _write_submission_record(
         "client_e2e_ms": result.client_e2e_ms,
         "http_accepted_ms": result.http_accepted_ms,
         "frontend_ttft_ms": result.frontend_ttft_ms,
+        "frontend_final_chunk_ms": result.frontend_final_chunk_ms,
         "ws_events_count": result.ws_events_count,
         "streamed_feedback": result.streamed_feedback,
         "llm_feedback": final_feedback,
@@ -821,7 +839,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hardware-tag", default=os.getenv("HARDWARE_TAG", "rtx5070ti-16gb"))
     parser.add_argument("--user-prefix", default=os.getenv("BENCHMARK_USER_PREFIX", "bench_user_"))
     parser.add_argument("--virtual-users", type=int, default=4)
-    parser.add_argument("--per-status", type=int, default=20)
+    parser.add_argument("--per-status", type=int, default=100)
     parser.add_argument("--validation-candidate-multiplier", type=int, default=10)
     parser.add_argument("--statuses", nargs="+", choices=DEFAULT_STATUSES, default=list(RUBRIC_STATUSES))
     parser.add_argument("--seed", type=int, default=2026)
@@ -840,7 +858,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--retry-backoff-seconds", type=float, default=5.0)
     parser.add_argument("--warmup-requests", type=int, default=2)
-    parser.add_argument("--progress-file", type=Path, default=DEFAULT_PROGRESS_FILE)
+    parser.add_argument(
+        "--progress-file", type=Path, default=None,
+        help=f"Optional live Markdown progress file (disabled by default), e.g. {DEFAULT_PROGRESS_FILE}.",
+    )
     parser.add_argument("--progress-every", type=int, default=10)
     parser.add_argument("--skip-judge", action="store_true")
     parser.add_argument("--skip-report", action="store_true")

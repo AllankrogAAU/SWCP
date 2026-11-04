@@ -104,7 +104,7 @@ class RunnerTests(unittest.TestCase):
                 "_wait_for_completion",
                 new=AsyncMock(return_value=(
                     "COMPLETED", "polling", 0, None, None, "",
-                    {"status": "COMPLETED", "sandboxOutput": {}}, None,
+                    {"status": "COMPLETED", "sandboxOutput": {}}, None, None, None,
                 )),
             ):
                 result = await runner.execute_single_submission(

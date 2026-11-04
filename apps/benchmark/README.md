@@ -28,7 +28,7 @@ set -a && . ./.env && set +a
   --target-url http://localhost --skip-fixtures
 ```
 
-By default this selects 20 unaltered submissions each for `CE`, `RE`, `WA` and `AC` (80 in total). It runs them with `with_context_transfer` through every installed local model and then through `azure-gpt-6-sol`. It then judges every response with GPT-6-sol and writes the figures and tables. Each submission that does not complete is retried up to `--max-attempts` (default 3) with exponential backoff; persistent failures are recorded, with their failed attempt IDs, and the run continues. After each model swap, `--warmup-requests` (default 2) unrecorded end-to-end requests are sent. `apps/benchmark/LIVE_PROGRESS.md` (`--progress-file`) is rewritten every 10 records (`--progress-every`) and on every phase change: model swap, warmup, judging and report.
+By default this selects 100 unaltered submissions each for `CE`, `RE`, `WA` and `AC` (400 in total), each preflighted to fewer than 2,500 estimated prompt tokens including the system prompt and sandbox context. It runs them with `with_context_transfer` through the default model matrix (see below) and then through `azure-gpt-6-sol`. It then judges every response with GPT-6-sol and writes the figures and tables. Each submission that does not complete is retried up to `--max-attempts` (default 3) with exponential backoff; persistent failures are recorded, with their failed attempt IDs, and the run continues. After each model swap, `--warmup-requests` (default 2) unrecorded end-to-end requests are sent. Live progress output is off by default; pass `--progress-file apps/benchmark/LIVE_PROGRESS.md` to rewrite it every `--progress-every` records and on every phase change.
 
 Model swaps scale the `vllm` deployment to zero. They wait for the old pod to terminate and for GPU memory to be released, apply the new model, scale back up, and wait for `/health` to return 200. Every swap is logged in `run_metadata.json` (`model_swaps`). Use `--skip-judge` and `--skip-report` to run only the sweep.
 
@@ -36,7 +36,9 @@ You can also pass the legacy options explicitly: `--statuses AC CE RE WA TLE MLE
 
 Use `--context-modes with_context_transfer` to run a single context condition, `--burst-size 0` to disable bursts, `--skip-fixtures` to omit SWCP fixtures, and `--models` to select a subset. For an initial small run, use `--per-status 1`; the full default is six statuses per model and context condition. Local model switching updates both the vLLM served model and the LLM worker's requested model name, then restores both deployments' original configuration.
 
-Available local model keys include `qwen2.5-coder-3b`, `qwen2.5-coder-7b`, `qwen2.5-coder-14b`, `meta-llama-3.1-8b`, and `deepseek-r1-distill-qwen-7b`. The corresponding AWQ model folders must exist under `apps/localLLM/models/`; the benchmark checks for the selected folder before switching vLLM. When `--models` is omitted, every installed model folder is used, followed by the cloud baseline.
+Available local model keys include `qwen2.5-coder-3b`, `qwen2.5-coder-7b`, `qwen2.5-coder-14b`, `meta-llama-3.1-8b`, `gemma-2-9b`, `mistral-nemo-12b`, `deepseek-r1-distill-llama-8b`, and `deepseek-r1-distill-qwen-7b`. The corresponding AWQ model folders must exist under `apps/localLLM/models/`; the benchmark checks for the selected folder before switching vLLM. When `--models` is omitted, the installed models of the default matrix run serially in this order: `qwen2.5-coder-7b`, `meta-llama-3.1-8b`, `gemma-2-9b`, `mistral-nemo-12b`, `deepseek-r1-distill-llama-8b`, `qwen2.5-coder-14b`, `qwen2.5-coder-3b`, then `azure-gpt-6-sol`.
+
+Each model spec can override vLLM and llm-worker environment variables for the duration of its pass. `gemma-2-9b` and `mistral-nemo-12b` run with `VLLM_MAX_MODEL_LEN=4096` and `VLLM_GPU_MEMORY_UTILIZATION=0.90`, and Gemma-2 merges the system prompt into the user turn because its chat template has no system role. Every local model is capped at `LocalLlm__MaxTokens=1280` output tokens so that a preflighted prompt plus the completion always fits a 4,096-token context. All overrides are removed again on restore.
 
 The cloud models are `azure-gpt-6-sol` (llm-worker key `Gpt6Sol`, the default baseline) and `azure-gpt-4o` (`Gpt4o`). No Azure credentials are written to results.
 
@@ -50,6 +52,10 @@ The cloud models are `azure-gpt-6-sol` (llm-worker key `Gpt6Sol`, the default ba
 - `non_spoiler_compliance`: 1 only if both the judge and a deterministic leak detector agree there is no leak. The detector flags fenced or unfenced corrected C code, a `main` definition, and copied accepted-reference lines.
 - `socratic_guidance_score` and `actionability_and_clarity`: 1–5.
 - 5-point binary checklist: normalized to 0–100%.
+- Socratic sub-scores (1–5): `socratic_elicitation`, `socratic_scaffolding`, `socratic_tone`.
+- Actionability sub-scores (1–5): `jargon_suitability`, `next_step_clarity`.
+- Technical precision (0/1, faulty submissions only): `line_precision`, `concept_precision`.
+- `hallucinated_issue_categories`: the categories of invented defects (e.g. Memory Leak, Type / Format Warning) when the feedback reports a bug that does not exist.
 
 Credentials are read from `JUDGE_ENDPOINT`/`JUDGE_API_KEY` or, by default, from the `llm-worker-config` and `llm-worker-secrets` Kubernetes objects; they are never written to disk. Use `--judge-provider openai --judge-endpoint http://.../v1 --judge-model <name>` for an OpenAI-compatible judge, such as a local vLLM server. Requests use `temperature=0.0`. If the deployment rejects an explicit temperature, which the GPT-6-sol deployment does, the default is used and this is recorded in `judge_config.json`. Judging resumes from `judgements.jsonl` and retries earlier `judge_error` entries:
 
@@ -61,8 +67,8 @@ python -m apps.benchmark.report benchmarks/results/<run-id> \
 
 `report.py` writes `report_<timestamp>/` containing:
 
-- `fig1`–`fig6` as 300 DPI PDF and PNG.
-- `table_quality_summary`, `table_status_breakdown` and `table_qos_summary` as CSV and LaTeX.
+- `fig1`–`fig10` as 300 DPI PDF and PNG: fig7 is a Socratic sub-score radar, fig8 compares jargon suitability with next-step clarity, fig9 compares line precision with concept precision, and fig10 shows the distribution of hallucinated issue categories on `AC` submissions.
+- `table_quality_summary`, `table_status_breakdown`, `table_qos_summary`, `table_granular_subscores` and `table_hallucination_categories` as CSV and LaTeX.
 - `report_metadata.json`.
 
 The overall quality score (fig1) is the mean of seven 0–100 components and excludes QoS:

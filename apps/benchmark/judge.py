@@ -185,6 +185,35 @@ def detect_solution_leak(
 
 _LIKERT = {"type": "integer", "enum": [1, 2, 3, 4, 5]}
 _BINARY = {"type": "integer", "enum": [0, 1]}
+HALLUCINATION_CATEGORIES = (
+    "Memory Leak",
+    "Buffer Overflow / Out-of-Bounds",
+    "Uninitialized Variable",
+    "Integer Overflow",
+    "Type / Format Warning",
+    "Undefined Behaviour",
+    "Missing Input Validation",
+    "Logic / Algorithm Error",
+    "Edge Case Handling",
+    "Performance / Efficiency",
+    "Style / Readability",
+    "Compilation Problem",
+    "Other",
+)
+SOCRATIC_SUBSCORES = ("socratic_elicitation", "socratic_scaffolding", "socratic_tone")
+ACTIONABILITY_SUBSCORES = ("jargon_suitability", "next_step_clarity")
+TECHNICAL_SUBSCORES = ("line_precision", "concept_precision")
+
+
+def _object(properties: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties),
+        "additionalProperties": False,
+    }
+
+
 JUDGE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -195,6 +224,13 @@ JUDGE_SCHEMA: dict[str, Any] = {
         "solution_leak": {"type": "boolean"},
         "socratic_guidance_score": _LIKERT,
         "actionability_clarity_score": _LIKERT,
+        "socratic_subscores": _object({name: _LIKERT for name in SOCRATIC_SUBSCORES}),
+        "actionability_subscores": _object({name: _LIKERT for name in ACTIONABILITY_SUBSCORES}),
+        "technical_precision": _object({name: _BINARY for name in TECHNICAL_SUBSCORES}),
+        "hallucinated_issue_categories": {
+            "type": "array",
+            "items": {"type": "string", "enum": list(HALLUCINATION_CATEGORIES)},
+        },
         "checklist": {
             "type": "object",
             "properties": {
@@ -223,6 +259,10 @@ JUDGE_SCHEMA: dict[str, Any] = {
         "solution_leak",
         "socratic_guidance_score",
         "actionability_clarity_score",
+        "socratic_subscores",
+        "actionability_subscores",
+        "technical_precision",
+        "hallucinated_issue_categories",
         "checklist",
         "rationale",
     ],
@@ -252,6 +292,17 @@ _RUBRIC = """Scoring instructions:
 - solution_leak: true if the feedback gives a copy-pasteable corrected program, function or multi-line fix that would let the student solve the task without thinking.
 - socratic_guidance_score (1-5): how well the feedback probes and prods with conceptual hints and guiding questions instead of dictating the answer (1 = dictates or no guidance, 5 = excellent guiding questions/hints).
 - actionability_clarity_score (1-5): whether a 1st/2nd-semester C student can understand the next concrete debugging step without overwhelming jargon (1 = unclear/unactionable, 5 = very clear and actionable).
+- socratic_subscores (1-5 each):
+  socratic_elicitation: asks a targeted question that makes the student examine the specific defect or behaviour (1 = no question or a generic one, 5 = precise, well-aimed question);
+  socratic_scaffolding: builds on the student's existing code, identifiers and reasoning rather than replacing them (1 = ignores or rewrites their code, 5 = scaffolds directly from their code);
+  socratic_tone: encouraging and respectful, never condescending (1 = condescending or discouraging, 5 = warm and motivating).
+- actionability_subscores (1-5 each):
+  jargon_suitability: free of advanced OS/compiler/systems jargon a 1st/2nd-semester student would not know, or explains it (1 = heavy unexplained jargon, 5 = fully novice-appropriate);
+  next_step_clarity: the concrete debugging action the student should take next is clear (1 = no clear next step, 5 = unmistakable next step).
+- technical_precision (0 or 1 each; for Accepted code score 1 only if the feedback correctly reports no defect):
+  line_precision: identifies the exact faulty line(s) of the student code;
+  concept_precision: names the right C concept behind the defect (e.g. integer overflow, off-by-one, format specifier, uninitialised variable).
+- hallucinated_issue_categories: categories of every defect the feedback claims that does NOT actually exist (the hallucinations counted by reports_nonexistent_bug). Use [] when reports_nonexistent_bug is false.
 - checklist (0 or 1 each):
   correct_defect_identification: identifies the actual defect (for Accepted code: correctly indicates the code works / invents no defect);
   conceptual_c_explanation: explains the relevant C concept;
@@ -348,6 +399,11 @@ def localization_scores(
     return {"precision": precision, "recall": recall, "f1": f1}
 
 
+def _subscore(judgement: dict[str, Any], group: str, name: str) -> int | None:
+    value = (judgement.get(group) or {}).get(name)
+    return int(value) if value is not None else None
+
+
 def score_judgement(
     status: str,
     judgement: dict[str, Any],
@@ -381,6 +437,16 @@ def score_judgement(
         "deterministic_solution_leak": bool(leak.get("leak")),
         "socratic_guidance_score": int(judgement.get("socratic_guidance_score")),
         "actionability_clarity_score": int(judgement.get("actionability_clarity_score")),
+        **{name: _subscore(judgement, "socratic_subscores", name) for name in SOCRATIC_SUBSCORES},
+        **{name: _subscore(judgement, "actionability_subscores", name) for name in ACTIONABILITY_SUBSCORES},
+        **{
+            name: _subscore(judgement, "technical_precision", name) if faulty else None
+            for name in TECHNICAL_SUBSCORES
+        },
+        "hallucinated_issue_categories": (
+            [str(item) for item in judgement.get("hallucinated_issue_categories") or []]
+            if judgement.get("reports_nonexistent_bug") else []
+        ),
         "checklist": checklist,
         "checklist_points": checklist_points,
         "checklist_percent": 100.0 * checklist_points / 5,

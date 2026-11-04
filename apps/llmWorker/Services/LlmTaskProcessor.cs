@@ -49,6 +49,46 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                 }
                 """;
     private readonly ConcurrentDictionary<string, (ChatClient Client, string Deployment)> _azureClients = new();
+    private readonly ConcurrentDictionary<string, bool> _azureTemperatureUnsupported = new();
+
+    private float AzureTemperature =>
+        configuration.GetValue<float?>("AzureAIFoundry:Temperature") ?? 0.0f;
+
+    private ChatCompletionOptions CreateAzureOptions(LlmTask task, bool includeTemperature)
+    {
+        var options = new ChatCompletionOptions
+        {
+            MaxOutputTokenCount = task.Parameters.MaxTokens,
+            ResponseFormat = ChatResponseFormat.CreateJsonSchemaFormat(
+                StructuredResponseFormatName,
+                BinaryData.FromString(GetStructuredResponseSchema(task, constrainHintFeedback: false)),
+                jsonSchemaIsStrict: true)
+        };
+        if (includeTemperature)
+        {
+            options.Temperature = AzureTemperature;
+        }
+#pragma warning disable AOAI001
+        options.SetNewMaxCompletionTokensPropertyEnabled();
+#pragma warning restore AOAI001
+        return options;
+    }
+
+    // Some reasoning deployments only accept the default temperature; remember that per model and omit it.
+    private static bool IsUnsupportedTemperature(ClientResultException exception) =>
+        exception.Status == (int)HttpStatusCode.BadRequest &&
+        exception.Message.Contains("temperature", StringComparison.OrdinalIgnoreCase);
+
+    private int LocalMaxTokens(LlmTask task)
+    {
+        var cap = configuration.GetValue<int?>("LocalLlm:MaxTokens");
+        return cap is > 0 ? Math.Min(task.Parameters.MaxTokens, cap.Value) : task.Parameters.MaxTokens;
+    }
+
+    private object[] LocalMessages(LlmTask task) =>
+        configuration.GetValue<bool>("LocalLlm:MergeSystemPrompt")
+            ? [new { role = "user", content = $"{task.SystemPrompt}\n\n{task.UserPrompt}" }]
+            : [new { role = "system", content = task.SystemPrompt }, new { role = "user", content = task.UserPrompt }];
 
     public Task<LlmCompletion> CompleteAsync(LlmTask task, CancellationToken cancellationToken) =>
         task.Backend switch
@@ -88,17 +128,7 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             return (azureClient.GetChatClient(configuredDeployment), configuredDeployment);
         });
 
-        var options = new ChatCompletionOptions
-        {
-            MaxOutputTokenCount = task.Parameters.MaxTokens,
-            ResponseFormat = ChatResponseFormat.CreateJsonSchemaFormat(
-                StructuredResponseFormatName,
-                BinaryData.FromString(GetStructuredResponseSchema(task, constrainHintFeedback: false)),
-                jsonSchemaIsStrict: true)
-        };
-#pragma warning disable AOAI001
-        options.SetNewMaxCompletionTokensPropertyEnabled();
-#pragma warning restore AOAI001
+        var useTemperature = !_azureTemperatureUnsupported.ContainsKey(modelKey);
         ChatMessage[] messages =
         [
             new SystemChatMessage(task.SystemPrompt),
@@ -107,7 +137,18 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
 
         try
         {
-            var response = await client.CompleteChatAsync(messages, options, cancellationToken);
+            ClientResult<ChatCompletion> response;
+            try
+            {
+                response = await client.CompleteChatAsync(
+                    messages, CreateAzureOptions(task, useTemperature), cancellationToken);
+            }
+            catch (ClientResultException exception) when (useTemperature && IsUnsupportedTemperature(exception))
+            {
+                _azureTemperatureUnsupported[modelKey] = true;
+                response = await client.CompleteChatAsync(
+                    messages, CreateAzureOptions(task, includeTemperature: false), cancellationToken);
+            }
             var result = response.Value;
             var usage = result.Usage is null
                 ? null
@@ -156,13 +197,9 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
         using var response = await client.PostAsJsonAsync("/v1/chat/completions", new
         {
             model = modelName,
-            messages = new[]
-            {
-                new { role = "system", content = task.SystemPrompt },
-                new { role = "user", content = task.UserPrompt }
-            },
+            messages = LocalMessages(task),
             temperature = task.Parameters.Temperature,
-            max_tokens = task.Parameters.MaxTokens,
+            max_tokens = LocalMaxTokens(task),
             top_p = task.Parameters.TopP,
             presence_penalty = 0.3,
             frequency_penalty = 0.3,
@@ -235,17 +272,7 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             return (azureClient.GetChatClient(configuredDeployment), configuredDeployment);
         });
 
-        var options = new ChatCompletionOptions
-        {
-            MaxOutputTokenCount = task.Parameters.MaxTokens,
-            ResponseFormat = ChatResponseFormat.CreateJsonSchemaFormat(
-                StructuredResponseFormatName,
-                BinaryData.FromString(GetStructuredResponseSchema(task, constrainHintFeedback: false)),
-                jsonSchemaIsStrict: true)
-        };
-#pragma warning disable AOAI001
-        options.SetNewMaxCompletionTokensPropertyEnabled();
-#pragma warning restore AOAI001
+        var useTemperature = !_azureTemperatureUnsupported.ContainsKey(modelKey);
         ChatMessage[] messages =
         [
             new SystemChatMessage(task.SystemPrompt),
@@ -257,28 +284,42 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
         LlmTokenUsage? usage = null;
         try
         {
-            await foreach (var update in client.CompleteChatStreamingAsync(messages, options, cancellationToken))
+            while (true)
             {
-                foreach (var contentPart in update.ContentUpdate)
+                try
                 {
-                    var content = contentPart.Text;
-                    if (!string.IsNullOrEmpty(content))
+                    await foreach (var update in client.CompleteChatStreamingAsync(
+                        messages, CreateAzureOptions(task, useTemperature), cancellationToken))
                     {
-                        rawContent.Append(content);
-                        var feedbackDelta = feedbackParser?.Append(content);
-                        if (!string.IsNullOrEmpty(feedbackDelta))
+                        foreach (var contentPart in update.ContentUpdate)
                         {
-                            await onFeedbackDelta!(feedbackDelta, cancellationToken);
+                            var content = contentPart.Text;
+                            if (!string.IsNullOrEmpty(content))
+                            {
+                                rawContent.Append(content);
+                                var feedbackDelta = feedbackParser?.Append(content);
+                                if (!string.IsNullOrEmpty(feedbackDelta))
+                                {
+                                    await onFeedbackDelta!(feedbackDelta, cancellationToken);
+                                }
+                            }
+                        }
+
+                        if (update.Usage is { } updateUsage)
+                        {
+                            usage = new LlmTokenUsage(
+                                updateUsage.InputTokenCount,
+                                updateUsage.OutputTokenCount,
+                                updateUsage.TotalTokenCount);
                         }
                     }
+                    break;
                 }
-
-                if (update.Usage is { } updateUsage)
+                catch (ClientResultException exception) when (
+                    useTemperature && rawContent.Length == 0 && IsUnsupportedTemperature(exception))
                 {
-                    usage = new LlmTokenUsage(
-                        updateUsage.InputTokenCount,
-                        updateUsage.OutputTokenCount,
-                        updateUsage.TotalTokenCount);
+                    _azureTemperatureUnsupported[modelKey] = true;
+                    useTemperature = false;
                 }
             }
         }
@@ -339,13 +380,9 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             Content = JsonContent.Create(new
             {
                 model = modelName,
-                messages = new[]
-                {
-                    new { role = "system", content = task.SystemPrompt },
-                    new { role = "user", content = task.UserPrompt }
-                },
+                messages = LocalMessages(task),
                 temperature = task.Parameters.Temperature,
-                max_tokens = task.Parameters.MaxTokens,
+                max_tokens = LocalMaxTokens(task),
                 top_p = task.Parameters.TopP,
                 presence_penalty = 0.3,
                 frequency_penalty = 0.3,

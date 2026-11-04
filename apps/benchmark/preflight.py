@@ -6,8 +6,9 @@ import json
 import math
 from typing import Any
 
-# Covers the coreApi system prompt, teacher focus, and chat-template overhead.
-SYSTEM_PROMPT_TOKEN_ALLOWANCE = 300
+# Covers the ~700-token coreApi system prompt (incl. Socratic boundary rules), teacher focus,
+# flow instructions, and chat-template overhead, estimated at the same 3 chars/token rate.
+SYSTEM_PROMPT_TOKEN_ALLOWANCE = 1_000
 DEFAULT_TOKEN_BUDGET = 2_500
 
 

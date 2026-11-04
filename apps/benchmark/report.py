@@ -80,6 +80,21 @@ def _display(model_key: str) -> str:
     return name
 
 
+SUBSCORE_LABELS = {
+    "socratic_elicitation": "Elicitation",
+    "socratic_scaffolding": "Scaffolding",
+    "socratic_tone": "Tone",
+    "jargon_suitability": "Jargon suitability",
+    "next_step_clarity": "Next-step clarity",
+    "line_precision": "Line precision",
+    "concept_precision": "Concept precision",
+}
+
+
+def _key_mean(metrics_list: list[dict[str, Any]], key: str, scale: float = 1.0) -> float | None:
+    return _mean([scale * float(m[key]) for m in metrics_list if m.get(key) is not None])
+
+
 def _components(metrics_list: list[dict[str, Any]], statuses: list[str]) -> dict[str, float | None]:
     """Per-component 0-100 means for a set of judged responses."""
     f1 = [100 * m["bug_localization_f1"] for m, s in zip(metrics_list, statuses)
@@ -99,6 +114,16 @@ def _components(metrics_list: list[dict[str, Any]], statuses: list[str]) -> dict
         "socratic_norm": _mean([(m["socratic_guidance_score"] - 1) / 4 * 100 for m in metrics_list]),
         "actionability_norm": _mean([(m["actionability_clarity_score"] - 1) / 4 * 100 for m in metrics_list]),
         "checklist": _mean([m["checklist_percent"] for m in metrics_list]),
+        "socratic_elicitation": _key_mean(metrics_list, "socratic_elicitation"),
+        "socratic_scaffolding": _key_mean(metrics_list, "socratic_scaffolding"),
+        "socratic_tone": _key_mean(metrics_list, "socratic_tone"),
+        "jargon_suitability": _key_mean(metrics_list, "jargon_suitability"),
+        "next_step_clarity": _key_mean(metrics_list, "next_step_clarity"),
+        # Technical precision is only scored for faulty submissions; expressed as percent.
+        "line_precision": _key_mean(
+            [m for m, s in zip(metrics_list, statuses) if s in FAULTY_STATUSES], "line_precision", 100.0),
+        "concept_precision": _key_mean(
+            [m for m, s in zip(metrics_list, statuses) if s in FAULTY_STATUSES], "concept_precision", 100.0),
     }
 
 
@@ -157,6 +182,11 @@ def quality_rows(
         components = _components(metrics_list, statuses)
         low, high = _bootstrap_ci(metrics_list, statuses)
         sandbox = [r["judge"] for r in model_records if isinstance(r.get("judge"), dict)]
+        hallucinated = [m for m, s in zip(metrics_list, statuses) if s == "AC" and m.get("false_positive_hallucination")]
+        categories: dict[str, int] = {}
+        for metrics in hallucinated:
+            for category in metrics.get("hallucinated_issue_categories") or ["Uncategorised"]:
+                categories[category] = categories.get(category, 0) + 1
         summary.append({
             "model_key": model,
             "model": _display(model),
@@ -167,6 +197,9 @@ def quality_rows(
             "overall_quality": overall_score(components),
             "overall_ci_low": low,
             "overall_ci_high": high,
+            "ac_judged": sum(s == "AC" for s in statuses),
+            "ac_hallucinated": len(hallucinated),
+            "hallucination_categories": categories,
             "sandbox_status_agreement": (
                 100 * sum(bool(item.get("status_match")) for item in sandbox) / len(sandbox) if sandbox else None
             ),
@@ -553,6 +586,93 @@ def figure_throughput(plt: Any, qos: list[dict[str, Any]], summary: list[dict[st
     plt.close(fig)
 
 
+def figure_socratic_radar(plt: Any, summary: list[dict[str, Any]], out_dir: Path) -> None:
+    import numpy as np
+
+    keys = ["socratic_elicitation", "socratic_scaffolding", "socratic_tone"]
+    angles = np.linspace(0, 2 * np.pi, len(keys), endpoint=False).tolist()
+    fig, ax = plt.subplots(figsize=(6.0, 5.2), subplot_kw={"projection": "polar"})
+    for index, row in enumerate(summary):
+        values = [row.get(key) for key in keys]
+        if any(value is None for value in values):
+            continue
+        color = OKABE_ITO[index % len(OKABE_ITO)]
+        ax.plot(angles + angles[:1], values + values[:1], color=color, linewidth=1.4,
+                linestyle=("-", "--", ":", "-.")[index // len(OKABE_ITO) % 4], label=row["model"])
+        ax.fill(angles + angles[:1], values + values[:1], color=color, alpha=0.06)
+    ax.set_xticks(angles, [SUBSCORE_LABELS[key] for key in keys])
+    ax.set_ylim(1, 5)
+    ax.set_yticks([1, 2, 3, 4, 5])
+    ax.set_rlabel_position(90)
+    ax.set_title("Socratic sub-components (judge Likert 1-5)", pad=18)
+    ax.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=3)
+    _save(fig, out_dir, "fig7_socratic_subcomponents_radar")
+    plt.close(fig)
+
+
+def figure_actionability(plt: Any, summary: list[dict[str, Any]], out_dir: Path) -> None:
+    fig, ax = plt.subplots(figsize=(7.5, 3.6))
+    _grouped(ax, [row["model"] for row in summary], [
+        ("Jargon suitability (1-5)", [row.get("jargon_suitability") for row in summary]),
+        ("Next-step clarity (1-5)", [row.get("next_step_clarity") for row in summary]),
+    ], "Likert score", (1, 5.5), "{:.2f}")
+    ax.set_title("Actionability breakdown")
+    ax.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.32), ncol=2)
+    _save(fig, out_dir, "fig8_actionability_breakdown_bar")
+    plt.close(fig)
+
+
+def figure_technical_precision(plt: Any, summary: list[dict[str, Any]], out_dir: Path) -> None:
+    fig, ax = plt.subplots(figsize=(7.5, 3.6))
+    _grouped(ax, [row["model"] for row in summary], [
+        ("Line precision (%)", [row.get("line_precision") for row in summary]),
+        ("Concept precision (%)", [row.get("concept_precision") for row in summary]),
+    ], "Percent of faulty (CE/RE/WA) submissions", (0, 110))
+    ax.set_title("Technical precision: exact line vs. correct C concept")
+    ax.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.32), ncol=2)
+    _save(fig, out_dir, "fig9_technical_precision_split")
+    plt.close(fig)
+
+
+def figure_hallucinations(plt: Any, summary: list[dict[str, Any]], out_dir: Path) -> None:
+    import numpy as np
+
+    totals: dict[str, int] = {}
+    for row in summary:
+        for category, count in row.get("hallucination_categories", {}).items():
+            totals[category] = totals.get(category, 0) + count
+    fig, (left, right) = plt.subplots(1, 2, figsize=(11, 4.2), gridspec_kw={"width_ratios": [1, 1.4]})
+    if not totals:
+        for ax in (left, right):
+            ax.axis("off")
+        left.text(0.5, 0.5, "No hallucinations recorded on AC submissions", ha="center", va="center")
+    else:
+        categories = sorted(totals, key=totals.get)
+        left.barh(categories, [totals[c] for c in categories], color=OKABE_ITO[3], edgecolor="black", linewidth=0.4)
+        for y, category in enumerate(categories):
+            left.annotate(str(totals[category]), (totals[category], y), xytext=(2, 0), textcoords="offset points",
+                          va="center", fontsize=7)
+        left.set_xlabel("Hallucinated issues (all models)")
+        left.set_title("(a) What models invent on correct code")
+        matrix = np.array([[row.get("hallucination_categories", {}).get(c, 0) for row in summary]
+                           for c in categories], dtype=float)
+        image = right.imshow(matrix, aspect="auto", cmap="Oranges", vmin=0)
+        right.set_xticks(range(len(summary)), [row["model"] for row in summary], rotation=30, ha="right")
+        right.set_yticks(range(len(categories)), categories)
+        right.grid(False)
+        for (y, x), value in np.ndenumerate(matrix):
+            if value:
+                right.text(x, y, f"{int(value)}", ha="center", va="center", fontsize=6.5,
+                           color="white" if value > matrix.max() / 2 else "black")
+        fig.colorbar(image, ax=right, label="Count")
+        right.set_title("(b) Per model (hallucinated AC responses: "
+                        + ", ".join(f"{row['ac_hallucinated']}/{row['ac_judged']}" for row in summary) + ")",
+                        fontsize=7.5)
+    fig.suptitle("Hallucination distribution on Accepted (AC) submissions", fontsize=10)
+    _save(fig, out_dir, "fig10_hallucination_distribution")
+    plt.close(fig)
+
+
 # --------------------------------------------------------------------------------------
 # Entry points
 # --------------------------------------------------------------------------------------
@@ -596,6 +716,18 @@ def generate_report(run_dir: Path, options: dict[str, Any] | None = None, output
         "model", "completed", "ttft_p50_s", "ttft_p95_s", "e2e_p50_s", "e2e_p95_s", "e2e_p99_s",
         "tokens_per_second_p50", "gpu_memory_peak_mb", "cost_per_1k_runs_usd",
     ], "Quality of service, throughput and estimated cost per model.")
+    write_table(summary, out_dir / "table_granular_subscores", [
+        "model", "judged", "socratic_elicitation", "socratic_scaffolding", "socratic_tone",
+        "jargon_suitability", "next_step_clarity", "line_precision", "concept_precision",
+    ], "Granular judge sub-scores per model (Likert 1-5; precision in percent of faulty submissions).")
+    hallucination_rows = [
+        {"model": row["model"], "category": category, "count": count,
+         "ac_hallucinated": row["ac_hallucinated"], "ac_judged": row["ac_judged"]}
+        for row in summary for category, count in sorted(row["hallucination_categories"].items())
+    ]
+    write_table(hallucination_rows, out_dir / "table_hallucination_categories", [
+        "model", "category", "count", "ac_hallucinated", "ac_judged",
+    ], "Categories of invented defects on Accepted submissions.")
 
     plt = _pyplot()
     figure_overall(plt, summary, out_dir)
@@ -604,6 +736,10 @@ def generate_report(run_dir: Path, options: dict[str, Any] | None = None, output
     figure_status(plt, by_status, models, out_dir)
     figure_qos(plt, qos, out_dir)
     figure_throughput(plt, qos, summary, out_dir)
+    figure_socratic_radar(plt, summary, out_dir)
+    figure_actionability(plt, summary, out_dir)
+    figure_technical_precision(plt, summary, out_dir)
+    figure_hallucinations(plt, summary, out_dir)
 
     judge_config_path = run_dir / "judge_config.json"
     judge_counts: dict[str, int] = {}

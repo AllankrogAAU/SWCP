@@ -50,6 +50,10 @@ JUDGEMENT = {
     "solution_leak": False,
     "socratic_guidance_score": 4,
     "actionability_clarity_score": 5,
+    "socratic_subscores": {"socratic_elicitation": 4, "socratic_scaffolding": 3, "socratic_tone": 5},
+    "actionability_subscores": {"jargon_suitability": 5, "next_step_clarity": 4},
+    "technical_precision": {"line_precision": 1, "concept_precision": 0},
+    "hallucinated_issue_categories": [],
     "checklist": {
         "identifies_error_location": 1,
         "explains_why": 1,
@@ -104,6 +108,36 @@ class ScoringTests(unittest.TestCase):
         self.assertIsNone(metrics["bug_localization_f1"])
         self.assertIsNone(metrics["root_cause_diagnosis_accuracy"])
         self.assertTrue(metrics["false_positive_hallucination"])
+        self.assertIsNone(metrics["line_precision"])
+
+    def test_subscores_are_flattened(self) -> None:
+        metrics = score_judgement("WA", JUDGEMENT, {"leak": False})
+        self.assertEqual(4, metrics["socratic_elicitation"])
+        self.assertEqual(3, metrics["socratic_scaffolding"])
+        self.assertEqual(5, metrics["socratic_tone"])
+        self.assertEqual(5, metrics["jargon_suitability"])
+        self.assertEqual(4, metrics["next_step_clarity"])
+        self.assertEqual(1, metrics["line_precision"])
+        self.assertEqual(0, metrics["concept_precision"])
+        self.assertEqual([], metrics["hallucinated_issue_categories"])
+
+    def test_hallucination_categories_only_kept_for_hallucinations(self) -> None:
+        judgement = {**JUDGEMENT, "hallucinated_issue_categories": ["Memory Leak"]}
+        self.assertEqual([], score_judgement("AC", judgement, {"leak": False})["hallucinated_issue_categories"])
+        judgement["reports_nonexistent_bug"] = True
+        self.assertEqual(
+            ["Memory Leak"], score_judgement("AC", judgement, {"leak": False})["hallucinated_issue_categories"]
+        )
+
+    def test_judge_schema_requires_granular_fields(self) -> None:
+        from apps.benchmark.judge import JUDGE_SCHEMA
+        for field in ("socratic_subscores", "actionability_subscores", "technical_precision",
+                      "hallucinated_issue_categories"):
+            self.assertIn(field, JUDGE_SCHEMA["required"])
+        self.assertEqual(
+            ["socratic_elicitation", "socratic_scaffolding", "socratic_tone"],
+            JUDGE_SCHEMA["properties"]["socratic_subscores"]["required"],
+        )
 
     def test_judge_prompt_contains_all_evidence_and_blinds_model(self) -> None:
         messages = build_judge_messages("WA", "Sum the numbers.", STUDENT, ACCEPTED, None, "Check line 4.")
@@ -202,6 +236,12 @@ class JudgeRunAndReportTests(unittest.TestCase):
             temperature_note = None
 
             async def evaluate(self, messages):  # noqa: ANN001
+                if "verdict for the student code: AC" in messages[1]["content"]:
+                    return {
+                        **JUDGEMENT,
+                        "reports_nonexistent_bug": True,
+                        "hallucinated_issue_categories": ["Memory Leak", "Type / Format Warning"],
+                    }, {"prompt_tokens": 1}
                 return JUDGEMENT, {"prompt_tokens": 1}
 
             async def aclose(self) -> None:
@@ -222,12 +262,16 @@ class JudgeRunAndReportTests(unittest.TestCase):
                 "fig1_overall_best_model_quality_only", "fig2_technical_metrics_breakdown",
                 "fig3_educational_pedagogy_breakdown", "fig4_codenet_status_breakdown",
                 "fig5_qos_ttft_and_e2e_latency", "fig6_throughput_cost_and_pareto",
+                "fig7_socratic_subcomponents_radar", "fig8_actionability_breakdown_bar",
+                "fig9_technical_precision_split", "fig10_hallucination_distribution",
             ):
                 for suffix in (".pdf", ".png"):
                     self.assertTrue((report_dir / f"{stem}{suffix}").is_file(), stem + suffix)
-            for table in ("table_quality_summary", "table_status_breakdown", "table_qos_summary"):
+            for table in ("table_quality_summary", "table_status_breakdown", "table_qos_summary",
+                          "table_granular_subscores", "table_hallucination_categories"):
                 self.assertTrue((report_dir / f"{table}.csv").is_file())
                 self.assertIn(r"\begin{tabular}", (report_dir / f"{table}.tex").read_text())
+            self.assertIn("Memory Leak", (report_dir / "table_hallucination_categories.csv").read_text())
             rows = (report_dir / "table_qos_summary.csv").read_text().splitlines()
             self.assertEqual(3, len(rows))
             azure_cost = 1000 * (900 * 2.0 + 300 * 8.0) / 1e6

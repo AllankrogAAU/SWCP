@@ -22,7 +22,7 @@ def _duration(seconds: float | None) -> str:
 class ProgressTracker:
     def __init__(
         self,
-        path: Path,
+        path: Path | None,
         total_submissions: int,
         model_keys: list[str],
         run_id: str,
@@ -119,6 +119,8 @@ class ProgressTracker:
                 "",
             ]
         lines += ["## Recent events", ""] + [f"- {item}" for item in reversed(self.history)] + [""]
+        if self.path is None:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text("\n".join(lines), encoding="utf-8")

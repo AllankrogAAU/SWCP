@@ -36,6 +36,8 @@ class ClientSubmissionResult:
     terminal_via: str = "unknown"
     ws_events_count: int = 0
     frontend_ttft_ms: float | None = None
+    # Time from POST to the WebSocket frame carrying the last feedback delta.
+    frontend_final_chunk_ms: float | None = None
     streamed_feedback: str = ""
     context_mode: str = "with_context_transfer"
     azure_model_key: str | None = None
@@ -158,11 +160,15 @@ class LoadRunner:
                 streamed_feedback,
                 final_response,
                 response_collection_error,
+                completed_at,
+                final_chunk_at,
             ) = await self._wait_for_completion(
                 submission_id, ws_url, token, client, t0, timeout_s=timeout_s
             )
 
-            client_e2e_ms = (time.perf_counter() - t0) * 1000.0
+            # Measured at the exact receipt of the terminal frame, excluding task cleanup and the
+            # follow-up GET used only to collect the stored response.
+            client_e2e_ms = ((completed_at or time.perf_counter()) - t0) * 1000.0
 
             return ClientSubmissionResult(
                 submission_id=submission_id,
@@ -176,6 +182,9 @@ class LoadRunner:
                 terminal_via=terminal_via,
                 ws_events_count=events_cnt,
                 frontend_ttft_ms=frontend_ttft_ms,
+                frontend_final_chunk_ms=(
+                    (final_chunk_at - t0) * 1000.0 if final_chunk_at is not None else None
+                ),
                 streamed_feedback=streamed_feedback,
                 context_mode=context_mode,
                 azure_model_key=azure_model_key,
@@ -224,8 +233,16 @@ class LoadRunner:
         client: httpx.AsyncClient,
         submission_started: float,
         timeout_s: float,
-    ) -> tuple[str, str, int, str | None, float | None, str, dict[str, Any] | None, str | None]:
-        """Dual-wait: WebSocket stream + periodic HTTP polling fallback."""
+        poll_grace_s: float = 3.0,
+    ) -> tuple[
+        str, str, int, str | None, float | None, str, dict[str, Any] | None, str | None, float | None, float | None
+    ]:
+        """Dual-wait: WebSocket stream + periodic HTTP polling fallback.
+
+        Timestamps are taken with ``perf_counter`` the moment a WebSocket frame is received. When polling
+        observes completion first, the WebSocket gets ``poll_grace_s`` to deliver its terminal frame so the
+        recorded completion time is not quantised to the polling interval.
+        """
         event_count = 0
         terminal_status: str | None = None
         terminal_via = "timeout"
@@ -236,12 +253,16 @@ class LoadRunner:
         streamed_feedback: list[str] = []
         feedback_attempt = 0
         feedback_sequence = 0
+        ws_terminal_at: float | None = None
+        final_chunk_at: float | None = None
+        poll_terminal_at: float | None = None
 
         done_event = asyncio.Event()
+        poll_done_event = asyncio.Event()
 
         async def ws_listener() -> None:
             nonlocal event_count, terminal_status, terminal_via, error_msg
-            nonlocal frontend_ttft_ms, feedback_attempt, feedback_sequence
+            nonlocal frontend_ttft_ms, feedback_attempt, feedback_sequence, ws_terminal_at, final_chunk_at
             subprotocols = ["swcp", f"bearer.{token}"]
             headers = {"Authorization": f"Bearer {token}"}
 
@@ -267,6 +288,7 @@ class LoadRunner:
 
                     async with ws_conn as ws:
                         async for message in ws:
+                            received_at = time.perf_counter()
                             event_count += 1
                             try:
                                 data = json.loads(message)
@@ -288,10 +310,12 @@ class LoadRunner:
                                     delta = str(data.get("message") or "")
                                     if delta:
                                         if frontend_ttft_ms is None:
-                                            frontend_ttft_ms = (time.perf_counter() - submission_started) * 1000.0
+                                            frontend_ttft_ms = (received_at - submission_started) * 1000.0
+                                        final_chunk_at = received_at
                                         streamed_feedback.append(delta)
                                 evt_type = str(data.get("eventType") or data.get("stage") or "").upper()
                                 if evt_type in ("COMPLETED", "FAILED"):
+                                    ws_terminal_at = received_at
                                     terminal_status = evt_type
                                     terminal_via = "websocket"
                                     error_msg = data.get("errorMessage")
@@ -308,7 +332,8 @@ class LoadRunner:
                 await asyncio.sleep(2.0)
 
         async def poll_fallback() -> None:
-            nonlocal terminal_status, terminal_via, error_msg, final_response
+            nonlocal terminal_status, terminal_via, error_msg, final_response, poll_terminal_at
+            nonlocal poll_status, poll_error
             # Initial slight pause to allow WebSocket to establish first
             await asyncio.sleep(1.5)
             while not done_event.is_set():
@@ -325,10 +350,10 @@ class LoadRunner:
                         st = str(data.get("status") or data.get("Status") or "").upper()
                         if st in ("COMPLETED", "FAILED"):
                             if not done_event.is_set():
-                                terminal_status = st
-                                terminal_via = "polling"
-                                error_msg = data.get("errorMessage") or data.get("ErrorMessage")
-                                done_event.set()
+                                poll_terminal_at = time.perf_counter()
+                                poll_status = st
+                                poll_error = data.get("errorMessage") or data.get("ErrorMessage")
+                                poll_done_event.set()
                                 return
                     elif r.status_code in (401, 403):
                         logger.warning("Auth error polling submission %s: HTTP %d", submission_id, r.status_code)
@@ -339,11 +364,30 @@ class LoadRunner:
 
                 await asyncio.sleep(2.0)
 
+        poll_status: str | None = None
+        poll_error: str | None = None
         ws_task = asyncio.create_task(ws_listener())
         poll_task = asyncio.create_task(poll_fallback())
 
+        async def wait_for_terminal() -> None:
+            nonlocal terminal_status, terminal_via, error_msg
+            done_wait = asyncio.create_task(done_event.wait())
+            poll_wait = asyncio.create_task(poll_done_event.wait())
+            try:
+                await asyncio.wait({done_wait, poll_wait}, return_when=asyncio.FIRST_COMPLETED)
+                if not done_event.is_set():
+                    try:
+                        await asyncio.wait_for(done_event.wait(), timeout=poll_grace_s)
+                    except asyncio.TimeoutError:
+                        terminal_status = poll_status
+                        terminal_via = "polling"
+                        error_msg = poll_error
+            finally:
+                done_wait.cancel()
+                poll_wait.cancel()
+
         try:
-            await asyncio.wait_for(done_event.wait(), timeout=timeout_s)
+            await asyncio.wait_for(wait_for_terminal(), timeout=timeout_s)
         except asyncio.TimeoutError:
             terminal_status = "TIMEOUT"
             terminal_via = "timeout"
@@ -352,6 +396,14 @@ class LoadRunner:
             ws_task.cancel()
             poll_task.cancel()
             await asyncio.gather(ws_task, poll_task, return_exceptions=True)
+
+        if terminal_via == "websocket":
+            completed_at = ws_terminal_at
+        elif terminal_via == "polling":
+            # The stored result can only be complete once the last streamed chunk has arrived.
+            completed_at = final_chunk_at if final_chunk_at is not None else poll_terminal_at
+        else:
+            completed_at = None
 
         if final_response is None or terminal_via == "websocket":
             try:
@@ -378,6 +430,8 @@ class LoadRunner:
             "".join(streamed_feedback),
             final_response,
             response_collection_error,
+            completed_at,
+            final_chunk_at,
         )
 
     # =========================================================================

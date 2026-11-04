@@ -21,6 +21,18 @@ class ModelSpec:
     vllm_name: str | None = None
     vllm_path: str | None = None
     azure_model_key: str | None = None
+    # Extra vLLM deployment env (e.g. VLLM_MAX_MODEL_LEN) and llm-worker env applied while this model is active.
+    vllm_env: tuple[tuple[str, str], ...] = ()
+    worker_env: tuple[tuple[str, str], ...] = ()
+
+
+# A 4096-token vLLM context must hold the <2,500-token preflighted prompt plus the completion budget.
+LOCAL_MAX_OUTPUT_TOKENS = 1_280
+LARGE_MODEL_VLLM_ENV = (("VLLM_MAX_MODEL_LEN", "4096"), ("VLLM_GPU_MEMORY_UTILIZATION", "0.90"))
+VLLM_TRACKED_ENV = (
+    "LLM_MODEL_NAME", "LLM_MODEL_PATH", "VLLM_MAX_MODEL_LEN", "VLLM_GPU_MEMORY_UTILIZATION", "VLLM_QUANTIZATION",
+)
+WORKER_TRACKED_ENV = ("LocalLlm__ModelName", "LocalLlm__MaxTokens", "LocalLlm__MergeSystemPrompt")
 
 
 MODELS = {
@@ -58,6 +70,31 @@ MODELS = {
         "DeepSeek-R1-Distill-Qwen-7B-AWQ",
         "deepseek-r1-distill-qwen-7b-awq",
         "deepseek-r1-distill-qwen-7b-awq",
+    ),
+    "deepseek-r1-distill-llama-8b": ModelSpec(
+        "deepseek-r1-distill-llama-8b",
+        "local",
+        "DeepSeek-R1-Distill-Llama-8B-AWQ",
+        "deepseek-r1-distill-llama-8b-awq",
+        "deepseek-r1-distill-llama-8b-awq",
+    ),
+    "gemma-2-9b": ModelSpec(
+        "gemma-2-9b",
+        "local",
+        "Gemma-2-9B-it-AWQ-INT4",
+        "gemma-2-9b-it-awq-int4",
+        "gemma-2-9b-it-AWQ-INT4",
+        vllm_env=LARGE_MODEL_VLLM_ENV,
+        # Gemma-2's chat template rejects the system role.
+        worker_env=(("LocalLlm__MergeSystemPrompt", "true"),),
+    ),
+    "mistral-nemo-12b": ModelSpec(
+        "mistral-nemo-12b",
+        "local",
+        "Mistral-Nemo-Instruct-2407-AWQ",
+        "mistral-nemo-instruct-2407-awq",
+        "Mistral-Nemo-Instruct-2407-AWQ",
+        vllm_env=LARGE_MODEL_VLLM_ENV,
     ),
     "azure-gpt-4o": ModelSpec(
         "azure-gpt-4o",
@@ -161,6 +198,25 @@ class LocalModelManager:
         values = data.get("data", {})
         return values.get("LocalLlm__ModelName") or values.get("LLM_MODEL_NAME")
 
+    @staticmethod
+    def desired_vllm_env(model: ModelSpec) -> dict[str, str]:
+        return {"LLM_MODEL_NAME": model.vllm_name, "LLM_MODEL_PATH": model.vllm_path, **dict(model.vllm_env)}
+
+    @staticmethod
+    def desired_worker_env(model: ModelSpec) -> dict[str, str]:
+        return {
+            "LocalLlm__ModelName": model.vllm_name,
+            "LocalLlm__MaxTokens": str(LOCAL_MAX_OUTPUT_TOKENS),
+            **dict(model.worker_env),
+        }
+
+    @staticmethod
+    def _env_args(desired: dict[str, str], tracked: tuple[str, ...], live: dict[str, str]) -> list[str]:
+        """kubectl set env arguments; tracked names absent from ``desired`` fall back to the configmap."""
+        args = [f"{name}={desired[name]}" for name in tracked if name in desired]
+        args.extend(f"{name}-" for name in tracked if name not in desired and name in live)
+        return args
+
     def switch_to(self, model: ModelSpec) -> None:
         if model.backend != "local":
             return
@@ -169,45 +225,26 @@ class LocalModelManager:
         if not (self.model_root / model.vllm_path).is_dir():
             raise FileNotFoundError(f"Local model assets not found: {self.model_root / model.vllm_path}")
 
+        live_env = self._get_deployment_env("vllm", "vllm", set(VLLM_TRACKED_ENV))
+        worker_env = self._get_deployment_env("llm-worker", "llm-worker", set(WORKER_TRACKED_ENV))
         if self._original_env is None:
-            self._original_env = self._get_deployment_env(
-                "vllm", "vllm", {"LLM_MODEL_NAME", "LLM_MODEL_PATH"}
-            )
-            self._original_worker_env = self._get_deployment_env(
-                "llm-worker", "llm-worker", {"LocalLlm__ModelName"}
-            )
-        configured_name, configured_path = self._configured_model()
-        live_env = self._get_deployment_env("vllm", "vllm", {"LLM_MODEL_NAME", "LLM_MODEL_PATH"})
-        current_name = live_env.get("LLM_MODEL_NAME", configured_name)
-        current_path = live_env.get("LLM_MODEL_PATH", configured_path)
-        worker_env = self._get_deployment_env(
-            "llm-worker", "llm-worker", {"LocalLlm__ModelName"}
-        )
-        current_worker_model = worker_env.get("LocalLlm__ModelName") or self._configured_worker_model()
-        if (
-            current_name == model.vllm_name
-            and current_path == model.vllm_path
-            and current_worker_model == model.vllm_name
-        ):
-            self._wait_for_health()
-            return
+            self._original_env = dict(live_env)
+            self._original_worker_env = dict(worker_env)
 
-        if current_name != model.vllm_name or current_path != model.vllm_path:
+        desired_vllm = self.desired_vllm_env(model)
+        desired_worker = self.desired_worker_env(model)
+        if any(live_env.get(name) != desired_vllm.get(name) for name in VLLM_TRACKED_ENV):
             self._modified = True
-            self._swap_vllm(
-                model.key,
-                [f"LLM_MODEL_NAME={model.vllm_name}", f"LLM_MODEL_PATH={model.vllm_path}"],
-            )
+            self._swap_vllm(model.key, self._env_args(desired_vllm, VLLM_TRACKED_ENV, live_env))
         else:
             self._wait_for_health()
 
-        if current_worker_model != model.vllm_name:
-            self._run(
-                "kubectl", "set", "env", "deployment/llm-worker",
-                f"LocalLlm__ModelName={model.vllm_name}",
-                "-n", self.namespace,
-            )
+        if any(worker_env.get(name) != desired_worker.get(name) for name in WORKER_TRACKED_ENV):
             self._worker_modified = True
+            self._run(
+                "kubectl", "set", "env", "deployment/llm-worker", "-n", self.namespace,
+                *self._env_args(desired_worker, WORKER_TRACKED_ENV, worker_env),
+            )
             self._run(
                 "kubectl", "rollout", "status", "deployment/llm-worker", "-n", self.namespace,
                 f"--timeout={self.rollout_timeout}",
@@ -217,20 +254,14 @@ class LocalModelManager:
         if (not self._modified and not self._worker_modified) or self._original_env is None:
             return
         if self._modified:
-            env_args = [f"{name}={value}" for name, value in self._original_env.items()]
-            for name in ("LLM_MODEL_NAME", "LLM_MODEL_PATH"):
-                if name not in self._original_env:
-                    env_args.append(f"{name}-")
-            self._swap_vllm("restore", env_args)
+            every = dict.fromkeys(VLLM_TRACKED_ENV, "")
+            self._swap_vllm("restore", self._env_args(self._original_env, VLLM_TRACKED_ENV, every))
         if self._worker_modified:
-            restore_worker_args = [
-                "kubectl", "set", "env", "deployment/llm-worker", "-n", self.namespace
-            ]
-            for name, value in self._original_worker_env.items():
-                restore_worker_args.append(f"{name}={value}")
-            if "LocalLlm__ModelName" not in self._original_worker_env:
-                restore_worker_args.append("LocalLlm__ModelName-")
-            self._run(*restore_worker_args)
+            every = dict.fromkeys(WORKER_TRACKED_ENV, "")
+            self._run(
+                "kubectl", "set", "env", "deployment/llm-worker", "-n", self.namespace,
+                *self._env_args(self._original_worker_env or {}, WORKER_TRACKED_ENV, every),
+            )
             self._run(
                 "kubectl", "rollout", "status", "deployment/llm-worker", "-n", self.namespace,
                 f"--timeout={self.rollout_timeout}",

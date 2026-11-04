@@ -52,7 +52,14 @@ public static class SubmissionPromptBuilder
         [property: JsonPropertyName("durationMilliseconds")] long? DurationMilliseconds,
         [property: JsonPropertyName("memoryConsumedMegabytes")] double? MemoryConsumedMegabytes);
 
+    private const string SocraticBoundaryPrompt =
+        "You are a Socratic CS tutor for 1st and 2nd-semester students. RULE 1 (SOCRATIC): NEVER give the direct " +
+        "answer or corrected code. You must 'probe and prod' by asking a guiding question. RULE 2 (NO BUGS): If the " +
+        "code is correct and the sandbox output only contains benign warnings, you MUST congratulate the student on " +
+        "a working solution. Do NOT invent bugs.";
+
     private const string BaseSystemPrompt =
+        SocraticBoundaryPrompt + "\n\n" +
         "You are a programming tutor for a university C programming course. Review one student submission at a time " +
         "and write short, specific feedback that helps the student find and fix problems themselves.\n\n" +
         "Rules:\n" +
@@ -185,13 +192,16 @@ public static class SubmissionPromptBuilder
     private static SandboxPromptProjection CreateSandboxPromptProjection(SandboxResult sandboxResult)
     {
         var tests = sandboxResult.TestResults;
+        // DefaultIfEmpty keeps MaxBy from throwing when no test reported a value (e.g. compile errors).
         var maxDuration = tests
             .Select((test, index) => (test.DurationMilliseconds, Index: index))
             .Where(item => item.DurationMilliseconds.HasValue)
+            .DefaultIfEmpty((null, -1))
             .MaxBy(item => item.DurationMilliseconds);
         var maxMemory = tests
             .Select((test, index) => (test.MemoryConsumedMegabytes, Index: index))
             .Where(item => item.MemoryConsumedMegabytes.HasValue)
+            .DefaultIfEmpty((null, -1))
             .MaxBy(item => item.MemoryConsumedMegabytes);
         var failures = tests
             .Select((test, index) => (test, Index: index))

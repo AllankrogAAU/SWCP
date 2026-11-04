@@ -153,4 +153,23 @@ public sealed class SubmissionPromptBuilderTests
         Assert.Contains("182", prompt.UserPrompt);
         Assert.Contains("maxDurationMilliseconds", prompt.UserPrompt);
     }
+
+    [Fact]
+    public void Build_WithoutTestResults_DoesNotThrow()
+    {
+        var assignment = CreateAssignment();
+        var submission = CreateSubmission("submit");
+        var sandboxResult = new SandboxResult(
+            Guid.NewGuid(),
+            new CompilationResult(false, "", "error: expected semicolon", 1, 15),
+            [],
+            [],
+            "compile_failed");
+
+        var prompt = SubmissionPromptBuilder.Build(assignment, submission, sandboxResult);
+
+        Assert.True(prompt.SandboxFailed);
+        Assert.Contains("expected semicolon", prompt.UserPrompt);
+        Assert.DoesNotContain("maxDurationMilliseconds", prompt.UserPrompt);
+    }
 }
