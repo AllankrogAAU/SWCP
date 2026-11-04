@@ -75,8 +75,11 @@ namespace coreApi.Data.Migrations
                         .IsRequired()
                         .ValueGeneratedOnAdd()
                         .HasMaxLength(16)
-                        .HasDefaultValue("submit")
-                        .HasColumnType("character varying(16)");
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("submit");
+
+                    b.Property<Guid>("AssignmentId")
+                        .HasColumnType("uuid");
 
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
@@ -90,9 +93,6 @@ namespace coreApi.Data.Migrations
 
                     b.Property<string>("LlmFeedback")
                         .HasColumnType("text");
-
-                    b.Property<bool?>("TaskSolved")
-                        .HasColumnType("boolean");
 
                     b.Property<int>("RetryCount")
                         .HasColumnType("integer");
@@ -108,6 +108,9 @@ namespace coreApi.Data.Migrations
                         .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
+
+                    b.Property<bool?>("TaskSolved")
+                        .HasColumnType("boolean");
 
                     b.Property<DateTimeOffset>("UpdatedAtUtc")
                         .HasColumnType("timestamp with time zone");
@@ -137,11 +140,6 @@ namespace coreApi.Data.Migrations
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<string>("Username")
-                        .IsRequired()
-                        .HasMaxLength(320)
-                        .HasColumnType("character varying(320)");
-
                     b.Property<string>("PasswordHash")
                         .IsRequired()
                         .HasColumnType("text");
@@ -151,12 +149,40 @@ namespace coreApi.Data.Migrations
                         .HasMaxLength(16)
                         .HasColumnType("character varying(16)");
 
+                    b.Property<string>("Username")
+                        .IsRequired()
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)");
+
                     b.HasKey("Id");
 
                     b.HasIndex("Username")
                         .IsUnique();
 
                     b.ToTable("Users");
+                });
+
+            modelBuilder.Entity("coreApi.Models.UserAssignmentState", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AssignmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CurrentCode")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool?>("TaskSolved")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTimeOffset>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("UserId", "AssignmentId");
+
+                    b.ToTable("UserAssignmentStates");
                 });
 
             modelBuilder.Entity("coreApi.Models.Submission", b =>
