@@ -134,14 +134,13 @@ export function getAssignmentState(assignmentId: string) {
   return request<AssignmentState>(`/api/assignments/${assignmentId}/state`)
 }
 
-export function saveAssignmentState(assignmentId: string, currentCode: string,) {return request<void>(
-  `/api/assignments/${assignmentId}/state`, 
-  {
-      method: 'PUT',
-      body: JSON.stringify({
-        currentCode,
-      }),
-    })
+export function saveAssignmentState(assignmentId: string, currentCode: string) {
+  return request<void>(`/api/assignments/${assignmentId}/state`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      currentCode,
+    }),
+  })
 }
 
 export function getSubmissionHistory() {

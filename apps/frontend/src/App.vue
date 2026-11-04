@@ -304,20 +304,15 @@ function formatTerminalOutput(output: unknown): string {
 }
 
 watch(code, () => {
-  if (!selectedId.value)
-    return
+  if (!selectedId.value) return
 
   window.clearTimeout(autosaveTimer)
 
   autosaveTimer = window.setTimeout(async () => {
     try {
-      await saveAssignmentState(
-        selectedId.value,
-        code.value,
-      )
+      await saveAssignmentState(selectedId.value, code.value)
       lastSavedAt.value = new Date().toISOString()
-    }
-    catch (error) {
+    } catch (error) {
       console.error('AUTOSAVE FAILED', error)
     }
   }, 1000)
@@ -417,14 +412,9 @@ onBeforeUnmount(() => {
                 <span v-if="submissionId" class="ml-2">{{ submissionId }}</span>
               </v-alert>
 
-              
-
               <v-row class="mt-2">
                 <v-col cols="12" md="7">
-                   <div
-                    v-if="lastSavedAt"
-                    class="text-caption text-grey mb-2"
-                  >
+                  <div v-if="lastSavedAt" class="text-caption text-grey mb-2">
                     Last saved:
                     {{ new Date(lastSavedAt).toLocaleString() }}
                   </div>
