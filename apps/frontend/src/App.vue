@@ -49,31 +49,44 @@ const authLoading = ref(false)
 const authError = ref('')
 const submissionId = ref('')
 const loading = computed(() => busyAction.value === 'submit' || busyAction.value === 'hint')
+const loadingAssignment = ref(false)
 const waitingForAction = computed(() => busyAction.value !== null)
 let socket: WebSocket | undefined
 let reconnectTimer: number | undefined
 let reconnectAttempts = 0
 let pollGeneration = 0
+let assignmentLoadGeneration = 0
 let autosaveTimer: number | undefined
 
 async function selectAssignment(id: string) {
-  console.log('SELECT ASSIGNMENT', id)
+  const generation = ++assignmentLoadGeneration
 
+  window.clearTimeout(autosaveTimer)
+  autosaveTimer = undefined
   selectedId.value = id
+  lastSavedAt.value = ''
+  loadingAssignment.value = true
 
   try {
-    console.log('LOADING STATE')
-
     const state = await getAssignmentState(id)
 
-    console.log('STATE', state)
+    if (generation !== assignmentLoadGeneration) {
+      return
+    }
 
     code.value = state.currentCode
     lastSavedAt.value = state.updatedAtUtc
   } catch (error) {
     console.error('FAILED TO LOAD STATE', error)
+    if (generation !== assignmentLoadGeneration) {
+      return
+    }
 
     code.value = '#include <stdio.h>\n\nint main(void) {\n    return 0;\n}'
+  } finally {
+    if (generation === assignmentLoadGeneration) {
+      loadingAssignment.value = false
+    }
   }
 
   feedback.value = ''
@@ -96,8 +109,6 @@ async function loadAssignments() {
   solvedByAssignmentId.value = latestSubmitByAssignment
 
   const firstId = assignments.value[0]?.id
-
-  console.log('FIRST ID', firstId)
 
   if (firstId) {
     console.log('CALLING SELECT ASSIGNMENT')
@@ -304,14 +315,22 @@ function formatTerminalOutput(output: unknown): string {
 }
 
 watch(code, () => {
-  if (!selectedId.value) return
+  if (loadingAssignment.value) {
+    return
+  }
+
+  const assignmentId = selectedId.value
+  if (!assignmentId) return
+  const codeToSave = code.value
 
   window.clearTimeout(autosaveTimer)
 
   autosaveTimer = window.setTimeout(async () => {
     try {
-      await saveAssignmentState(selectedId.value, code.value)
-      lastSavedAt.value = new Date().toISOString()
+      await saveAssignmentState(assignmentId, codeToSave)
+      if (selectedId.value === assignmentId) {
+        lastSavedAt.value = new Date().toISOString()
+      }
     } catch (error) {
       console.error('AUTOSAVE FAILED', error)
     }
@@ -330,6 +349,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   pollGeneration++
+  window.clearTimeout(autosaveTimer)
   window.clearTimeout(reconnectTimer)
   socket?.close()
 })
