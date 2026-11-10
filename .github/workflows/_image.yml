@@ -59,6 +59,7 @@ jobs:
           file: apps/${{ inputs.service }}/Dockerfile
           push: ${{ inputs.push }}
           load: ${{ !inputs.push }}
+          no-cache: true
           tags: |
             ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
