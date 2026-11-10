@@ -101,6 +101,52 @@ public sealed class LlmTaskProcessorTests
         Assert.Equal(new LlmTokenUsage(12, 5, 17), completion.TokenUsage);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task CompleteStreamingAsync_LocalSendsThinkingToggleOnlyWhenConfigured(bool disableThinking)
+    {
+        JsonElement? requestBody = null;
+        var handler = new StubHttpMessageHandler(request =>
+        {
+            requestBody = JsonDocument.Parse(request.Content!.ReadAsStringAsync().Result).RootElement.Clone();
+            const string events =
+                "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"feedback\\\":\\\"Ok\\\",\\\"taskSolved\\\":null}\"},\"finish_reason\":\"stop\"}]}\n\n" +
+                "data: [DONE]\n\n";
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new MemoryStream(Encoding.UTF8.GetBytes(events)))
+            };
+        });
+        using var client = new HttpClient(handler) { BaseAddress = new Uri("http://vllm.test") };
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LocalLlm:ModelName"] = "test-model",
+                ["LocalLlm:DisableThinking"] = disableThinking.ToString()
+            })
+            .Build();
+        var processor = new LlmTaskProcessor(configuration, new StubHttpClientFactory(client));
+        var task = new LlmTask(
+            Guid.NewGuid(),
+            "local",
+            "system prompt",
+            "user prompt",
+            new LlmInferenceParameters(0.2, 100, 1.0));
+
+        await processor.CompleteStreamingAsync(task, (_, _) => ValueTask.CompletedTask, CancellationToken.None);
+
+        var kwargs = requestBody!.Value.GetProperty("chat_template_kwargs");
+        if (disableThinking)
+        {
+            Assert.False(kwargs.GetProperty("enable_thinking").GetBoolean());
+        }
+        else
+        {
+            Assert.Equal(JsonValueKind.Null, kwargs.ValueKind);
+        }
+    }
+
     [Fact]
     public void RetryableLlmException_PreservesInnerExceptionAndDelay()
     {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import http.client
 import json
 import os
 import time
@@ -99,7 +100,8 @@ class TelemetryCollector:
         try:
             with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
                 data = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        # OSError covers URLError plus connection resets/refusals; HTTPException covers truncated replies.
+        except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
             raise RuntimeError(f"Telemetry request failed for {url}: {exc}") from exc
         if not isinstance(data, dict):
             raise RuntimeError(f"Telemetry endpoint returned non-object JSON: {url}")

@@ -72,6 +72,8 @@ DEFAULT_MODEL_MATRIX = (
     "deepseek-r1-distill-llama-8b",
     "qwen2.5-coder-14b",
     "qwen2.5-coder-3b",
+    "qwen3.5-9b",
+    "qwen3-14b",
     DEFAULT_CLOUD_MODEL,
 )
 
@@ -354,8 +356,86 @@ async def _run_model(
         "duration_seconds": model_end - model_start,
         "warmups": warmups,
         "gpu": summarize_gpu_samples(gpu_samples),
-        "prometheus": telemetry.collect_prometheus(model_start, model_end),
+        "prometheus": _collect_prometheus_safely(telemetry, model_start, model_end),
     }
+
+
+def _collect_prometheus_safely(telemetry: TelemetryCollector, start: float, end: float) -> dict[str, Any]:
+    try:
+        return telemetry.collect_prometheus(start, end)
+    except Exception as exc:  # noqa: BLE001 - optional telemetry must never abort a sweep
+        LOGGER.warning("Prometheus collection failed: %s", exc)
+        return {"queries": {}, "error": str(exc)[:500]}
+
+
+def _expected_per_model(sample_count: int, context_modes: list[str], burst: int, fixtures: bool) -> int:
+    return sample_count * len(context_modes) + burst + (len(FIXTURES) * len(context_modes) if fixtures else 0)
+
+
+def _load_resume_state(
+    output_dir: Path,
+    expected_per_model: int,
+    telemetry: TelemetryCollector,
+) -> tuple[set[str], list[dict[str, Any]]]:
+    """Find finished models, drop partial ones from results.jsonl, and rebuild missing model_runs entries."""
+    results_path = output_dir / "results.jsonl"
+    metadata = json.loads((output_dir / "run_metadata.json").read_text(encoding="utf-8"))
+    records = []
+    if results_path.exists():
+        with results_path.open(encoding="utf-8") as handle:
+            records = [json.loads(line) for line in handle if line.strip()]
+    counts: dict[str, int] = {}
+    for record in records:
+        if record.get("record_type") == "submission":
+            counts[record["model_key"]] = counts.get(record["model_key"], 0) + 1
+    completed = {key for key, count in counts.items() if count >= expected_per_model}
+    partial = set(counts) - completed
+
+    if partial:
+        dropped_ids = {
+            r["submission_id"] for r in records
+            if r.get("record_type") == "submission" and r.get("model_key") in partial
+        }
+        kept = [
+            r for r in records
+            if not (r.get("record_type") in {"submission", "gpu_sample"} and r.get("model_key") in partial)
+            and not (r.get("record_type") == "telemetry_update" and r.get("submission_id") in dropped_ids)
+        ]
+        temporary = results_path.with_suffix(".jsonl.tmp")
+        temporary.write_text(
+            "".join(json.dumps(r, ensure_ascii=False, separators=(",", ":")) + "\n" for r in kept),
+            encoding="utf-8",
+        )
+        temporary.replace(results_path)
+        LOGGER.warning("Discarded partial results for %s; they will be rerun.", sorted(partial))
+        records = kept
+
+    model_runs = [run for run in metadata.get("model_runs", []) if run.get("model_key") in completed]
+    for key in sorted(completed - {run["model_key"] for run in model_runs}):
+        samples = [r for r in records if r.get("record_type") == "gpu_sample" and r.get("model_key") == key]
+        epochs = [datetime.fromisoformat(r["timestamp_utc"]).timestamp() for r in samples]
+        start, end = (min(epochs), max(epochs)) if epochs else (0.0, 0.0)
+        model_runs.append({
+            "model_key": key,
+            "started_at_epoch": start,
+            "ended_at_epoch": end,
+            "duration_seconds": end - start,
+            "warmups": [],
+            "gpu": summarize_gpu_samples(samples),
+            "prometheus": _collect_prometheus_safely(telemetry, start, end) if epochs else {"queries": {}},
+            "reconstructed_on_resume": True,
+        })
+        LOGGER.info("Rebuilt the missing model_runs entry for %s from its GPU samples.", key)
+    return completed, model_runs
+
+
+def _samples_from_manifest(output_dir: Path, candidate_pool: list[CodeNetSample]) -> list[CodeNetSample]:
+    manifest = json.loads((output_dir / "samples.json").read_text(encoding="utf-8"))
+    by_id = {sample.submission_id: sample for sample in candidate_pool}
+    missing = [submission_id for submission_id in manifest if submission_id not in by_id]
+    if missing:
+        raise RuntimeError(f"{len(missing)} samples from samples.json are not in the candidate pool, e.g. {missing[:3]}.")
+    return [by_id[submission_id] for submission_id in manifest]
 
 
 async def _run_warmups(
@@ -623,9 +703,24 @@ async def _validate_candidate_pool(
 
 async def run(args: argparse.Namespace) -> Path:
     resolve_teacher_token(args.target_url)  # fail fast before the long archive scan
-    run_id = f"codenet_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}"
-    output_dir = args.results_dir.expanduser().resolve() / run_id
-    output_dir.mkdir(parents=True, exist_ok=False)
+    resume_metadata: dict[str, Any] | None = None
+    if args.resume:
+        output_dir = args.resume.expanduser().resolve()
+        run_id = output_dir.name
+        resume_metadata = json.loads((output_dir / "run_metadata.json").read_text(encoding="utf-8"))
+        # The original selection parameters guarantee the same candidate pool and samples.
+        args.seed = resume_metadata["dataset_seed"]
+        args.per_status = resume_metadata["per_status"]
+        args.validation_candidate_multiplier = resume_metadata["validation_candidate_multiplier"]
+        args.statuses = resume_metadata["statuses"]
+        args.context_modes = resume_metadata["context_modes"]
+        args.burst_size = resume_metadata["burst_size"]
+        args.models = args.models or resume_metadata["models"]
+        LOGGER.info("Resuming run %s.", run_id)
+    else:
+        run_id = f"codenet_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}"
+        output_dir = args.results_dir.expanduser().resolve() / run_id
+        output_dir.mkdir(parents=True, exist_ok=False)
     candidate_pool = load_archive_samples(
         args.archive,
         args.cache_dir,
@@ -667,18 +762,23 @@ async def run(args: argparse.Namespace) -> Path:
         args.progress_file, 0, [model.key for model in models], run_id, every=args.progress_every,
     )
     progress.set_phase("validation", note=f"Validating CodeNet candidates (token budget {args.token_budget})")
-    samples, validation_records = await _validate_candidate_pool(
-        candidate_pool,
-        assignments,
-        tokens,
-        config,
-        output_dir / "validation.json",
-        run_id,
-        args.per_status,
-        args.token_budget,
-        args.max_attempts,
-        args.retry_backoff_seconds,
-    )
+    if resume_metadata is not None:
+        samples = _samples_from_manifest(output_dir, candidate_pool)
+        validation_record_count = resume_metadata["validation_record_count"]
+    else:
+        samples, validation_records = await _validate_candidate_pool(
+            candidate_pool,
+            assignments,
+            tokens,
+            config,
+            output_dir / "validation.json",
+            run_id,
+            args.per_status,
+            args.token_budget,
+            args.max_attempts,
+            args.retry_backoff_seconds,
+        )
+        validation_record_count = len(validation_records)
     if not samples:
         raise RuntimeError("No CodeNet samples passed sandbox validation and the token preflight.")
     shortfall = {
@@ -687,7 +787,8 @@ async def run(args: argparse.Namespace) -> Path:
     }
     if any(shortfall.values()):
         LOGGER.warning("Validated fewer samples than requested: %s", {k: v for k, v in shortfall.items() if v})
-    _write_samples_manifest(output_dir / "samples.json", samples)
+    if resume_metadata is None:
+        _write_samples_manifest(output_dir / "samples.json", samples)
     burst_submissions_per_model = len(_select_burst_samples(samples, args.burst_size))
     model_manager = LocalModelManager(namespace=args.namespace)
     controls = RunControls(
@@ -697,7 +798,16 @@ async def run(args: argparse.Namespace) -> Path:
         progress=progress,
     )
     telemetry = TelemetryCollector(config)
+    completed_models: set[str] = set()
     model_runs: list[dict[str, Any]] = []
+    if resume_metadata is not None:
+        completed_models, model_runs = _load_resume_state(
+            output_dir,
+            _expected_per_model(len(samples), args.context_modes, burst_submissions_per_model,
+                                fixture_assignment_id is not None and not args.skip_fixtures),
+            telemetry,
+        )
+        LOGGER.info("Already completed: %s.", sorted(completed_models) or "none")
     metadata = {
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_value("rev-parse", "HEAD"),
@@ -708,7 +818,7 @@ async def run(args: argparse.Namespace) -> Path:
         "per_status": args.per_status,
         "validation_candidate_multiplier": args.validation_candidate_multiplier,
         "validated_sample_count": len(samples),
-        "validation_record_count": len(validation_records),
+        "validation_record_count": validation_record_count,
         "statuses": list(args.statuses),
         "context_modes": list(args.context_modes),
         "models": [model.key for model in models],
@@ -727,11 +837,23 @@ async def run(args: argparse.Namespace) -> Path:
         "validated_counts": {status: sum(s.status == status for s in samples) for status in args.statuses},
     }
     progress.total = metadata["submission_count_expected"]
+    if resume_metadata is not None:
+        metadata["started_at_utc"] = resume_metadata.get("started_at_utc", metadata["started_at_utc"])
+        metadata["resumed_at_utc"] = [
+            *resume_metadata.get("resumed_at_utc", []), datetime.now(timezone.utc).isoformat(),
+        ]
+        metadata["model_runs"] = model_runs
+        progress.completed = progress.succeeded = (
+            progress.total // max(1, len(models)) * len(completed_models & {m.key for m in models})
+        )
     _write_run_summary(output_dir / "run_metadata.json", run_id, metadata)
 
     try:
         with JsonlWriter(output_dir / "results.jsonl") as writer:
             for model in models:
+                if model.key in completed_models:
+                    LOGGER.info("Skipping %s; it already completed in this run.", model.key)
+                    continue
                 LOGGER.info("Starting benchmark for %s (%s).", model.display_name, model.backend)
                 progress.set_phase("model_swap", model.key, f"Switching to {model.display_name}")
                 try:
@@ -865,6 +987,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--progress-every", type=int, default=10)
     parser.add_argument("--skip-judge", action="store_true")
     parser.add_argument("--skip-report", action="store_true")
+    parser.add_argument(
+        "--resume", type=Path, default=None,
+        help="Continue an interrupted run directory: reuse its samples and skip models that already finished.",
+    )
     add_judge_arguments(parser)
     cost = parser.add_argument_group("cost model (report)")
     cost.add_argument("--electricity-usd-per-kwh", type=float, default=0.30)

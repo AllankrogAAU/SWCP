@@ -32,7 +32,11 @@ LARGE_MODEL_VLLM_ENV = (("VLLM_MAX_MODEL_LEN", "4096"), ("VLLM_GPU_MEMORY_UTILIZ
 VLLM_TRACKED_ENV = (
     "LLM_MODEL_NAME", "LLM_MODEL_PATH", "VLLM_MAX_MODEL_LEN", "VLLM_GPU_MEMORY_UTILIZATION", "VLLM_QUANTIZATION",
 )
-WORKER_TRACKED_ENV = ("LocalLlm__ModelName", "LocalLlm__MaxTokens", "LocalLlm__MergeSystemPrompt")
+WORKER_TRACKED_ENV = (
+    "LocalLlm__ModelName", "LocalLlm__MaxTokens", "LocalLlm__MergeSystemPrompt", "LocalLlm__DisableThinking",
+)
+# Qwen3/Qwen3.5 are hybrid reasoning models; thinking is disabled so they answer like the instruct baselines.
+NO_THINKING_WORKER_ENV = (("LocalLlm__DisableThinking", "true"),)
 
 
 MODELS = {
@@ -95,6 +99,24 @@ MODELS = {
         "mistral-nemo-instruct-2407-awq",
         "Mistral-Nemo-Instruct-2407-AWQ",
         vllm_env=LARGE_MODEL_VLLM_ENV,
+    ),
+    "qwen3.5-9b": ModelSpec(
+        "qwen3.5-9b",
+        "local",
+        "Qwen3.5-9B-AWQ-4bit",
+        "qwen3.5-9b-awq-4bit",
+        "Qwen3.5-9B-AWQ-4bit",
+        vllm_env=(*LARGE_MODEL_VLLM_ENV, ("VLLM_QUANTIZATION", "compressed-tensors")),
+        worker_env=NO_THINKING_WORKER_ENV,
+    ),
+    "qwen3-14b": ModelSpec(
+        "qwen3-14b",
+        "local",
+        "Qwen3-14B-AWQ",
+        "qwen3-14b-awq",
+        "Qwen3-14B-AWQ",
+        vllm_env=LARGE_MODEL_VLLM_ENV,
+        worker_env=NO_THINKING_WORKER_ENV,
     ),
     "azure-gpt-4o": ModelSpec(
         "azure-gpt-4o",

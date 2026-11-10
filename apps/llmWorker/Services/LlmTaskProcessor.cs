@@ -85,6 +85,10 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
         return cap is > 0 ? Math.Min(task.Parameters.MaxTokens, cap.Value) : task.Parameters.MaxTokens;
     }
 
+    // Hybrid reasoning models (Qwen3/Qwen3.5) otherwise spend the output budget on a thinking block.
+    private object? LocalChatTemplateKwargs =>
+        configuration.GetValue<bool>("LocalLlm:DisableThinking") ? new { enable_thinking = false } : null;
+
     private object[] LocalMessages(LlmTask task) =>
         configuration.GetValue<bool>("LocalLlm:MergeSystemPrompt")
             ? [new { role = "user", content = $"{task.SystemPrompt}\n\n{task.UserPrompt}" }]
@@ -203,6 +207,7 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             top_p = task.Parameters.TopP,
             presence_penalty = 0.3,
             frequency_penalty = 0.3,
+            chat_template_kwargs = LocalChatTemplateKwargs,
             response_format = new
             {
                 type = "json_schema",
@@ -388,6 +393,7 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                 frequency_penalty = 0.3,
                 stream = true,
                 stream_options = new { include_usage = true },
+                chat_template_kwargs = LocalChatTemplateKwargs,
                 response_format = new
                 {
                     type = "json_schema",

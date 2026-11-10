@@ -17,12 +17,20 @@ class ModelManagerTests(unittest.TestCase):
             "qwen2.5-coder-14b": "Qwen2.5-Coder-14B-Instruct-AWQ",
             "meta-llama-3.1-8b": "Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
             "deepseek-r1-distill-qwen-7b": "deepseek-r1-distill-qwen-7b-awq",
+            "qwen3.5-9b": "Qwen3.5-9B-AWQ-4bit",
+            "qwen3-14b": "Qwen3-14B-AWQ",
         }
 
         for key, path in expected.items():
             with self.subTest(model=key):
                 self.assertEqual("local", MODELS[key].backend)
                 self.assertEqual(path, MODELS[key].vllm_path)
+
+    def test_hybrid_reasoning_qwen_models_disable_thinking(self) -> None:
+        for key in ("qwen3.5-9b", "qwen3-14b"):
+            with self.subTest(model=key):
+                self.assertIn(("LocalLlm__DisableThinking", "true"), MODELS[key].worker_env)
+        self.assertIn(("VLLM_QUANTIZATION", "compressed-tensors"), MODELS["qwen3.5-9b"].vllm_env)
 
     def test_restore_removes_overrides_to_recover_configmap_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
