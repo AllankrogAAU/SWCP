@@ -69,6 +69,40 @@ public sealed class SubmissionEndpointsTests : IClassFixture<CoreApiTestFixture>
     }
 
     [Fact]
+    public async Task CreateSubmission_SourceAtMostOneMegabyte_Returns202Accepted()
+    {
+        var student = await _fixture.SeedUserAsync("student_max_source", "pass123", UserRole.Student);
+        var assignment = await _fixture.SeedAssignmentAsync("Maximum Source Assignment");
+        var token = _fixture.GenerateJwt(student);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/submissions");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        request.Content = JsonContent.Create(new CreateSubmissionRequest(
+            assignment.Id, new string('a', 1_000_000), "azure", "submit"));
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CreateSubmission_SourceOverOneMegabyte_Returns400BadRequest()
+    {
+        var student = await _fixture.SeedUserAsync("student_over_source", "pass123", UserRole.Student);
+        var assignment = await _fixture.SeedAssignmentAsync("Oversized Source Assignment");
+        var token = _fixture.GenerateJwt(student);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/submissions");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        request.Content = JsonContent.Create(new CreateSubmissionRequest(
+            assignment.Id, new string('a', 1_000_001), "azure", "submit"));
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
     public async Task CreateSubmission_InvalidBackend_Returns400BadRequest()
     {
         var student = await _fixture.SeedUserAsync("student_invalid_backend", "pass123", UserRole.Student);

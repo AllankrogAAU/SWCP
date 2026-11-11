@@ -78,6 +78,21 @@ public sealed class SubmissionPromptBuilderTests
         Assert.Contains("The sandbox reported a compilation or runtime failure", prompt.SystemPrompt);
     }
 
+    [Theory]
+    [InlineData("submit")]
+    [InlineData("hint")]
+    public void Build_FailedTestCase_MarksSandboxFailedForSubmitAndHint(string action)
+    {
+        var assignment = CreateAssignment();
+        var submission = CreateSubmission(action);
+        var sandboxResult = CreateSandboxResult(compileSuccess: true, testPassed: false);
+
+        var prompt = SubmissionPromptBuilder.Build(assignment, submission, sandboxResult);
+
+        Assert.Equal(action, prompt.EvaluationMode);
+        Assert.True(prompt.SandboxFailed);
+    }
+
     [Fact]
     public void Build_UnsupportedAction_ThrowsArgumentException()
     {
