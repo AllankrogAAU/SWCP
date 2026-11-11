@@ -15,6 +15,11 @@ export interface Assignment {
   description: string
 }
 
+export interface AssignmentState {
+  currentCode: string
+  updatedAtUtc: string
+}
+
 export interface LoginResponse {
   accessToken: string
   tokenType: string
@@ -123,6 +128,19 @@ export function login(username: string, password: string) {
 
 export function getAssignments() {
   return request<Assignment[]>('/api/assignments/')
+}
+
+export function getAssignmentState(assignmentId: string) {
+  return request<AssignmentState>(`/api/assignments/${assignmentId}/state`)
+}
+
+export function saveAssignmentState(assignmentId: string, currentCode: string) {
+  return request<void>(`/api/assignments/${assignmentId}/state`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      currentCode,
+    }),
+  })
 }
 
 export function getSubmissionHistory() {

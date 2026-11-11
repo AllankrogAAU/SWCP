@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import CodeEditorBox from './Components/CodeEditorBox.vue'
 import AiFeedbackpanel from './Components/AiFeedbackpanel.vue'
 import AssignmentList from './Components/AssignmentList.vue'
@@ -7,6 +7,8 @@ import {
   clearAccessToken,
   getAccessToken,
   getAssignments,
+  getAssignmentState,
+  saveAssignmentState,
   getSubmissionHistory,
   getSubmission,
   login,
@@ -30,6 +32,7 @@ const selected = computed(() =>
   assignments.value.find((assignment) => assignment.id === selectedId.value),
 )
 const code = ref('#include <stdio.h>\n\nint main(void) {\n    return 0;\n}')
+const lastSavedAt = ref('')
 const standardInput = ref('')
 const feedback = ref('')
 const busyAction = ref<'hint' | 'run' | 'submit' | null>(null)
@@ -46,16 +49,47 @@ const authLoading = ref(false)
 const authError = ref('')
 const submissionId = ref('')
 const loading = computed(() => busyAction.value === 'submit' || busyAction.value === 'hint')
+const loadingAssignment = ref(false)
 const waitingForAction = computed(() => busyAction.value !== null)
 let socket: WebSocket | undefined
 let reconnectTimer: number | undefined
 let reconnectAttempts = 0
 let pollGeneration = 0
+let assignmentLoadGeneration = 0
+let autosaveTimer: number | undefined
 
-function selectAssignment(id: string) {
+async function selectAssignment(id: string) {
+  const generation = ++assignmentLoadGeneration
+
+  window.clearTimeout(autosaveTimer)
+  autosaveTimer = undefined
   selectedId.value = id
-  code.value = '#include <stdio.h>\n\nint main(void) {\n    return 0;\n}'
+  lastSavedAt.value = ''
   standardInput.value = ''
+  loadingAssignment.value = true
+
+  try {
+    const state = await getAssignmentState(id)
+
+    if (generation !== assignmentLoadGeneration) {
+      return
+    }
+
+    code.value = state.currentCode
+    lastSavedAt.value = state.updatedAtUtc
+  } catch (error) {
+    console.error('FAILED TO LOAD STATE', error)
+    if (generation !== assignmentLoadGeneration) {
+      return
+    }
+
+    code.value = '#include <stdio.h>\n\nint main(void) {\n    return 0;\n}'
+  } finally {
+    if (generation === assignmentLoadGeneration) {
+      loadingAssignment.value = false
+    }
+  }
+
   feedback.value = ''
   error.value = ''
   terminalOutput.value = ''
@@ -74,8 +108,12 @@ async function loadAssignments() {
     }
   }
   solvedByAssignmentId.value = latestSubmitByAssignment
-  if (!assignments.value.some((assignment) => assignment.id === selectedId.value)) {
-    selectedId.value = assignments.value[0]?.id ?? ''
+
+  const firstId = assignments.value[0]?.id
+
+  if (firstId) {
+    console.log('CALLING SELECT ASSIGNMENT')
+    await selectAssignment(firstId)
   }
 }
 
@@ -96,6 +134,9 @@ async function authenticate() {
 }
 
 function logout() {
+  window.clearTimeout(autosaveTimer)
+  autosaveTimer = undefined
+
   clearAccessToken()
   authenticated.value = false
   assignments.value = []
@@ -277,6 +318,29 @@ function formatTerminalOutput(output: unknown): string {
   return lines.join('\n') || JSON.stringify(output, null, 2)
 }
 
+watch(code, () => {
+  if (loadingAssignment.value) {
+    return
+  }
+
+  const assignmentId = selectedId.value
+  if (!assignmentId) return
+  const codeToSave = code.value
+
+  window.clearTimeout(autosaveTimer)
+
+  autosaveTimer = window.setTimeout(async () => {
+    try {
+      await saveAssignmentState(assignmentId, codeToSave)
+      if (selectedId.value === assignmentId) {
+        lastSavedAt.value = new Date().toISOString()
+      }
+    } catch (error) {
+      console.error('AUTOSAVE FAILED', error)
+    }
+  }, 1000)
+})
+
 onMounted(async () => {
   if (authenticated.value) {
     try {
@@ -289,6 +353,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   pollGeneration++
+  window.clearTimeout(autosaveTimer)
   window.clearTimeout(reconnectTimer)
   socket?.close()
 })
@@ -373,6 +438,11 @@ onBeforeUnmount(() => {
 
               <v-row class="mt-2">
                 <v-col cols="12" md="7">
+                  <div v-if="lastSavedAt" class="text-caption text-grey mb-2">
+                    Last saved:
+                    {{ new Date(lastSavedAt).toLocaleString() }}
+                  </div>
+
                   <CodeEditorBox
                     v-model="code"
                     v-model:standard-input="standardInput"

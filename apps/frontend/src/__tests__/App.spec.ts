@@ -7,6 +7,8 @@ const api = vi.hoisted(() => ({
   clearAccessToken: vi.fn<(...args: unknown[]) => unknown>(),
   getAccessToken: vi.fn<(...args: unknown[]) => unknown>(),
   getAssignments: vi.fn<(...args: unknown[]) => unknown>(),
+  getAssignmentState: vi.fn<(...args: unknown[]) => unknown>(),
+  saveAssignmentState: vi.fn<(...args: unknown[]) => unknown>(),
   getSubmissionHistory: vi.fn<(...args: unknown[]) => unknown>(),
   getSubmission: vi.fn<(...args: unknown[]) => unknown>(),
   login: vi.fn<(...args: unknown[]) => unknown>(),
@@ -25,7 +27,16 @@ vi.mock('../Components/CodeEditorBox.vue', () => ({
     props: ['busyAction', 'terminalOutput', 'modelValue', 'standardInput'],
     emits: ['submit', 'hint', 'run', 'update:standardInput'],
     template:
-      '<div><textarea data-test="stdin" :value="standardInput" @input="$emit(\'update:standardInput\', $event.target.value)" /><button data-test="submit" :disabled="busyAction !== null" @click="$emit(\'submit\')">Submit</button><button data-test="hint" :disabled="busyAction !== null" @click="$emit(\'hint\')">Hint</button><button data-test="run" :disabled="busyAction !== null" @click="$emit(\'run\')">Run</button><pre>{{ terminalOutput }}</pre></div>',
+      '<div><textarea data-test="code" :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" /><textarea data-test="stdin" :value="standardInput" @input="$emit(\'update:standardInput\', $event.target.value)" /><button data-test="submit" :disabled="busyAction !== null" @click="$emit(\'submit\')">Submit</button><button data-test="hint" :disabled="busyAction !== null" @click="$emit(\'hint\')">Hint</button><button data-test="run" :disabled="busyAction !== null" @click="$emit(\'run\')">Run</button><pre>{{ terminalOutput }}</pre></div>',
+  },
+}))
+
+vi.mock('../Components/AssignmentList.vue', () => ({
+  default: {
+    props: ['assignments', 'selectedId'],
+    emits: ['select'],
+    template:
+      '<div><button v-for="assignment in assignments" :key="assignment.id" :data-test="`assignment-${assignment.id}`" @click="$emit(\'select\', assignment.id)">{{ assignment.title }}</button></div>',
   },
 }))
 
@@ -38,6 +49,11 @@ describe('App', () => {
     api.getAssignments.mockResolvedValue([
       { id: 'assignment-id', title: 'Hello C', description: 'Print a greeting.' },
     ])
+    api.getAssignmentState.mockResolvedValue({
+      currentCode: 'initial code',
+      updatedAtUtc: '2026-11-10T00:00:00Z',
+    })
+    api.saveAssignmentState.mockResolvedValue(undefined)
     api.getSubmissionHistory.mockResolvedValue([])
     api.submitSource.mockResolvedValue({ submissionId: 'submission-id', status: 'SANDBOX_QUEUED' })
     api.requestHint.mockResolvedValue({ submissionId: 'hint-id', status: 'SANDBOX_QUEUED' })
@@ -151,6 +167,50 @@ describe('App', () => {
     await flushPromises()
 
     expect(wrapper.html()).toContain('Task judged not solved')
+  })
+
+  it('cancels a pending autosave when switching assignments', async () => {
+    vi.useFakeTimers()
+    let resolveSecondState!: (value: { currentCode: string; updatedAtUtc: string }) => void
+    api.getAssignments.mockResolvedValue([
+      { id: 'first', title: 'First', description: 'First assignment.' },
+      { id: 'second', title: 'Second', description: 'Second assignment.' },
+    ])
+    api.getAssignmentState.mockImplementation((id) => {
+      if (id === 'first') {
+        return Promise.resolve({
+          currentCode: 'first assignment code',
+          updatedAtUtc: '2026-11-10T00:00:00Z',
+        })
+      }
+      return new Promise((resolve) => {
+        resolveSecondState = resolve
+      })
+    })
+
+    const wrapper = mount(App)
+    await wrapper.find('v-form').trigger('submit')
+    await flushPromises()
+    await wrapper.get('[data-test="code"]').setValue('unsaved first assignment code')
+    await wrapper.get('[data-test="assignment-second"]').trigger('click')
+
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(api.saveAssignmentState).not.toHaveBeenCalled()
+
+    resolveSecondState({
+      currentCode: 'second assignment code',
+      updatedAtUtc: '2026-11-10T00:00:00Z',
+    })
+    await flushPromises()
+    await wrapper.get('[data-test="code"]').setValue('edited second assignment code')
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(api.saveAssignmentState).toHaveBeenCalledExactlyOnceWith(
+      'second',
+      'edited second assignment code',
+    )
+    wrapper.unmount()
+    vi.useRealTimers()
   })
 
   it('disables all code actions while a submission request is pending', async () => {
