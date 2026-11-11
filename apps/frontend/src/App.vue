@@ -65,6 +65,7 @@ async function selectAssignment(id: string) {
   autosaveTimer = undefined
   selectedId.value = id
   lastSavedAt.value = ''
+  standardInput.value = ''
   loadingAssignment.value = true
 
   try {
