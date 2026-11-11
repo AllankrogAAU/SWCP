@@ -25,7 +25,7 @@ from pydantic import ValidationError
 
 from contracts import CompilationResult, SandboxResult, SandboxTask, SandboxTestResult
 from evaluation.evaluator import evaluate
-from sandbox.interface import Limits
+from sandbox.interface import Limits, PermanentSandboxError
 from sandbox.k8s_pod import KubeSandboxProvider, PodConfig
 
 NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
@@ -94,6 +94,33 @@ else:
     trace.set_tracer_provider(tracer_provider)
 
 tracer = trace.get_tracer("c-sandbox-worker")
+
+
+async def _fail_message(message, jetstream, task, error_text: str) -> None:
+    await jetstream.publish(
+        "sandbox.tasks.dlq",
+        message.data,
+        headers={"Nats-Msg-Id": f"{task.submissionId}-sandbox-dlq"},
+    )
+    failed_result = SandboxResult(
+        submissionId=task.submissionId,
+        compilation=CompilationResult(
+            success=False,
+            stdout="",
+            stderr=error_text,
+            exitCode=None,
+            durationMilliseconds=None,
+        ),
+        staticAnalysis=[],
+        testResults=[],
+        errorClassification=f"worker-error:{error_text}",
+    )
+    await jetstream.publish(
+        RESULT_SUBJECT,
+        failed_result.model_dump_json().encode("utf-8"),
+        headers={"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"},
+    )
+    await message.ack()
 
 
 def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
@@ -258,6 +285,23 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
                     "outcome": result.errorClassification,
                 },
             )
+    except PermanentSandboxError as exception:
+        error_text = str(exception)
+        logger.exception(
+            "Sandbox evaluation failed permanently",
+            extra={
+                "event_name": "pipeline.stage.failed",
+                "stage": "sandbox",
+                "submission_id": str(task.submissionId),
+                "traceparent": trace_parent,
+                "duration_ms": round((time.perf_counter() - stage_started) * 1000),
+                "attempt": attempt,
+                "status": "failed",
+                "error_type": type(exception).__name__,
+            },
+        )
+        await _fail_message(message, jetstream, task, error_text)
+        return
     except Exception:
         delivered = getattr(getattr(message, "metadata", None), "num_delivered", 1)
         if delivered >= 3:
@@ -275,30 +319,7 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
                     "error_type": "RetriesExhausted",
                 },
             )
-            await jetstream.publish(
-                "sandbox.tasks.dlq",
-                message.data,
-                headers={"Nats-Msg-Id": f"{task.submissionId}-sandbox-dlq"},
-            )
-            failed_result = SandboxResult(
-                submissionId=task.submissionId,
-                compilation=CompilationResult(
-                    success=False,
-                    stdout="",
-                    stderr=error_text,
-                    exitCode=None,
-                    durationMilliseconds=None,
-                ),
-                staticAnalysis=[],
-                testResults=[],
-                errorClassification=f"worker-error:{error_text}",
-            )
-            await jetstream.publish(
-                RESULT_SUBJECT,
-                failed_result.model_dump_json().encode("utf-8"),
-                headers={"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"},
-            )
-            await message.ack()
+            await _fail_message(message, jetstream, task, error_text)
             logger.error(
                 "Sandbox retries exhausted for submission %s; sent to DLQ",
                 task.submissionId,

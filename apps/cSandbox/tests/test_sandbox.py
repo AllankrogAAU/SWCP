@@ -1,19 +1,29 @@
+import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
+from kubernetes.client.rest import ApiException
 
 from contracts import SandboxTask, SandboxTestCase
 from evaluation.evaluator import evaluate
 from evaluation.result import EvaluationResult, PhaseResult, SandboxReport, Status
-from sandbox.interface import Limits, SandboxError, SandboxStartError
+from sandbox.interface import (
+    Limits,
+    PermanentSandboxError,
+    SandboxError,
+    SandboxStartError,
+)
 from sandbox.k8s_pod import (
     KubePodSandbox,
     KubeSandboxProvider,
     PodConfig,
+    _api_sandbox_error,
     build_pod_manifest,
 )
 from sandbox.report import parse_report
-from worker import evaluate_task
+from worker import evaluate_task, handle_message
 
 
 def b64(text: str) -> str:
@@ -227,6 +237,87 @@ def test_gives_up_after_second_failure() -> None:
     provider = FakeProvider(SandboxError("a"), SandboxError("b"))
     with pytest.raises(SandboxError):
         evaluate("x", provider)
+
+
+def test_permanent_failure_is_not_retried_by_evaluator() -> None:
+    provider = FakeProvider(
+        PermanentSandboxError("forbidden"), SandboxReport(phase(), phase(), phase())
+    )
+    first, second = provider.sandboxes
+
+    with pytest.raises(PermanentSandboxError, match="forbidden"):
+        evaluate("x", provider)
+
+    assert first.destroyed
+    assert not second.destroyed
+
+
+def test_kubernetes_client_errors_are_classified_by_status() -> None:
+    permanent = _api_sandbox_error(
+        "create pod", ApiException(status=403, reason="Forbidden")
+    )
+    transient = _api_sandbox_error(
+        "create pod", ApiException(status=503, reason="Unavailable")
+    )
+
+    assert isinstance(permanent, PermanentSandboxError)
+    assert type(transient) is SandboxError
+
+
+def test_worker_dead_letters_permanent_failure_without_retry(monkeypatch) -> None:
+    task = SandboxTask(
+        submissionId="00000000-0000-0000-0000-000000000001",
+        assignmentId="00000000-0000-0000-0000-000000000002",
+        source="int main(void) { return 0; }",
+        compilerFlags=[],
+        testCases=[],
+    )
+
+    class FakeMessage:
+        data = task.model_dump_json().encode("utf-8")
+        headers = {}
+        metadata = SimpleNamespace(num_delivered=1)
+
+        def __init__(self) -> None:
+            self.acked = False
+            self.nacked = False
+
+        async def ack(self) -> None:
+            self.acked = True
+
+        async def nak(self) -> None:
+            self.nacked = True
+
+    class FakeConnection:
+        async def publish(self, *_args, **_kwargs) -> None:
+            pass
+
+    class FakeJetStream:
+        def __init__(self) -> None:
+            self.published = []
+
+        async def publish(self, subject, data, **kwargs) -> None:
+            self.published.append((subject, data, kwargs))
+
+    def fail_evaluation(*_args):
+        raise PermanentSandboxError("Kubernetes API forbids pod creation")
+
+    monkeypatch.setattr("worker.evaluate_task", fail_evaluation)
+    message = FakeMessage()
+    jetstream = FakeJetStream()
+
+    async def run() -> None:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            await handle_message(message, FakeConnection(), jetstream, object(), executor)
+
+    asyncio.run(run())
+
+    assert message.acked
+    assert not message.nacked
+    assert [subject for subject, _, _ in jetstream.published] == [
+        "sandbox.tasks.dlq",
+        "sandbox.results",
+    ]
 
 
 def test_pod_manifest_is_hardened_and_gvisor() -> None:
