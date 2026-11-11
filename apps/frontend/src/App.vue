@@ -134,6 +134,9 @@ async function authenticate() {
 }
 
 function logout() {
+  window.clearTimeout(autosaveTimer)
+  autosaveTimer = undefined
+
   clearAccessToken()
   authenticated.value = false
   assignments.value = []
