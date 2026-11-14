@@ -374,7 +374,7 @@
         "enableLogDetails": true,
         "prettifyLogMessage": true,
         "showCommonLabels": false,
-        "showLabels": false,
+        "showLabels": true,
         "sortOrder": "Descending",
         "wrapLogMessage": true
       },
@@ -436,9 +436,14 @@
             "selected": false,
             "text": "Individual Pod (pod)",
             "value": "pod"
+          },
+          {
+            "selected": false,
+            "text": "Host / Node (node)",
+            "value": "node"
           }
         ],
-        "query": "container,pod",
+        "query": "container,pod,node",
         "skipUrlSync": false,
         "type": "custom"
       },

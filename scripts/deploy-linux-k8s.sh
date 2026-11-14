@@ -4,7 +4,37 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-TARGET_SERVICE="${1:-all}"
+read_env_var() {
+  local key="$1"
+  [ -f "$ROOT/.env" ] || return 0
+  grep -E "^[[:space:]]*${key}[[:space:]]*=" "$ROOT/.env" | tail -n1 | cut -d= -f2- | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]"'\''\r]+//; s/[[:space:]"'\''\r]+$//' || true
+}
+
+IMAGES_ONLY=0
+TARGET_SERVICE=""
+for arg in "$@"; do
+  case "$arg" in
+    --images-only)
+      IMAGES_ONLY=1 ;;
+    -h|--help)
+      echo "Usage: bash $0 [service|all|c-sandbox|vllm] [--images-only]"
+      exit 0 ;;
+    *)
+      if [ -z "$TARGET_SERVICE" ]; then
+        TARGET_SERVICE="$arg"
+      else
+        echo "Unexpected argument: $arg" >&2
+        exit 1
+      fi ;;
+  esac
+done
+TARGET_SERVICE="${TARGET_SERVICE:-all}"
+
+CLUSTER_ROLE_VAL="${CLUSTER_ROLE:-$(read_env_var CLUSTER_ROLE)}"
+if [ "$IMAGES_ONLY" -eq 0 ] && [ "$CLUSTER_ROLE_VAL" = "worker" ]; then
+  IMAGES_ONLY=1
+  echo "Detected CLUSTER_ROLE=worker; running in --images-only mode (building & importing images locally into this node)."
+fi
 
 # Find workable kubeconfig
 if [ -z "${KUBECONFIG:-}" ]; then
@@ -15,9 +45,10 @@ if [ -z "${KUBECONFIG:-}" ]; then
   fi
 fi
 
-if ! kubectl get nodes >/dev/null 2>&1; then
+if [ "$IMAGES_ONLY" -eq 0 ] && ! kubectl get nodes >/dev/null 2>&1; then
   echo "Error: Cannot connect to Kubernetes cluster using kubectl." >&2
   echo "Make sure k3s is running ('systemctl status k3s') and KUBECONFIG is readable." >&2
+  echo "On a worker node, pass '--images-only' or set CLUSTER_ROLE=worker in .env to build/import local images." >&2
   echo "If you haven't run host setup yet, run: sudo bash scripts/setup-host-prereqs.sh" >&2
   exit 1
 fi
@@ -42,36 +73,67 @@ if ! k3s ctr images list >/dev/null 2>&1; then
   CTR_CMD="sudo k3s ctr"
 fi
 
-echo "=== Kubernetes node status ==="
-kubectl get nodes -o wide
+if [ "$IMAGES_ONLY" -eq 0 ]; then
+  echo "=== Kubernetes node status ==="
+  kubectl get nodes -o wide
 
-echo "=== Ensuring metrics-server is installed ==="
-kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml >/dev/null 2>&1 || true
-if ! kubectl get deployment metrics-server -n kube-system -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null | grep -q -- '--kubelet-insecure-tls'; then
-  kubectl patch deployment metrics-server -n kube-system --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kubelet-insecure-tls"}]' || true
-fi
-
-if ! kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
-  echo "=== Ensuring KEDA is installed ==="
-  kubectl apply --server-side -f https://github.com/kedacore/keda/releases/download/v2.16.1/keda-2.16.1.yaml >/dev/null 2>&1 || true
-fi
-
-if ! kubectl get deployment ingress-nginx-controller -n ingress-nginx >/dev/null 2>&1; then
-  echo "=== Ensuring Ingress-NGINX is installed with hostNetwork ==="
-  kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.1/deploy/static/provider/cloud/deploy.yaml >/dev/null 2>&1 || true
-
-  if [ "$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.type}' 2>/dev/null || true)" != "ClusterIP" ]; then
-    kubectl patch service ingress-nginx-controller -n ingress-nginx --type=merge -p '{"spec":{"type":"ClusterIP"}}' || true
-  fi
-  if [ "$(kubectl get deployment ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.template.spec.hostNetwork}' 2>/dev/null || true)" != "true" ]; then
-    kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type=json -p='[{"op":"add","path":"/spec/template/spec/hostNetwork","value":true},{"op":"add","path":"/spec/template/spec/dnsPolicy","value":"ClusterFirstWithHostNet"}]' || true
-  fi
-  if [ "$(kubectl get deployment ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.strategy.type}' 2>/dev/null || true)" != "Recreate" ]; then
-    kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type=json -p='[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]' || true
+  echo "=== Labeling cluster nodes (GPU & gVisor) ==="
+  GPU_NODES_VAL="${GPU_NODES:-$(read_env_var GPU_NODES)}"
+  if [ -n "$GPU_NODES_VAL" ]; then
+    IFS=',' read -ra gpu_node_list <<< "$GPU_NODES_VAL"
+    for n in "${gpu_node_list[@]}"; do
+      n="$(echo "$n" | xargs)"
+      [ -n "$n" ] && kubectl label node "$n" swcp.io/gpu=true --overwrite >/dev/null || true
+    done
+  else
+    for n in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+      kubectl label node "$n" swcp.io/gpu=true --overwrite >/dev/null || true
+    done
   fi
 
-  echo "Waiting for ingress-nginx rollout..."
-  kubectl rollout status deployment/ingress-nginx-controller -n ingress-nginx --timeout=120s || true
+  GVISOR_NODES_VAL="${GVISOR_NODES:-$(read_env_var GVISOR_NODES)}"
+  if [ -n "$GVISOR_NODES_VAL" ]; then
+    IFS=',' read -ra gv_node_list <<< "$GVISOR_NODES_VAL"
+    for n in "${gv_node_list[@]}"; do
+      n="$(echo "$n" | xargs)"
+      [ -n "$n" ] && kubectl label node "$n" swcp.io/gvisor=true --overwrite >/dev/null || true
+    done
+  fi
+
+  echo "=== Ensuring metrics-server is installed ==="
+  kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml >/dev/null 2>&1 || true
+  if ! kubectl get deployment metrics-server -n kube-system -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null | grep -q -- '--kubelet-insecure-tls'; then
+    kubectl patch deployment metrics-server -n kube-system --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kubelet-insecure-tls"}]' || true
+  fi
+
+  if ! kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+    echo "=== Ensuring KEDA is installed ==="
+    kubectl apply --server-side -f https://github.com/kedacore/keda/releases/download/v2.16.1/keda-2.16.1.yaml >/dev/null 2>&1 || true
+  fi
+
+  if kubectl get nodes -l swcp.io/gpu=true --no-headers 2>/dev/null | grep -q . && \
+     ! kubectl get daemonset -A -o name 2>/dev/null | grep -qi "nvidia-device-plugin"; then
+    echo "=== Ensuring NVIDIA device plugin is installed ==="
+    kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.17.0/deployments/static/nvidia-device-plugin.yml >/dev/null 2>&1 || true
+  fi
+
+  if ! kubectl get deployment ingress-nginx-controller -n ingress-nginx >/dev/null 2>&1; then
+    echo "=== Ensuring Ingress-NGINX is installed with hostNetwork ==="
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.1/deploy/static/provider/cloud/deploy.yaml >/dev/null 2>&1 || true
+
+    if [ "$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.type}' 2>/dev/null || true)" != "ClusterIP" ]; then
+      kubectl patch service ingress-nginx-controller -n ingress-nginx --type=merge -p '{"spec":{"type":"ClusterIP"}}' || true
+    fi
+    if [ "$(kubectl get deployment ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.template.spec.hostNetwork}' 2>/dev/null || true)" != "true" ]; then
+      kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type=json -p='[{"op":"add","path":"/spec/template/spec/hostNetwork","value":true},{"op":"add","path":"/spec/template/spec/dnsPolicy","value":"ClusterFirstWithHostNet"}]' || true
+    fi
+    if [ "$(kubectl get deployment ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.strategy.type}' 2>/dev/null || true)" != "Recreate" ]; then
+      kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type=json -p='[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]' || true
+    fi
+
+    echo "Waiting for ingress-nginx rollout..."
+    kubectl rollout status deployment/ingress-nginx-controller -n ingress-nginx --timeout=120s || true
+  fi
 fi
 
 # All defined image targets
@@ -123,6 +185,14 @@ if [ "${#images_to_build[@]}" -gt 0 ]; then
   done
 fi
 
+if [ "$IMAGES_ONLY" -eq 1 ]; then
+  echo "=========================================================="
+  echo "Local images built and imported into $(hostname) k3s containerd."
+  echo "Apply/restart deployments from the control-plane node."
+  echo "=========================================================="
+  exit 0
+fi
+
 echo "=== Applying namespace and storage class ==="
 kubectl apply -f k8s/00-namespace.yaml
 
@@ -146,11 +216,6 @@ kubectl apply -f k8s/02-postgres.yaml
 kubectl apply -f k8s/03-nats.yaml
 kubectl apply -f k8s/04-core-api.yaml
 kubectl apply -f k8s/
-
-read_env_var() {
-  local key="$1"
-  grep -E "^[[:space:]]*${key}[[:space:]]*=" "$ROOT/.env" | tail -n1 | cut -d= -f2- | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]"'\''\r]+//; s/[[:space:]"'\''\r]+$//' || true
-}
 
 echo "=== Patching secrets and configs from .env ==="
 if [ -f "$ROOT/.env" ]; then
@@ -196,6 +261,7 @@ if [ -f "$ROOT/.env" ]; then
   VLLM_MAX_MODEL_LEN_VAL="$(read_env_var VLLM_MAX_MODEL_LEN)"
   VLLM_GPU_MEM_VAL="$(read_env_var VLLM_GPU_MEMORY_UTILIZATION)"
   VLLM_MAX_SEQS_VAL="$(read_env_var VLLM_MAX_NUM_SEQS)"
+  VLLM_OVERFLOW_THRESHOLD_VAL="$(read_env_var VLLM_OVERFLOW_THRESHOLD)"
   LLM_LOCAL_MAX_CONCURRENT_VAL="$(read_env_var LLM_LOCAL_MAX_CONCURRENT)"
   LLM_LOCAL_MAX_ACK_PENDING_VAL="$(read_env_var LLM_LOCAL_MAX_ACK_PENDING)"
 
@@ -213,10 +279,12 @@ if [ -f "$ROOT/.env" ]; then
   fi
 
   EFFECTIVE_MAX_CONCURRENT="${LLM_LOCAL_MAX_CONCURRENT_VAL:-${VLLM_MAX_SEQS_VAL:-}}"
+  EFFECTIVE_PRIMARY_MAX="${VLLM_OVERFLOW_THRESHOLD_VAL:-${EFFECTIVE_MAX_CONCURRENT:-}}"
   EFFECTIVE_MAX_ACK_PENDING="${LLM_LOCAL_MAX_ACK_PENDING_VAL:-${EFFECTIVE_MAX_CONCURRENT:-}}"
   LLM_WORKER_CM_PATCH=""
   [ -n "$LLM_MODEL_NAME_VAL" ] && LLM_WORKER_CM_PATCH+="\"LocalLlm__ModelName\":\"$LLM_MODEL_NAME_VAL\","
   [ -n "$EFFECTIVE_MAX_CONCURRENT" ] && LLM_WORKER_CM_PATCH+="\"LocalLlm__MaxConcurrent\":\"$EFFECTIVE_MAX_CONCURRENT\","
+  [ -n "$EFFECTIVE_PRIMARY_MAX" ] && LLM_WORKER_CM_PATCH+="\"LocalLlm__PrimaryMaxConcurrent\":\"$EFFECTIVE_PRIMARY_MAX\","
   [ -n "$EFFECTIVE_MAX_ACK_PENDING" ] && LLM_WORKER_CM_PATCH+="\"LocalLlm__MaxAckPending\":\"$EFFECTIVE_MAX_ACK_PENDING\","
   if [ -n "$LLM_WORKER_CM_PATCH" ]; then
     kubectl patch configmap llm-worker-config -n swcp --type=merge -p "{\"data\":{${LLM_WORKER_CM_PATCH%,}}}" || true
@@ -260,6 +328,7 @@ fi
 # Ensure vllm models volume points to the repo's apps/localLLM/models directory on this host
 if [ -d "$ROOT/apps/localLLM/models" ]; then
   kubectl patch deployment vllm -n swcp --type=json -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/volumes/0/hostPath/path\",\"value\":\"$ROOT/apps/localLLM/models\"}]" >/dev/null 2>&1 || true
+  kubectl patch deployment vllm-overflow -n swcp --type=json -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/volumes/0/hostPath/path\",\"value\":\"$ROOT/apps/localLLM/models\"}]" >/dev/null 2>&1 || true
 fi
 
 # Ensure sandbox runtime class matches node capability
@@ -286,8 +355,9 @@ elif [ "$TARGET_SERVICE" = "c-sandbox" ] || [ "$TARGET_SERVICE" = "c-sandbox-wor
   echo "Restarting deployment/c-sandbox..."
   kubectl rollout restart deployment/c-sandbox -n swcp || true
 elif [ "$TARGET_SERVICE" = "vllm" ]; then
-  echo "Restarting deployment/vllm and deployment/llm-worker..."
+  echo "Restarting deployment/vllm, deployment/vllm-overflow, and deployment/llm-worker..."
   kubectl rollout restart deployment/vllm -n swcp || true
+  kubectl rollout restart deployment/vllm-overflow -n swcp || true
   kubectl rollout restart deployment/llm-worker -n swcp || true
 elif [ "$TARGET_SERVICE" != "postgres" ]; then
   echo "Restarting deployment/$TARGET_SERVICE..."

@@ -47,7 +47,14 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                     "additionalProperties": false
                 }
                 """;
+    private const string PrimaryClientName = "LocalLlm";
+    private const string OverflowClientName = "LocalLlmOverflow";
     private readonly ConcurrentDictionary<string, (ChatClient Client, string Deployment)> _azureClients = new();
+    private readonly string? _overflowBaseUrl = configuration["LocalLlm:OverflowBaseUrl"];
+    private readonly SemaphoreSlim _metricsLock = new(1, 1);
+    private long _metricsCacheExpiresTick;
+    private int _cachedPrimaryLoad;
+    private int _primaryActiveCount;
 
     public Task<LlmCompletion> CompleteAsync(LlmTask task, CancellationToken cancellationToken) =>
         task.Backend switch
@@ -136,8 +143,7 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             throw new InvalidOperationException("Local LLM model name is not configured.");
         }
 
-        var client = httpClientFactory.CreateClient("LocalLlm");
-        using var response = await client.PostAsJsonAsync("/v1/chat/completions", new
+        var payload = new
         {
             model = modelName,
             messages = new[]
@@ -159,7 +165,10 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                     schema = ParseStructuredResponseSchema(task)
                 }
             }
-        }, cancellationToken);
+        };
+
+        var clientName = await SelectLocalClientNameAsync(cancellationToken);
+        using var response = await SendLocalCompletionAsync(clientName, payload, cancellationToken);
 
         if ((int)response.StatusCode == 429)
         {
@@ -260,5 +269,129 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
     {
         using var document = JsonDocument.Parse(GetStructuredResponseSchema(task, constrainHintFeedback: true));
         return document.RootElement.Clone();
+    }
+
+    private async Task<string> SelectLocalClientNameAsync(CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_overflowBaseUrl))
+        {
+            return PrimaryClientName;
+        }
+
+        var primaryThreshold = Math.Max(1,
+            configuration.GetValue<int?>("LocalLlm:PrimaryMaxConcurrent")
+            ?? configuration.GetValue<int?>("LocalLlm:MaxConcurrent")
+            ?? configuration.GetValue<int?>("VLLM_MAX_NUM_SEQS")
+            ?? 4);
+
+        var localPrimary = Volatile.Read(ref _primaryActiveCount);
+        if (localPrimary >= primaryThreshold)
+        {
+            return OverflowClientName;
+        }
+
+        var primaryLoad = Math.Max(localPrimary, await GetPrimaryQueueLoadAsync(cancellationToken));
+        return primaryLoad >= primaryThreshold ? OverflowClientName : PrimaryClientName;
+    }
+
+    private async Task<HttpResponseMessage> SendLocalCompletionAsync(
+        string clientName,
+        object payload,
+        CancellationToken cancellationToken)
+    {
+        if (clientName == OverflowClientName)
+        {
+            try
+            {
+                var overflowResponse = await httpClientFactory.CreateClient(OverflowClientName)
+                    .PostAsJsonAsync("/v1/chat/completions", payload, cancellationToken);
+                if (overflowResponse.StatusCode != HttpStatusCode.ServiceUnavailable &&
+                    overflowResponse.StatusCode != HttpStatusCode.BadGateway)
+                {
+                    return overflowResponse;
+                }
+
+                overflowResponse.Dispose();
+            }
+            catch (HttpRequestException)
+            {
+                // Overflow node is unreachable or starting up; fall back to primary vLLM.
+            }
+        }
+
+        Interlocked.Increment(ref _primaryActiveCount);
+        try
+        {
+            return await httpClientFactory.CreateClient(PrimaryClientName)
+                .PostAsJsonAsync("/v1/chat/completions", payload, cancellationToken);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _primaryActiveCount);
+        }
+    }
+
+    private async Task<int> GetPrimaryQueueLoadAsync(CancellationToken cancellationToken)
+    {
+        var now = Environment.TickCount64;
+        if (now < Volatile.Read(ref _metricsCacheExpiresTick))
+        {
+            return Volatile.Read(ref _cachedPrimaryLoad);
+        }
+
+        await _metricsLock.WaitAsync(cancellationToken);
+        try
+        {
+            now = Environment.TickCount64;
+            if (now < _metricsCacheExpiresTick)
+            {
+                return _cachedPrimaryLoad;
+            }
+
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(400));
+
+            var metricsText = await httpClientFactory.CreateClient(PrimaryClientName)
+                .GetStringAsync("/metrics", timeoutCts.Token);
+            _cachedPrimaryLoad = ParseVllmLoadFromMetrics(metricsText);
+            _metricsCacheExpiresTick = Environment.TickCount64 + 200;
+            return _cachedPrimaryLoad;
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            return Volatile.Read(ref _primaryActiveCount);
+        }
+        finally
+        {
+            _metricsLock.Release();
+        }
+    }
+
+    private static int ParseVllmLoadFromMetrics(string metricsText)
+    {
+        double total = 0;
+        using var reader = new StringReader(metricsText);
+        while (reader.ReadLine() is { } line)
+        {
+            if (line.Length == 0 || line[0] == '#')
+            {
+                continue;
+            }
+
+            if (!line.StartsWith("vllm:num_requests_running", StringComparison.Ordinal) &&
+                !line.StartsWith("vllm:num_requests_waiting", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var lastSpace = line.LastIndexOf(' ');
+            if (lastSpace >= 0 &&
+                double.TryParse(line.AsSpan(lastSpace + 1), NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+            {
+                total += value;
+            }
+        }
+
+        return (int)Math.Ceiling(total);
     }
 }

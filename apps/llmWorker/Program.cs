@@ -12,6 +12,15 @@ builder.Services.AddHttpClient("LocalLlm", client =>
     client.BaseAddress = new Uri(builder.Configuration["LocalLlm:BaseUrl"] ?? "http://local-llm-server:8080");
     client.Timeout = TimeSpan.FromMinutes(5);
 });
+var localOverflowUrl = builder.Configuration["LocalLlm:OverflowBaseUrl"];
+if (!string.IsNullOrWhiteSpace(localOverflowUrl))
+{
+    builder.Services.AddHttpClient("LocalLlmOverflow", client =>
+    {
+        client.BaseAddress = new Uri(localOverflowUrl);
+        client.Timeout = TimeSpan.FromMinutes(5);
+    });
+}
 builder.Services.AddSingleton<LlmTaskProcessor>();
 builder.Services.AddSingleton(_ => new NatsConnection(new NatsOpts
 {

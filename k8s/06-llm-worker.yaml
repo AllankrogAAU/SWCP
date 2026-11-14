@@ -22,6 +22,14 @@ spec:
         app.kubernetes.io/name: llm-worker
         app.kubernetes.io/part-of: swcp
     spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
       terminationGracePeriodSeconds: 60
       securityContext:
         runAsNonRoot: true

@@ -121,6 +121,14 @@ spec:
         app.kubernetes.io/name: core-api
         app.kubernetes.io/part-of: swcp
     spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
       securityContext:
         runAsNonRoot: true
         runAsUser: 1654

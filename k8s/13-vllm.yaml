@@ -10,6 +10,7 @@ spec:
   type: ClusterIP
   selector:
     app.kubernetes.io/name: vllm
+    swcp.io/vllm-role: primary
   ports:
     - name: http
       port: 8080
@@ -27,6 +28,25 @@ spec:
   type: ClusterIP
   selector:
     app.kubernetes.io/name: vllm
+    swcp.io/vllm-role: primary
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: local-llm-overflow
+  namespace: swcp
+  labels:
+    app.kubernetes.io/name: vllm
+    app.kubernetes.io/part-of: swcp
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vllm
+    swcp.io/vllm-role: overflow
   ports:
     - name: http
       port: 8080
@@ -40,6 +60,7 @@ metadata:
   labels:
     app.kubernetes.io/name: vllm
     app.kubernetes.io/part-of: swcp
+    swcp.io/vllm-role: primary
 spec:
   replicas: 1
   strategy:
@@ -47,16 +68,122 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: vllm
+      swcp.io/vllm-role: primary
   template:
     metadata:
       labels:
         app.kubernetes.io/name: vllm
         app.kubernetes.io/part-of: swcp
+        swcp.io/vllm-role: primary
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
+      nodeSelector:
+        swcp.io/gpu: "true"
+        node-role.kubernetes.io/control-plane: "true"
+      runtimeClassName: nvidia
+      enableServiceLinks: false
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: vllm-config
+          args:
+            - /models/$(LLM_MODEL_PATH)
+            - --served-model-name=$(LLM_MODEL_NAME)
+            - --quantization=$(VLLM_QUANTIZATION)
+            - --kv-cache-dtype=$(VLLM_KV_CACHE_DTYPE)
+            - --max-model-len=$(VLLM_MAX_MODEL_LEN)
+            - --gpu-memory-utilization=$(VLLM_GPU_MEMORY_UTILIZATION)
+            - --max-num-seqs=$(VLLM_MAX_NUM_SEQS)
+            - --enforce-eager
+            - --host=0.0.0.0
+            - --port=$(VLLM_PORT)
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+              cpu: "2"
+              memory: "8Gi"
+            limits:
+              nvidia.com/gpu: "1"
+              cpu: "8"
+              memory: "16Gi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 40
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: models
+          hostPath:
+            path: /home/test/SWCP/apps/localLLM/models
+            type: Directory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-overflow
+  namespace: swcp
+  labels:
+    app.kubernetes.io/name: vllm
+    app.kubernetes.io/part-of: swcp
+    swcp.io/vllm-role: overflow
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm
+      swcp.io/vllm-role: overflow
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vllm
+        app.kubernetes.io/part-of: swcp
+        swcp.io/vllm-role: overflow
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      nodeSelector:
+        swcp.io/gpu: "true"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
       runtimeClassName: nvidia
       enableServiceLinks: false
       containers:

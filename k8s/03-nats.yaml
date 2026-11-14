@@ -38,6 +38,8 @@ spec:
         app.kubernetes.io/name: nats
         app.kubernetes.io/part-of: swcp
     spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       terminationGracePeriodSeconds: 60
       containers:
         - name: nats
