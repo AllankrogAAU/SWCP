@@ -9,7 +9,7 @@ namespace coreApi.Services;
 
 public static class DevUserSeeder
 {
-    private static readonly SampleAssignment[] SampleAssignments =
+    private static readonly AssignmentSeed[] SampleAssignments =
     [
         new(
             Guid.Parse("a1111111-1111-4111-8111-111111111111"),
@@ -64,26 +64,36 @@ public static class DevUserSeeder
     public static async Task SeedSampleAssignmentAsync(IServiceProvider services)
     {
         var database = services.GetRequiredService<CoreDbContext>();
-        var sampleIds = SampleAssignments.Select(assignment => assignment.Id).ToArray();
-        var existingIds = await database.Assignments
+        var allAssignments = SampleAssignments.Concat(IntroCAssignments.All).ToArray();
+        var sampleIds = allAssignments.Select(assignment => assignment.Id).ToArray();
+        var existingAssignments = await database.Assignments
             .Where(assignment => sampleIds.Contains(assignment.Id))
-            .Select(assignment => assignment.Id)
-            .ToHashSetAsync();
-        var missingAssignments = SampleAssignments
+            .ToDictionaryAsync(assignment => assignment.Id);
+        var existingIds = existingAssignments.Keys.ToHashSet();
+        var missingAssignments = allAssignments
             .Where(assignment => !existingIds.Contains(assignment.Id))
-            .Select(assignment => new Assignment
-            {
-                Id = assignment.Id,
-                Title = assignment.Title,
-                Description = assignment.Description,
-                TaskFocus = assignment.TaskFocus,
-                TestCasesJson = JsonSerializer.Serialize(assignment.TestCases),
-                HarnessSource = assignment.HarnessSource,
-                CreatedAtUtc = DateTimeOffset.UtcNow
-            })
+            .Select(CreateAssignment)
             .ToArray();
 
-        if (missingAssignments.Length == 0)
+        var existingAssignmentsChanged = false;
+        foreach (var seed in allAssignments.Where(seed => existingAssignments.ContainsKey(seed.Id)))
+        {
+            var assignment = existingAssignments[seed.Id];
+            var testCasesJson = JsonSerializer.Serialize(seed.TestCases);
+            if (assignment.Title == seed.Title &&
+                assignment.Description == seed.Description &&
+                assignment.TaskFocus == seed.TaskFocus &&
+                assignment.TestCasesJson == testCasesJson &&
+                assignment.HarnessSource == seed.HarnessSource)
+            {
+                continue;
+            }
+
+            ApplySeed(assignment, seed, testCasesJson);
+            existingAssignmentsChanged = true;
+        }
+
+        if (missingAssignments.Length == 0 && !existingAssignmentsChanged)
         {
             return;
         }
@@ -92,13 +102,25 @@ public static class DevUserSeeder
         await database.SaveChangesAsync();
     }
 
-    private sealed record SampleAssignment(
-        Guid Id,
-        string Title,
-        string Description,
-        string TaskFocus,
-        IReadOnlyList<SandboxTestCase> TestCases,
-        string? HarnessSource = null);
+    private static Assignment CreateAssignment(AssignmentSeed seed)
+    {
+        var assignment = new Assignment
+        {
+            Id = seed.Id,
+            CreatedAtUtc = DateTimeOffset.UtcNow
+        };
+        ApplySeed(assignment, seed, JsonSerializer.Serialize(seed.TestCases));
+        return assignment;
+    }
+
+    private static void ApplySeed(Assignment assignment, AssignmentSeed seed, string testCasesJson)
+    {
+        assignment.Title = seed.Title;
+        assignment.Description = seed.Description;
+        assignment.TaskFocus = seed.TaskFocus;
+        assignment.TestCasesJson = testCasesJson;
+        assignment.HarnessSource = seed.HarnessSource;
+    }
 
     public static async Task SeedAsync(IServiceProvider services, IConfiguration configuration)
     {

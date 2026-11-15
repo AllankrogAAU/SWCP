@@ -49,6 +49,22 @@ kubectl rollout restart deployment/core-api -n swcp
 
 Note: Docker Desktop's own Kubernetes runs inside a sealed, Docker-managed VM, so the sandbox pods above run **without gVisor** (the script warns about this). Use the WSL2 path below if you need real gVisor isolation locally.
 
+## Intro C sample assignments and submissions
+
+The core API seeds the 25 numbered Intro C assignments in Development, or when
+`SeedSampleAssignments` is enabled. The local Kubernetes config enables this,
+so restart the core API after changing the seed definitions:
+
+```powershell
+kubectl rollout restart deployment/core-api -n swcp
+kubectl rollout status deployment/core-api -n swcp
+```
+
+Three assignments have students write a complete program with `main`; the
+other 22 use a harness for function-focused exercises. See the [sample
+assignment and submission generator README](../scripts/README.md) for the
+assignment formats and generator commands.
+
 ## Local Kubernetes with gVisor (Windows, via WSL2 + k3s)
 
 Docker Desktop Kubernetes can't host gVisor because its control plane runs inside a VM you don't control. To actually test the sandbox with gVisor enabled, run a small [k3s](https://k3s.io/) cluster inside a WSL2 distro instead (completely separate from Docker Desktop's own Kubernetes — you don't need "Enable Kubernetes" turned on for this path).
