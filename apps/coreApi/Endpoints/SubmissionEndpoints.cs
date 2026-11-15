@@ -17,6 +17,7 @@ public static class SubmissionEndpoints
         group.MapPost("/", Create);
         group.MapPost("/hint", Hint);
         group.MapPost("/run", Run);
+        group.MapPost("/{id:guid}/cancel", Cancel);
         group.MapGet("/{id:guid}", Get);
         group.MapGet("/", ListMine);
         return group;
@@ -183,6 +184,40 @@ public static class SubmissionEndpoints
                 "run",
                 request.StandardInput),
             principal, database, publisher, events, loggerFactory, cancellationToken);
+
+    private static async Task<IResult> Cancel(
+        Guid id,
+        ClaimsPrincipal principal,
+        CoreDbContext database,
+        SubmissionEvents events,
+        CancellationToken cancellationToken)
+    {
+        var submission = await database.Submissions
+            .SingleOrDefaultAsync(item => item.Id == id, cancellationToken);
+        if (submission is null)
+        {
+            return Results.NotFound();
+        }
+
+        var isTeacher = principal.IsInRole(UserRole.Teacher.ToString());
+        if (!isTeacher && submission.UserId.ToString() != principal.FindFirstValue(ClaimTypes.NameIdentifier))
+        {
+            return Results.Forbid();
+        }
+
+        if (submission.Status is SubmissionStatus.COMPLETED or SubmissionStatus.FAILED)
+        {
+            return Results.Ok(ToResponse(submission));
+        }
+
+        submission.Status = SubmissionStatus.FAILED;
+        submission.ErrorMessage = "Canceled by user.";
+        submission.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await database.SaveChangesAsync(cancellationToken);
+        await events.PublishAsync(submission, "failed", "Canceled by user.", 100, cancellationToken);
+
+        return Results.Ok(ToResponse(submission));
+    }
 
     private static async Task<IResult> Get(
         Guid id,

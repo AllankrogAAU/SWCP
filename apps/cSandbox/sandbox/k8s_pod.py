@@ -61,6 +61,23 @@ def build_pod_manifest(cfg: PodConfig, name: str) -> dict:
         "hostNetwork": False,
         "hostPID": False,
         "hostIPC": False,
+        "affinity": {
+            "nodeAffinity": {
+                "preferredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                        "weight": 100,
+                        "preference": {
+                            "matchExpressions": [
+                                {
+                                    "key": "node-role.kubernetes.io/control-plane",
+                                    "operator": "Exists",
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        },
         "securityContext": {
             "runAsNonRoot": True,
             "runAsUser": 10001,

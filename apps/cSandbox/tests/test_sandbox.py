@@ -240,6 +240,12 @@ def test_pod_manifest_is_hardened_and_gvisor() -> None:
     assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
     assert spec["volumes"][0]["emptyDir"]["medium"] == "Memory"
     assert spec["imagePullSecrets"] == [{"name": "ghcr-pull-secret"}]
+    preferred = spec["affinity"]["nodeAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]
+    assert preferred[0]["weight"] == 100
+    assert preferred[0]["preference"]["matchExpressions"][0] == {
+        "key": "node-role.kubernetes.io/control-plane",
+        "operator": "Exists",
+    }
 
 
 def test_pod_manifest_without_image_pull_secret() -> None:

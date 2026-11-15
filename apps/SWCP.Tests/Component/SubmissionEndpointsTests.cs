@@ -123,4 +123,44 @@ public sealed class SubmissionEndpointsTests : IClassFixture<CoreApiTestFixture>
         var accessResp = await _client.SendAsync(accessReq);
         Assert.Equal(HttpStatusCode.Forbidden, accessResp.StatusCode);
     }
+
+    [Fact]
+    public async Task CancelSubmission_OwnerMarksFailedAndUnblocksNextSubmission()
+    {
+        var owner = await _fixture.SeedUserAsync("student_cancel_owner", "pass123", UserRole.Student);
+        var stranger = await _fixture.SeedUserAsync("student_cancel_stranger", "pass123", UserRole.Student);
+        var assignment = await _fixture.SeedAssignmentAsync("Cancel Test Assignment");
+
+        var ownerToken = _fixture.GenerateJwt(owner);
+        using var submitReq = new HttpRequestMessage(HttpMethod.Post, "/api/submissions/hint");
+        submitReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ownerToken);
+        submitReq.Content = JsonContent.Create(new CreateSubmissionRequest(
+            assignment.Id, "int main() {}", "local", "hint"));
+
+        var submitResp = await _client.SendAsync(submitReq);
+        Assert.Equal(HttpStatusCode.Accepted, submitResp.StatusCode);
+        var submitJson = await submitResp.Content.ReadFromJsonAsync<JsonElement>();
+        var submissionId = submitJson.GetProperty("submissionId").GetGuid();
+
+        var strangerToken = _fixture.GenerateJwt(stranger);
+        using var forbiddenReq = new HttpRequestMessage(HttpMethod.Post, $"/api/submissions/{submissionId}/cancel");
+        forbiddenReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", strangerToken);
+        var forbiddenResp = await _client.SendAsync(forbiddenReq);
+        Assert.Equal(HttpStatusCode.Forbidden, forbiddenResp.StatusCode);
+
+        using var cancelReq = new HttpRequestMessage(HttpMethod.Post, $"/api/submissions/{submissionId}/cancel");
+        cancelReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ownerToken);
+        var cancelResp = await _client.SendAsync(cancelReq);
+        Assert.Equal(HttpStatusCode.OK, cancelResp.StatusCode);
+        var cancelJson = await cancelResp.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("FAILED", cancelJson.GetProperty("status").GetString());
+        Assert.Equal("Canceled by user.", cancelJson.GetProperty("errorMessage").GetString());
+
+        using var retryReq = new HttpRequestMessage(HttpMethod.Post, "/api/submissions/hint");
+        retryReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ownerToken);
+        retryReq.Content = JsonContent.Create(new CreateSubmissionRequest(
+            assignment.Id, "int main() {}", "local", "hint"));
+        var retryResp = await _client.SendAsync(retryReq);
+        Assert.Equal(HttpStatusCode.Accepted, retryResp.StatusCode);
+    }
 }

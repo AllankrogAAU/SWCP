@@ -4,6 +4,8 @@ import CodeEditorBox from './Components/CodeEditorBox.vue'
 import AiFeedbackpanel from './Components/AiFeedbackpanel.vue'
 import AssignmentList from './Components/AssignmentList.vue'
 import {
+  ApiError,
+  cancelSubmission,
   clearAccessToken,
   getAccessToken,
   getAssignments,
@@ -45,6 +47,7 @@ const authenticated = ref(Boolean(getAccessToken()))
 const authLoading = ref(false)
 const authError = ref('')
 const submissionId = ref('')
+const canceling = ref(false)
 const loading = computed(() => busyAction.value === 'submit' || busyAction.value === 'hint')
 const waitingForAction = computed(() => busyAction.value !== null)
 let socket: WebSocket | undefined
@@ -76,6 +79,17 @@ async function loadAssignments() {
   solvedByAssignmentId.value = latestSubmitByAssignment
   if (!assignments.value.some((assignment) => assignment.id === selectedId.value)) {
     selectedId.value = assignments.value[0]?.id ?? ''
+  }
+
+  const activeSubmission = submissions.find(
+    (submission) => submission.status !== 'COMPLETED' && submission.status !== 'FAILED',
+  )
+  if (activeSubmission && busyAction.value === null) {
+    busyAction.value = activeSubmission.action
+    trackSubmission(
+      { submissionId: activeSubmission.submissionId, status: activeSubmission.status },
+      activeSubmission.action,
+    )
   }
 }
 
@@ -133,6 +147,7 @@ async function pollSubmission(id: string, generation: number) {
         if (result.action === 'submit') {
           solvedByAssignmentId.value[result.assignmentId] = result.taskSolved
         }
+        error.value = ''
         feedback.value =
           result.action === 'run'
             ? ''
@@ -183,6 +198,40 @@ function trackSubmission(
   void pollSubmission(accepted.submissionId, generation)
 }
 
+function resumeIfConflict(cause: unknown, action: SubmissionAction): boolean {
+  if (cause instanceof ApiError && cause.status === 409 && cause.activeSubmissionId) {
+    error.value = cause.message
+    trackSubmission(
+      {
+        submissionId: cause.activeSubmissionId,
+        status: cause.submissionStatus ?? 'PENDING',
+      },
+      action,
+    )
+    return true
+  }
+  return false
+}
+
+async function cancelActiveSubmission() {
+  if (!submissionId.value || canceling.value) return
+  canceling.value = true
+  try {
+    await cancelSubmission(submissionId.value)
+    pollGeneration++
+    window.clearTimeout(reconnectTimer)
+    socket?.close()
+    busyAction.value = null
+    status.value = 'FAILED'
+    progress.value = 'Canceled'
+    error.value = 'Canceled by user.'
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Could not cancel submission.'
+  } finally {
+    canceling.value = false
+  }
+}
+
 async function requestFeedback() {
   if (!selected.value || busyAction.value !== null) return
   busyAction.value = 'submit'
@@ -196,8 +245,10 @@ async function requestFeedback() {
     const accepted = await submitSource(selected.value.id, code.value, backend.value)
     trackSubmission(accepted, 'submit')
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : 'Could not submit code.'
-    busyAction.value = null
+    if (!resumeIfConflict(cause, 'submit')) {
+      error.value = cause instanceof Error ? cause.message : 'Could not submit code.'
+      busyAction.value = null
+    }
   }
 }
 
@@ -210,8 +261,10 @@ async function requestCodeHint() {
     const accepted = await requestHint(selected.value.id, code.value, backend.value)
     trackSubmission(accepted, 'hint')
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : 'Could not request a hint.'
-    busyAction.value = null
+    if (!resumeIfConflict(cause, 'hint')) {
+      error.value = cause instanceof Error ? cause.message : 'Could not request a hint.'
+      busyAction.value = null
+    }
   }
 }
 
@@ -230,8 +283,10 @@ async function runCode() {
     )
     trackSubmission(accepted, 'run')
   } catch (cause) {
-    terminalOutput.value = cause instanceof Error ? cause.message : 'Run is not available yet.'
-    busyAction.value = null
+    if (!resumeIfConflict(cause, 'run')) {
+      terminalOutput.value = cause instanceof Error ? cause.message : 'Run is not available yet.'
+      busyAction.value = null
+    }
   }
 }
 
@@ -367,8 +422,22 @@ onBeforeUnmount(() => {
                 class="backend-select"
               />
               <v-alert v-if="progress" type="info" variant="tonal" class="mb-2">
-                {{ status }} · {{ progress }}
-                <span v-if="submissionId" class="ml-2">{{ submissionId }}</span>
+                <div class="d-flex align-center justify-space-between ga-2">
+                  <span>
+                    {{ status }} · {{ progress }}
+                    <span v-if="submissionId" class="ml-2">{{ submissionId }}</span>
+                  </span>
+                  <v-btn
+                    v-if="waitingForAction && submissionId"
+                    size="small"
+                    variant="text"
+                    color="error"
+                    :loading="canceling"
+                    @click="cancelActiveSubmission"
+                  >
+                    Cancel
+                  </v-btn>
+                </div>
               </v-alert>
 
               <v-row class="mt-2">
@@ -388,7 +457,9 @@ onBeforeUnmount(() => {
                     :feedback="feedback"
                     :loading="loading"
                     :error="error"
+                    :canceling="canceling"
                     @retry="requestFeedback"
+                    @cancel="cancelActiveSubmission"
                   />
                 </v-col>
               </v-row>

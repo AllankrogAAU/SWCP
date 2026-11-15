@@ -14,6 +14,7 @@ public sealed class LlmResultConsumer(
     IServiceScopeFactory scopeFactory,
     SubmissionEvents events) : BackgroundService
 {
+    private const ulong MaxDeliveryAttempts = 5;
     private static readonly ActivitySource ActivitySource = new("SWCP.CoreApi");
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -38,10 +39,10 @@ public sealed class LlmResultConsumer(
                 continue;
             }
 
+            var traceParent = message.Headers?.TryGetLastValue(Messaging.TraceParentHeader, out var parent)
+                == true ? parent : null;
             try
             {
-                var traceParent = message.Headers?.TryGetLastValue(Messaging.TraceParentHeader, out var parent)
-                    == true ? parent : null;
                 using var activity = ActivitySource.StartActivity(
                     "process llm.results",
                     ActivityKind.Consumer,
@@ -51,7 +52,14 @@ public sealed class LlmResultConsumer(
                 var database = scope.ServiceProvider.GetRequiredService<CoreDbContext>();
                 var submission = await database.Submissions
                     .SingleOrDefaultAsync(item => item.Id == result.SubmissionId, stoppingToken);
-                if (submission is not null)
+                if (submission is not null &&
+                    submission.Status is SubmissionStatus.COMPLETED or SubmissionStatus.FAILED)
+                {
+                    logger.LogInformation(
+                        "Ignoring late LLM result for terminal submission {SubmissionId} ({Status})",
+                        submission.Id, submission.Status);
+                }
+                else if (submission is not null)
                 {
                     submission.Status = result.Status == "success"
                         ? SubmissionStatus.COMPLETED
@@ -69,7 +77,8 @@ public sealed class LlmResultConsumer(
                         submission.Status.ToString().ToLowerInvariant(), submission.LlmBackend,
                         result.Status == "success" ? "feedback_ready" : "llm_failed");
                     await events.PublishAsync(submission, submission.Status.ToString().ToLowerInvariant(),
-                        result.Status == "success" ? "Feedback is ready" : "LLM feedback failed", 100, stoppingToken, traceParent);
+                        result.Status == "success" ? "Feedback is ready" : (result.Error ?? "LLM feedback failed"),
+                        100, stoppingToken, traceParent);
                 }
                 else
                 {
@@ -84,9 +93,49 @@ public sealed class LlmResultConsumer(
             }
             catch (Exception exception)
             {
-                logger.LogError(exception, "Failed to process LLM result for submission {SubmissionId}", result.SubmissionId);
-                await message.NakAsync(cancellationToken: stoppingToken);
+                var deliveryCount = message.Metadata?.NumDelivered ?? 1UL;
+                logger.LogError(exception,
+                    "Failed to process LLM result for submission {SubmissionId} (attempt {Attempt}/{MaxAttempts})",
+                    result.SubmissionId, deliveryCount, MaxDeliveryAttempts);
+                if (deliveryCount >= MaxDeliveryAttempts)
+                {
+                    await MarkSubmissionFailedAsync(result.SubmissionId, exception.Message, traceParent, stoppingToken);
+                    await message.AckAsync(cancellationToken: stoppingToken);
+                }
+                else
+                {
+                    await message.NakAsync(TimeSpan.FromSeconds(2), stoppingToken);
+                }
             }
+        }
+    }
+
+    private async Task MarkSubmissionFailedAsync(
+        Guid submissionId,
+        string reason,
+        string? traceParent,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var database = scope.ServiceProvider.GetRequiredService<CoreDbContext>();
+            var submission = await database.Submissions
+                .SingleOrDefaultAsync(item => item.Id == submissionId, cancellationToken);
+            if (submission is null || submission.Status is SubmissionStatus.COMPLETED or SubmissionStatus.FAILED)
+            {
+                return;
+            }
+
+            submission.Status = SubmissionStatus.FAILED;
+            submission.ErrorMessage = $"Failed to record AI feedback: {reason}";
+            submission.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await database.SaveChangesAsync(cancellationToken);
+            await events.PublishAsync(submission, "failed", submission.ErrorMessage, 100, cancellationToken, traceParent);
+        }
+        catch (Exception markException)
+        {
+            logger.LogError(markException, "Could not mark submission {SubmissionId} as failed after exhausting LLM result retries", submissionId);
         }
     }
 }

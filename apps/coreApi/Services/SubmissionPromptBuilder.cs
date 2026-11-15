@@ -149,11 +149,13 @@ public static class SubmissionPromptBuilder
         var maxDuration = tests
             .Select((test, index) => (test.DurationMilliseconds, Index: index))
             .Where(item => item.DurationMilliseconds.HasValue)
-            .MaxBy(item => item.DurationMilliseconds);
+            .Select(item => ((long DurationMilliseconds, int Index)?)(item.DurationMilliseconds!.Value, item.Index))
+            .MaxBy(item => item!.Value.DurationMilliseconds);
         var maxMemory = tests
             .Select((test, index) => (test.MemoryConsumedMegabytes, Index: index))
             .Where(item => item.MemoryConsumedMegabytes.HasValue)
-            .MaxBy(item => item.MemoryConsumedMegabytes);
+            .Select(item => ((double MemoryConsumedMegabytes, int Index)?)(item.MemoryConsumedMegabytes!.Value, item.Index))
+            .MaxBy(item => item!.Value.MemoryConsumedMegabytes);
         var failures = tests
             .Select((test, index) => (test, Index: index))
             .Where(item => !item.test.Passed)
@@ -177,10 +179,10 @@ public static class SubmissionPromptBuilder
                 tests.Count,
                 tests.Count(test => test.Passed),
                 failures.Length,
-                maxDuration.DurationMilliseconds,
-                maxDuration.DurationMilliseconds.HasValue ? maxDuration.Index : null,
-                maxMemory.MemoryConsumedMegabytes,
-                maxMemory.MemoryConsumedMegabytes.HasValue ? maxMemory.Index : null,
+                maxDuration?.DurationMilliseconds,
+                maxDuration?.Index,
+                maxMemory?.MemoryConsumedMegabytes,
+                maxMemory?.Index,
                 failures),
             string.IsNullOrWhiteSpace(sandboxResult.ErrorClassification)
                 ? null

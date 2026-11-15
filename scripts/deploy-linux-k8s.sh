@@ -241,24 +241,18 @@ volumeBindingMode: WaitForFirstConsumer
 EOF
 fi
 
-echo "=== Applying manifests in k8s/ ==="
+VLLM_CONFIG_BEFORE="$(kubectl get configmap vllm-config -n swcp -o jsonpath='{.data}' 2>/dev/null || true)"
+
+echo "=== Applying base ConfigMaps and Secrets ==="
 kubectl apply -f k8s/01-configmaps-secrets.yaml
-kubectl apply -f k8s/02-postgres.yaml
-kubectl apply -f k8s/03-nats.yaml
-if kubectl get job jwt-key-bootstrap -n swcp >/dev/null 2>&1 && \
-   ! kubectl get secret jwt-keys -n swcp >/dev/null 2>&1; then
-  echo "=== Removing stale jwt-key-bootstrap job (jwt-keys secret missing) ==="
-  kubectl delete job jwt-key-bootstrap -n swcp --ignore-not-found >/dev/null 2>&1 || true
-fi
-kubectl apply -f k8s/04-core-api.yaml
-kubectl apply -f k8s/
 
 echo "=== Patching secrets and configs from .env ==="
+PG_PASS=""
 if [ -f "$ROOT/.env" ]; then
   # 1. Postgres password
   PG_PASS="$(read_env_var POSTGRES_PASSWORD)"
   if [ -n "$PG_PASS" ]; then
-    kubectl patch secret postgres-credentials -n swcp --type=merge -p "{\"stringData\":{\"POSTGRES_PASSWORD\":\"$PG_PASS\"}}" || true
+    kubectl patch secret postgres-credentials -n swcp --type=merge -p "{\"stringData\":{\"POSTGRES_PASSWORD\":\"$PG_PASS\"}}"
   fi
 
   # 2. Azure AI Foundry keys for llm-worker
@@ -361,13 +355,9 @@ if [ -f "$ROOT/.env" ]; then
   fi
 fi
 
-# Ensure vllm models volume points to the repo's apps/localLLM/models directory on this host
-if [ -d "$ROOT/apps/localLLM/models" ]; then
-  kubectl patch deployment vllm -n swcp --type=json -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/volumes/0/hostPath/path\",\"value\":\"$ROOT/apps/localLLM/models\"}]" >/dev/null 2>&1 || true
-  kubectl patch deployment vllm-overflow -n swcp --type=json -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/volumes/0/hostPath/path\",\"value\":\"$ROOT/apps/localLLM/models\"}]" >/dev/null 2>&1 || true
-fi
+VLLM_CONFIG_AFTER="$(kubectl get configmap vllm-config -n swcp -o jsonpath='{.data}' 2>/dev/null || true)"
 
-# Ensure sandbox runtime class matches node capability
+# Ensure sandbox runtime class matches node capability before workloads start
 if kubectl get nodes -l swcp.io/gvisor=true --no-headers 2>/dev/null | grep -q .; then
   echo "gVisor detected on node; sandbox pods will use 'gvisor' RuntimeClass."
   kubectl patch configmap c-sandbox-config -n swcp --type=merge -p '{"data":{"SANDBOX_RUNTIME_CLASS":"gvisor"}}' || true
@@ -376,6 +366,39 @@ else
   kubectl patch configmap c-sandbox-config -n swcp --type=merge -p '{"data":{"SANDBOX_RUNTIME_CLASS":""}}' || true
 fi
 
+echo "=== Applying workload manifests in k8s/ ==="
+kubectl apply -f k8s/02-postgres.yaml
+kubectl apply -f k8s/03-nats.yaml
+if kubectl get job jwt-key-bootstrap -n swcp >/dev/null 2>&1 && \
+   ! kubectl get secret jwt-keys -n swcp >/dev/null 2>&1; then
+  echo "=== Removing stale jwt-key-bootstrap job (jwt-keys secret missing) ==="
+  kubectl delete job jwt-key-bootstrap -n swcp --ignore-not-found >/dev/null 2>&1 || true
+fi
+kubectl apply -f k8s/04-core-api.yaml
+for manifest in k8s/*.yaml; do
+  case "$manifest" in
+    k8s/00-namespace.yaml|k8s/01-configmaps-secrets.yaml|k8s/02-postgres.yaml|k8s/03-nats.yaml|k8s/04-core-api.yaml)
+      continue ;;
+  esac
+  kubectl apply -f "$manifest"
+done
+
+if [ -n "$PG_PASS" ]; then
+  echo "=== Syncing PostgreSQL user password with .env ==="
+  kubectl rollout status statefulset/postgres -n swcp --timeout=120s
+  PG_USER="$(kubectl get configmap postgres-config -n swcp -o jsonpath='{.data.POSTGRES_USER}' 2>/dev/null || echo swcp)"
+  PG_DB="$(kubectl get configmap postgres-config -n swcp -o jsonpath='{.data.POSTGRES_DB}' 2>/dev/null || echo swcp)"
+  printf 'ALTER USER "%s" WITH PASSWORD :'\''pass'\'';\n' "$PG_USER" | \
+    kubectl exec -i -n swcp postgres-0 -- psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -v pass="$PG_PASS" >/dev/null
+fi
+
+# Ensure vllm models volume points to the repo's apps/localLLM/models directory on this host
+if [ -d "$ROOT/apps/localLLM/models" ]; then
+  kubectl patch deployment vllm -n swcp --type=json -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/volumes/0/hostPath/path\",\"value\":\"$ROOT/apps/localLLM/models\"}]" >/dev/null 2>&1 || true
+  kubectl patch deployment vllm-overflow -n swcp --type=json -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/volumes/0/hostPath/path\",\"value\":\"$ROOT/apps/localLLM/models\"}]" >/dev/null 2>&1 || true
+fi
+
+VLLM_RESTARTED=0
 echo "=== Restarting affected deployments ==="
 if [ "$TARGET_SERVICE" = "all" ]; then
   echo "Cleaning up idle sandbox pods in swcp-sandbox..."
@@ -383,36 +406,49 @@ if [ "$TARGET_SERVICE" = "all" ]; then
   deployments=("core-api" "api-gateway" "c-sandbox" "llm-worker" "frontend")
   for dep in "${deployments[@]}"; do
     echo "Restarting deployment/$dep..."
-    kubectl rollout restart "deployment/$dep" -n swcp || true
+    kubectl rollout restart "deployment/$dep" -n swcp
   done
+  if [ -n "$VLLM_CONFIG_BEFORE" ] && [ "$VLLM_CONFIG_BEFORE" != "$VLLM_CONFIG_AFTER" ]; then
+    echo "vllm-config changed; restarting deployment/vllm and deployment/vllm-overflow..."
+    kubectl rollout restart deployment/vllm -n swcp
+    kubectl rollout restart deployment/vllm-overflow -n swcp
+    VLLM_RESTARTED=1
+  fi
 elif [ "$TARGET_SERVICE" = "c-sandbox" ] || [ "$TARGET_SERVICE" = "c-sandbox-worker" ] || [ "$TARGET_SERVICE" = "c-sandbox-runtime" ]; then
   echo "Killing existing warm sandbox pods in swcp-sandbox..."
   kubectl delete pods -n swcp-sandbox --all --grace-period=0 --force >/dev/null 2>&1 || true
   echo "Restarting deployment/c-sandbox..."
-  kubectl rollout restart deployment/c-sandbox -n swcp || true
+  kubectl rollout restart deployment/c-sandbox -n swcp
 elif [ "$TARGET_SERVICE" = "vllm" ]; then
   echo "Restarting deployment/vllm, deployment/vllm-overflow, and deployment/llm-worker..."
-  kubectl rollout restart deployment/vllm -n swcp || true
-  kubectl rollout restart deployment/vllm-overflow -n swcp || true
-  kubectl rollout restart deployment/llm-worker -n swcp || true
+  kubectl rollout restart deployment/vllm -n swcp
+  kubectl rollout restart deployment/vllm-overflow -n swcp
+  kubectl rollout restart deployment/llm-worker -n swcp
+  VLLM_RESTARTED=1
 elif [ "$TARGET_SERVICE" != "postgres" ]; then
   echo "Restarting deployment/$TARGET_SERVICE..."
-  kubectl rollout restart "deployment/$TARGET_SERVICE" -n swcp || true
+  kubectl rollout restart "deployment/$TARGET_SERVICE" -n swcp
 fi
 
 echo "=== Checking rollout status ==="
 if [ "$TARGET_SERVICE" = "all" ]; then
-  kubectl rollout status deployment/core-api -n swcp --timeout=180s || true
-  kubectl rollout status deployment/api-gateway -n swcp --timeout=120s || true
-  kubectl rollout status deployment/c-sandbox -n swcp --timeout=120s || true
-  kubectl rollout status deployment/frontend -n swcp --timeout=120s || true
+  kubectl rollout status deployment/core-api -n swcp --timeout=180s
+  kubectl rollout status deployment/api-gateway -n swcp --timeout=120s
+  kubectl rollout status deployment/c-sandbox -n swcp --timeout=120s
+  kubectl rollout status deployment/llm-worker -n swcp --timeout=120s
+  kubectl rollout status deployment/frontend -n swcp --timeout=120s
+  if [ "$VLLM_RESTARTED" -eq 1 ]; then
+    kubectl rollout status deployment/vllm -n swcp --timeout=300s
+    kubectl rollout status deployment/vllm-overflow -n swcp --timeout=300s
+  fi
 elif [ "$TARGET_SERVICE" = "c-sandbox" ] || [ "$TARGET_SERVICE" = "c-sandbox-worker" ] || [ "$TARGET_SERVICE" = "c-sandbox-runtime" ]; then
-  kubectl rollout status deployment/c-sandbox -n swcp --timeout=120s || true
+  kubectl rollout status deployment/c-sandbox -n swcp --timeout=120s
 elif [ "$TARGET_SERVICE" = "vllm" ]; then
-  kubectl rollout status deployment/llm-worker -n swcp --timeout=120s || true
-  kubectl rollout status deployment/vllm -n swcp --timeout=300s || true
+  kubectl rollout status deployment/llm-worker -n swcp --timeout=120s
+  kubectl rollout status deployment/vllm -n swcp --timeout=300s
+  kubectl rollout status deployment/vllm-overflow -n swcp --timeout=300s
 elif [ "$TARGET_SERVICE" != "postgres" ]; then
-  kubectl rollout status "deployment/$TARGET_SERVICE" -n swcp --timeout=120s || true
+  kubectl rollout status "deployment/$TARGET_SERVICE" -n swcp --timeout=120s
 fi
 
 echo ""

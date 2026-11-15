@@ -63,6 +63,27 @@ interface ApiProblem {
   title?: string
   detail?: string
   error?: string
+  activeSubmissionId?: string
+  status?: SubmissionStatus
+}
+
+export class ApiError extends Error {
+  readonly status: number
+  readonly activeSubmissionId?: string
+  readonly submissionStatus?: SubmissionStatus
+
+  constructor(
+    message: string,
+    status: number,
+    activeSubmissionId?: string,
+    submissionStatus?: SubmissionStatus,
+  ) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.activeSubmissionId = activeSubmissionId
+    this.submissionStatus = submissionStatus
+  }
 }
 
 const tokenKey = 'swcp.accessToken'
@@ -98,7 +119,12 @@ async function request<T>(path: string, init: RequestInit = {}, authenticated = 
       // Preserve non-JSON error bodies as-is.
     }
     const message = [problem?.title ?? problem?.error, problem?.detail].filter(Boolean).join(': ')
-    throw new Error(message || body || `Request failed (${response.status})`)
+    throw new ApiError(
+      message || body || `Request failed (${response.status})`,
+      response.status,
+      problem?.activeSubmissionId,
+      problem?.status,
+    )
   }
 
   if (response.status === 204) return undefined as T
@@ -157,6 +183,12 @@ export function runSource(
 
 export function getSubmission(submissionId: string) {
   return request<SubmissionResponse>(`/api/submissions/${submissionId}`)
+}
+
+export function cancelSubmission(submissionId: string) {
+  return request<SubmissionResponse>(`/api/submissions/${submissionId}/cancel`, {
+    method: 'POST',
+  })
 }
 
 export function openSubmissionSocket(
