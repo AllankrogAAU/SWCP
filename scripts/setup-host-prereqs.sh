@@ -177,14 +177,15 @@ if [ "$CLUSTER_ROLE" = "control-plane" ]; then
     echo "Configured kubeconfig for user $TARGET_USER at $TARGET_HOME/.kube/config"
   fi
 
-  echo "Waiting for k3s control-plane node to be Ready..."
+  LOCAL_CP_NODE="${CLUSTER_NODE_NAME:-$(hostname | tr '[:upper:]' '[:lower:]')}"
+  echo "Waiting for k3s control-plane node (${LOCAL_CP_NODE}) to be Ready..."
   for _ in $(seq 1 60); do
-    if k3s kubectl get nodes 2>/dev/null | grep -q " Ready "; then
+    if k3s kubectl get "node/${LOCAL_CP_NODE}" 2>/dev/null | grep -q " Ready "; then
       break
     fi
     sleep 2
   done
-  k3s kubectl wait --for=condition=Ready node --all --timeout=60s
+  k3s kubectl wait --for=condition=Ready "node/${LOCAL_CP_NODE}" --timeout=60s
 else
   if [ -n "$CLUSTER_NODE_NAME" ] && { [ "$PREV_NODE_NAME" != "$CLUSTER_NODE_NAME" ] || ! systemctl is-active --quiet k3s-agent 2>/dev/null; }; then
     rm -f /etc/rancher/node/password
@@ -256,12 +257,12 @@ NODE_NAME="${CLUSTER_NODE_NAME:-$(hostname | tr '[:upper:]' '[:lower:]')}" bash 
 if [ "$CLUSTER_ROLE" = "control-plane" ]; then
   echo "Waiting for k3s to be back up after gVisor containerd restart..."
   for _ in $(seq 1 60); do
-    if k3s kubectl get nodes 2>/dev/null | grep -q " Ready "; then
+    if k3s kubectl get "node/${LOCAL_CP_NODE}" 2>/dev/null | grep -q " Ready "; then
       break
     fi
     sleep 2
   done
-  k3s kubectl wait --for=condition=Ready node --all --timeout=60s
+  k3s kubectl wait --for=condition=Ready "node/${LOCAL_CP_NODE}" --timeout=60s
 
   # Label nodes with swcp.io/gpu=true (from GPU_NODES in .env, or all known nodes if an NVIDIA GPU is present)
   if [ -n "${GPU_NODES:-}" ]; then
