@@ -69,7 +69,7 @@ example through the sandbox, then completes the submission without sending it
 to the LLM worker. A count of 25 runs one example per assignment:
 
 ```powershell
-python .\scripts\generate-sample-submissions.py --action run --count 25 --students 25 --concurrency 5
+python .\scripts\generate-sample-submissions.py --action run --count 25 --students 25 --concurrency 12
 ```
 
 Run stdout, stderr, and exit codes are printed in the console and saved with
@@ -81,7 +81,7 @@ limits. Choose a smaller `--count` for a quick smoke test.
 To send examples through the sandbox **and** the LLM feedback pipeline:
 
 ```powershell
-python .\scripts\generate-sample-submissions.py --action submit --count 300 --students 25 --concurrency 5 --backend local
+python .\scripts\generate-sample-submissions.py --action submit --count 300 --students 25 --concurrency 12 --backend local
 ```
 
 `submit` is the default action if `--action` is omitted. At the default count,
@@ -111,7 +111,9 @@ submitting the next, avoiding the per-student active-submission limit. Other
 accounts continue independently: when any one finishes, that account queues
 its next example without waiting for the rest. The script prints a `queued`
 line as soon as the API accepts a job and a `finished` line when it completes,
-so a slow loop should not look like a batch-wide pause.
+so a slow loop should not look like a batch-wide pause. Student account
+registration/login is also concurrent (up to 8 accounts at a time), and the
+script reports account setup and submission-processing times separately.
 `--students` controls how many student accounts are used, while
 `--concurrency` controls how many accounts submit simultaneously. Accounts
 and submissions remain in the database; a later run reuses accounts and adds
@@ -124,7 +126,7 @@ Options:
 | `--api-url URL` | `http://swcp.local` | API base URL; `SWCP_API_URL` can also set it. |
 | `--count N` | `300` | Total number of submissions. |
 | `--students N` | `25` | Size of the reusable student account pool. |
-| `--concurrency N` | `5` | Maximum number of students submitting at once. |
+| `--concurrency N` | `12` | Maximum number of students submitting at once. |
 | `--action run\|submit` | `submit` | `run` executes in the sandbox without LLM feedback; `submit` also requests LLM feedback. |
 | `--user-prefix TEXT` | `swcp-load` | Prefix for generated student usernames. |
 | `--backend local\|azure` | `local` | Feedback backend for `submit` actions. Azure may incur model usage costs. |
@@ -139,9 +141,9 @@ terminated by the sandbox's 2-second run timeout; they occupy one worker slot
 while running, but do not block other students from submitting. The local
 deployment has 3 c-sandbox worker replicas, each configured for up to 8
 concurrent jobs, for a theoretical cluster total of 24. The generator waits
-for each student's current submission to finish before sending the next, so
-`--concurrency 5` allows at most five of those slots to be used by this script.
-You can raise it, for example to 12, to use more of the worker capacity:
+for each student's current submission to finish before sending the next. The
+default concurrency of 12 uses more of the worker capacity while leaving some
+headroom for CPU, memory, and pod-startup contention:
 
 ```powershell
 python .\scripts\generate-sample-submissions.py --action run --count 25 --students 25 --concurrency 12

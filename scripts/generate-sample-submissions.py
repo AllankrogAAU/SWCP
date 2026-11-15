@@ -281,7 +281,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-url", default=os.environ.get("SWCP_API_URL", "http://swcp.local"))
     parser.add_argument("--count", type=int, default=300, help="total submissions to send (default: 300)")
     parser.add_argument("--students", type=int, default=25, help="student accounts in the reusable pool")
-    parser.add_argument("--concurrency", type=int, default=5, help="students submitting simultaneously")
+    parser.add_argument("--concurrency", type=int, default=12, help="students submitting simultaneously")
     parser.add_argument(
         "--action",
         choices=("submit", "run"),
@@ -510,8 +510,26 @@ def main() -> int:
     try:
         student_count = min(args.students, args.count)
         width = max(2, len(str(student_count)))
-        first_username = f"{args.user_prefix}{1:0{width}d}"
-        tokens = [student_token(args.api_url, first_username, STUDENT_PASSWORD)]
+        tokens = [""] * student_count
+        account_setup_started = time.monotonic()
+        account_workers = min(args.concurrency, student_count, 8)
+        with ThreadPoolExecutor(max_workers=account_workers) as executor:
+            token_futures = {
+                executor.submit(
+                    student_token,
+                    args.api_url,
+                    f"{args.user_prefix}{index + 1:0{width}d}",
+                    STUDENT_PASSWORD,
+                ): index
+                for index in range(student_count)
+            }
+            for future in as_completed(token_futures):
+                tokens[token_futures[future]] = future.result()
+        print(
+            f"Prepared {student_count} student accounts in "
+            f"{time.monotonic() - account_setup_started:.1f}s "
+            f"(up to {account_workers} at a time)."
+        )
 
         status, assignment_rows = api_request(
             args.api_url, "/api/assignments/", token=tokens[0]
@@ -525,10 +543,6 @@ def main() -> int:
                 "The API is missing seeded assignments: " + ", ".join(missing)
                 + ". Start the API with sample assignments enabled before running this script."
             )
-
-        for index in range(2, student_count + 1):
-            username = f"{args.user_prefix}{index:0{width}d}"
-            tokens.append(student_token(args.api_url, username, STUDENT_PASSWORD))
 
         student_jobs: list[list[tuple[Example, str, str]]] = [[] for _ in tokens]
         for index, job in enumerate(planned_jobs):
@@ -602,6 +616,7 @@ def main() -> int:
             return outcomes
 
         outcomes: list[tuple[str, str]] = []
+        submission_started = time.monotonic()
         with ThreadPoolExecutor(
             max_workers=min(args.concurrency, student_count)
         ) as executor:
@@ -609,6 +624,7 @@ def main() -> int:
             for future in as_completed(futures):
                 outcomes.extend(future.result())
 
+        print(f"Submission processing time: {time.monotonic() - submission_started:.1f}s.")
         print(f"Finished {len(outcomes)} submissions.")
         for category, _ in CATEGORY_RATIOS:
             category_outcomes = [status for kind, status in outcomes if kind == category]
