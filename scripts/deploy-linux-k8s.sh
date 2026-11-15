@@ -120,20 +120,23 @@ if [ "$IMAGES_ONLY" -eq 0 ]; then
   if ! kubectl get deployment ingress-nginx-controller -n ingress-nginx >/dev/null 2>&1; then
     echo "=== Ensuring Ingress-NGINX is installed with hostNetwork ==="
     kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.1/deploy/static/provider/cloud/deploy.yaml >/dev/null 2>&1 || true
-
-    if [ "$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.type}' 2>/dev/null || true)" != "ClusterIP" ]; then
-      kubectl patch service ingress-nginx-controller -n ingress-nginx --type=merge -p '{"spec":{"type":"ClusterIP"}}' || true
-    fi
-    if [ "$(kubectl get deployment ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.template.spec.hostNetwork}' 2>/dev/null || true)" != "true" ]; then
-      kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type=json -p='[{"op":"add","path":"/spec/template/spec/hostNetwork","value":true},{"op":"add","path":"/spec/template/spec/dnsPolicy","value":"ClusterFirstWithHostNet"}]' || true
-    fi
-    if [ "$(kubectl get deployment ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.strategy.type}' 2>/dev/null || true)" != "Recreate" ]; then
-      kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type=json -p='[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]' || true
-    fi
-
-    echo "Waiting for ingress-nginx rollout..."
-    kubectl rollout status deployment/ingress-nginx-controller -n ingress-nginx --timeout=120s || true
   fi
+
+  if [ "$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.type}' 2>/dev/null || true)" != "ClusterIP" ]; then
+    kubectl patch service ingress-nginx-controller -n ingress-nginx --type=merge -p '{"spec":{"type":"ClusterIP"}}' || true
+  fi
+  if [ "$(kubectl get deployment ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.template.spec.hostNetwork}' 2>/dev/null || true)" != "true" ]; then
+    kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type=json -p='[{"op":"add","path":"/spec/template/spec/hostNetwork","value":true},{"op":"add","path":"/spec/template/spec/dnsPolicy","value":"ClusterFirstWithHostNet"}]' || true
+  fi
+  if [ "$(kubectl get deployment ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.strategy.type}' 2>/dev/null || true)" != "Recreate" ]; then
+    kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type=json -p='[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]' || true
+  fi
+  if [ "$(kubectl get deployment ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.template.spec.nodeSelector.node-role\.kubernetes\.io/control-plane}' 2>/dev/null || true)" != "true" ]; then
+    kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type=merge -p '{"spec":{"template":{"spec":{"nodeSelector":{"node-role.kubernetes.io/control-plane":"true"}}}}}' || true
+  fi
+
+  echo "Waiting for ingress-nginx controller readiness..."
+  kubectl rollout status deployment/ingress-nginx-controller -n ingress-nginx --timeout=180s || true
 fi
 
 # All defined image targets
@@ -172,16 +175,44 @@ else
   exit 1
 fi
 
+worker_ssh_targets=()
+if [ "$IMAGES_ONLY" -eq 0 ]; then
+  WORKER_SSH_HOSTS_VAL="${WORKER_SSH_HOSTS:-$(read_env_var WORKER_SSH_HOSTS)}"
+  if [ -n "$WORKER_SSH_HOSTS_VAL" ]; then
+    IFS=',' read -ra raw_ssh_hosts <<< "$WORKER_SSH_HOSTS_VAL"
+    for h in "${raw_ssh_hosts[@]}"; do
+      h="$(echo "$h" | xargs)"
+      [ -n "$h" ] && worker_ssh_targets+=("$h")
+    done
+  fi
+fi
+
 if [ "${#images_to_build[@]}" -gt 0 ]; then
+  if [ "${#worker_ssh_targets[@]}" -gt 0 ]; then
+    echo "=== Verifying SSH access to worker node(s) for image streaming ==="
+    for worker_ssh in "${worker_ssh_targets[@]}"; do
+      if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$worker_ssh" "sudo -n k3s ctr version >/dev/null 2>&1"; then
+        echo "Error: Cannot SSH/sudo to worker '$worker_ssh' non-interactively." >&2
+        echo "Ensure key-based SSH (ssh-copy-id $worker_ssh) and passwordless sudo ('sudo -n k3s ctr') are configured." >&2
+        exit 1
+      fi
+    done
+  fi
+
   echo "=== Building and importing images ==="
   for entry in "${images_to_build[@]}"; do
     IFS='|' read -r image dockerfile context <<< "$entry"
     echo "--> Building $image from $dockerfile..."
     $DOCKER_CMD build -t "$image" -f "$dockerfile" "$context"
-    echo "--> Importing $image into k3s containerd..."
+    echo "--> Importing $image into $(hostname) k3s containerd..."
     sudo crictl rmi "$image" >/dev/null 2>&1 || true
     $CTR_CMD images rm "$image" >/dev/null 2>&1 || true
     $DOCKER_CMD save "$image" | $CTR_CMD images import -
+    for worker_ssh in "${worker_ssh_targets[@]}"; do
+      echo "--> Streaming $image to $worker_ssh..."
+      $DOCKER_CMD save "$image" | ssh -o BatchMode=yes -o ConnectTimeout=10 "$worker_ssh" \
+        "sudo -n sh -c 'crictl rmi \"\$1\" >/dev/null 2>&1 || true; k3s ctr images rm \"\$1\" >/dev/null 2>&1 || true; exec k3s ctr images import -' _ $(printf '%q' "$image")"
+    done
   done
 fi
 
@@ -214,6 +245,11 @@ echo "=== Applying manifests in k8s/ ==="
 kubectl apply -f k8s/01-configmaps-secrets.yaml
 kubectl apply -f k8s/02-postgres.yaml
 kubectl apply -f k8s/03-nats.yaml
+if kubectl get job jwt-key-bootstrap -n swcp >/dev/null 2>&1 && \
+   ! kubectl get secret jwt-keys -n swcp >/dev/null 2>&1; then
+  echo "=== Removing stale jwt-key-bootstrap job (jwt-keys secret missing) ==="
+  kubectl delete job jwt-key-bootstrap -n swcp --ignore-not-found >/dev/null 2>&1 || true
+fi
 kubectl apply -f k8s/04-core-api.yaml
 kubectl apply -f k8s/
 
