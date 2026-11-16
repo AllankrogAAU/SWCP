@@ -13,6 +13,7 @@ from sandbox.k8s_pod import (
     build_pod_manifest,
 )
 from sandbox.report import parse_report
+from sandbox.runsc_oci import RunscConfig, RunscSandbox, build_oci_spec
 from worker import evaluate_task
 
 
@@ -551,3 +552,49 @@ def test_headroom_soft_cap_triggers_spillover_only_above_threshold() -> None:
         ],
     )
     assert non_headroom._should_spill_from_headroom_node() is False
+
+
+def test_runsc_oci_spec_is_hardened_and_readonly() -> None:
+    cfg = RunscConfig(rootfs_path="/opt/sandbox-rootfs", memory_limit_mb=512)
+    spec = build_oci_spec(cfg, ["/usr/local/bin/run-submission", "10"], "/tmp/sbx-1/work")
+    assert spec["root"] == {"path": "/opt/sandbox-rootfs", "readonly": True}
+    assert spec["process"]["user"] == {"uid": 10001, "gid": 10001}
+    assert spec["process"]["noNewPrivileges"] is True
+    assert spec["process"]["capabilities"]["effective"] == []
+    tmp_mount = next(m for m in spec["mounts"] if m["destination"] == "/tmp")
+    assert tmp_mount["source"] == "/tmp/sbx-1/work"
+    assert "rw" in tmp_mount["options"] and "nosuid" in tmp_mount["options"]
+
+
+def test_runsc_sandbox_pipes_stdin_and_cleans_up(monkeypatch, tmp_path) -> None:
+    import subprocess
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        if "run" in cmd:
+            captured["cmd"] = cmd
+            captured["input"] = kwargs.get("input", b"")
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=b"compile_rc=0\ncompile_ms=5\nrun_rc=0\nrun_ms=2\n", stderr=b""
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("sandbox.runsc_oci.subprocess.run", fake_run)
+    cfg = RunscConfig(
+        work_base_dir=str(tmp_path),
+        state_dir=str(tmp_path / "state"),
+        rootless=False,
+    )
+    sbx = RunscSandbox(cfg)
+    try:
+        report = sbx.run("int main(void) { return 0; }", Limits(), run_stdin="hello")
+        assert report.compile is not None and report.compile.rc == 0
+        assert captured["input"].endswith(b"hello")
+        assert "--network=none" in captured["cmd"]
+        assert "--overlay2=none" in captured["cmd"]
+        assert sbx._bundle_dir is not None and sbx._bundle_dir.exists()
+    finally:
+        sbx.destroy()
+    assert sbx._bundle_dir is not None and not sbx._bundle_dir.exists()
+

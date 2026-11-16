@@ -27,12 +27,14 @@ from contracts import CompilationResult, SandboxResult, SandboxTask, SandboxTest
 from evaluation.evaluator import evaluate
 from sandbox.interface import Limits
 from sandbox.k8s_pod import KubeSandboxProvider, PodConfig
+from sandbox.runsc_oci import RunscConfig, RunscSandboxProvider
 
 NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
 TASK_STREAM = "SANDBOX_TASKS"
 TASK_SUBJECT = "sandbox.tasks"
 TASK_DURABLE = "c-sandbox-workers"
 RESULT_SUBJECT = "sandbox.results"
+SANDBOX_BACKEND = os.getenv("SANDBOX_BACKEND", "runsc").strip().lower()
 MAX_CONCURRENT = int(os.getenv("SANDBOX_MAX_CONCURRENT", "8"))
 POOL_SIZE = int(os.getenv("SANDBOX_POOL_SIZE", "4"))
 POOL_WORKERS = max(1, int(os.getenv("SANDBOX_POOL_WORKERS", "3")))
@@ -345,17 +347,22 @@ async def run_worker() -> None:
         )
     consumer = await jetstream.pull_subscribe_bind(TASK_DURABLE, stream=TASK_STREAM)
 
-    provider = KubeSandboxProvider(
-        PodConfig.from_env(), pool_size=POOL_SIZE, pool_workers=POOL_WORKERS
-    )
+    if SANDBOX_BACKEND == "k8s":
+        provider = KubeSandboxProvider(
+            PodConfig.from_env(), pool_size=POOL_SIZE, pool_workers=POOL_WORKERS
+        )
+    else:
+        provider = RunscSandboxProvider(RunscConfig.from_env())
+
     executor = ThreadPoolExecutor(
         max_workers=MAX_CONCURRENT, thread_name_prefix="sandbox"
     )
     slots = asyncio.Semaphore(MAX_CONCURRENT)
     running: set[asyncio.Task] = set()
     logger.info(
-        "Consuming %s (max_concurrent=%d, pool_size=%d, pool_workers=%d)",
+        "Consuming %s (backend=%s, max_concurrent=%d, pool_size=%d, pool_workers=%d)",
         TASK_SUBJECT,
+        SANDBOX_BACKEND,
         MAX_CONCURRENT,
         POOL_SIZE,
         POOL_WORKERS,

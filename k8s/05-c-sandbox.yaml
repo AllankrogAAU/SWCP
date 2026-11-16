@@ -35,12 +35,6 @@ spec:
       terminationGracePeriodSeconds: 60
       imagePullSecrets:
         - name: ghcr-pull-secret
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 10001
-        runAsGroup: 10001
-        seccompProfile:
-          type: RuntimeDefault
       initContainers:
         - name: ensure-streams
           image: natsio/nats-box:0.14.5
@@ -81,17 +75,14 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
           securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
+            privileged: true
           resources:
             requests:
               cpu: 1250m
               memory: 512Mi
             limits:
-              cpu: "2"
-              memory: 1Gi
+              cpu: "6"
+              memory: 2Gi
           startupProbe:
             exec:
               command: ["sh", "-c", "test -f /tmp/healthy"]
@@ -124,4 +115,5 @@ spec:
       volumes:
         - name: tmp
           emptyDir:
-            sizeLimit: 64Mi
+            medium: Memory
+            sizeLimit: 512Mi
