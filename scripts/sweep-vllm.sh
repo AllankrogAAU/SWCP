@@ -237,7 +237,7 @@ if [ "${#TEST_PAIRS[@]}" -eq 0 ]; then
 fi
 
 if [ -z "$SWEEP_ID" ]; then
-  SWEEP_ID="obj3_vllm_sweep_$(date -u +%Y%m%d_%H%M%S)"
+  SWEEP_ID="$(date +%Y-%m-%d_%H-%M-%S)_obj3_vllm_sweep"
 fi
 
 echo ""

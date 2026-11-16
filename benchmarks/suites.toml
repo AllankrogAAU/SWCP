@@ -38,8 +38,8 @@ mock_llm = true
 [suites.ramp_capacity]
 arrival_mode = "continuous-ramp"
 start_rate = 30.0
-end_rate = 750.0
-ramp_duration_s = 720.0
+end_rate = 1000.0
+ramp_duration_s = 970.0
 bucket_duration_s = 30.0
 stop_on_saturation = true
 saturation_confirm_buckets = 3

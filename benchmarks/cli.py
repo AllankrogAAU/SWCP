@@ -69,10 +69,21 @@ def _store_submission_and_step_metrics(
     end_epoch: float,
     step_meta: dict[str, dict[str, Any]] | None = None,
 ) -> None:
-    stages_by_sub: dict[str, StageTimings] = {}
+    sub_ids = [r.submission_id for r in results]
+    stages_by_sub = telemetry.collect_batch_submission_stages(sub_ids, start_epoch, end_epoch)
+
+    # For tiny tests (<= 5 submissions), if batch missed any stage details, fallback to individual query
+    if len(results) <= 5:
+        for r in results:
+            st = stages_by_sub.get(r.submission_id)
+            if not st or (st.sandbox_exec_ms == 0.0 and st.llm_exec_ms == 0.0):
+                stages_by_sub[r.submission_id] = telemetry.collect_submission_stages(
+                    r.submission_id, start_epoch, end_epoch
+                )
+
     records_by_step: dict[str, list[dict[str, Any]]] = {}
     for r in results:
-        stages = telemetry.collect_submission_stages(r.submission_id, start_epoch, end_epoch)
+        stages = stages_by_sub.get(r.submission_id) or StageTimings(submission_id=r.submission_id)
         stages_by_sub[r.submission_id] = stages
         submit_edge_ms = (
             max(0.0, r.http_accepted_ms - stages.http_enqueue_ms)
@@ -218,7 +229,8 @@ def _store_submission_and_step_metrics(
 
 async def _run_smoke_test(config: BenchmarkConfig) -> int:
     console.print("[bold cyan]=== SWCP Benchmark Smoke Test ===[/bold cyan]")
-    run_id = f"smoke_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    now_str = datetime.datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+    run_id = f"{now_str}_smoke_{uuid.uuid4().hex[:6]}"
     storage = BenchmarkStorage(config)
     telemetry = TelemetryCollector(config)
     target_http_rtt_ms, clock_offset_s = telemetry.measure_target_baseline()
@@ -309,7 +321,8 @@ async def _run_smoke_test(config: BenchmarkConfig) -> int:
 
 async def _run_benchmark(config: BenchmarkConfig, args: argparse.Namespace) -> int:
     console.print(f"[bold cyan]=== Starting SWCP Benchmark Suite: {args.suite} ===[/bold cyan]")
-    run_id = f"{args.suite}_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    now_str = datetime.datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+    run_id = f"{now_str}_{args.suite}_{uuid.uuid4().hex[:6]}"
     storage = BenchmarkStorage(config)
     telemetry = TelemetryCollector(config)
     target_http_rtt_ms, clock_offset_s = telemetry.measure_target_baseline()

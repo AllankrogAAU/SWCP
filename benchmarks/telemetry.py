@@ -6,6 +6,7 @@ import email.utils
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 import urllib.parse
@@ -171,6 +172,55 @@ class TelemetryCollector:
             logger.debug("HTTP GET %s failed: %s", url, e)
             return None
 
+    @staticmethod
+    def _apply_log_entry(timings: StageTimings, state: dict[str, Any], stream_node: str = "") -> None:
+        evt = str(state.get("event_name", ""))
+        stage = str(state.get("stage", ""))
+
+        if evt == "pipeline.stage.completed" and stage == "submission_enqueue":
+            val = state.get("duration_ms")
+            if val is not None:
+                timings.http_enqueue_ms = float(val)
+
+        elif evt == "pipeline.stage.started" and stage == "sandbox":
+            val = state.get("queue_wait_ms")
+            if val is not None:
+                timings.sandbox_queue_wait_ms = float(val)
+
+        elif evt == "pipeline.stage.completed" and stage == "sandbox":
+            val = state.get("duration_ms")
+            if val is not None:
+                timings.sandbox_exec_ms = float(val)
+            if stream_node and not timings.sandbox_node:
+                timings.sandbox_node = stream_node
+
+        elif evt == "pipeline.stage.started" and stage == "llm":
+            val = state.get("queue_wait_ms")
+            if val is not None:
+                timings.llm_queue_wait_ms = float(val)
+
+        elif evt == "pipeline.stage.completed" and stage == "llm":
+            val = state.get("duration_ms")
+            if val is not None:
+                timings.llm_exec_ms = float(val)
+            if state.get("llm_target") is not None:
+                timings.llm_target = str(state["llm_target"])
+            if stream_node and not timings.llm_worker_node:
+                timings.llm_worker_node = stream_node
+            if state.get("prompt_tokens") is not None:
+                timings.prompt_tokens = int(state["prompt_tokens"])
+            if state.get("completion_tokens") is not None:
+                timings.completion_tokens = int(state["completion_tokens"])
+            if state.get("tokens_per_second") is not None:
+                timings.tokens_per_sec = float(state["tokens_per_second"])
+
+        elif evt == "pipeline.completed":
+            val = state.get("duration_ms")
+            if val is not None:
+                timings.pipeline_total_ms = float(val)
+            timings.final_status = str(state.get("status", "completed")).upper()
+            timings.outcome = str(state.get("outcome", ""))
+
     def collect_submission_stages(
         self,
         submission_id: str,
@@ -210,57 +260,94 @@ class TelemetryCollector:
                     continue
                 try:
                     payload = json.loads(line[idx:])
-                    state = payload.get("State") or payload
-                    evt = str(state.get("event_name", ""))
-                    stage = str(state.get("stage", ""))
-
-                    if evt == "pipeline.stage.completed" and stage == "submission_enqueue":
-                        val = state.get("duration_ms")
-                        if val is not None:
-                            timings.http_enqueue_ms = float(val)
-
-                    elif evt == "pipeline.stage.started" and stage == "sandbox":
-                        val = state.get("queue_wait_ms")
-                        if val is not None:
-                            timings.sandbox_queue_wait_ms = float(val)
-
-                    elif evt == "pipeline.stage.completed" and stage == "sandbox":
-                        val = state.get("duration_ms")
-                        if val is not None:
-                            timings.sandbox_exec_ms = float(val)
-                        if stream_node and not timings.sandbox_node:
-                            timings.sandbox_node = stream_node
-
-                    elif evt == "pipeline.stage.started" and stage == "llm":
-                        val = state.get("queue_wait_ms")
-                        if val is not None:
-                            timings.llm_queue_wait_ms = float(val)
-
-                    elif evt == "pipeline.stage.completed" and stage == "llm":
-                        val = state.get("duration_ms")
-                        if val is not None:
-                            timings.llm_exec_ms = float(val)
-                        if state.get("llm_target") is not None:
-                            timings.llm_target = str(state["llm_target"])
-                        if stream_node and not timings.llm_worker_node:
-                            timings.llm_worker_node = stream_node
-                        if state.get("prompt_tokens") is not None:
-                            timings.prompt_tokens = int(state["prompt_tokens"])
-                        if state.get("completion_tokens") is not None:
-                            timings.completion_tokens = int(state["completion_tokens"])
-                        if state.get("tokens_per_second") is not None:
-                            timings.tokens_per_sec = float(state["tokens_per_second"])
-
-                    elif evt == "pipeline.completed":
-                        val = state.get("duration_ms")
-                        if val is not None:
-                            timings.pipeline_total_ms = float(val)
-                        timings.final_status = str(state.get("status", "completed")).upper()
-                        timings.outcome = str(state.get("outcome", ""))
+                    state = payload.get("State") or payload.get("Properties") or payload
+                    self._apply_log_entry(timings, state, stream_node)
                 except Exception:
                     pass
 
         return timings
+
+    def collect_batch_submission_stages(
+        self,
+        submission_ids: list[str] | set[str],
+        start_epoch: float,
+        end_epoch: float,
+        chunk_seconds: float = 60.0,
+    ) -> dict[str, StageTimings]:
+        """Query Loki in chunked time windows for all pipeline stage events,
+
+        and assemble StageTimings for each submission in memory in seconds.
+        Chunking ensures Loki's server max_entries_limit (5000) is never exceeded.
+        """
+        sub_id_set = {str(s).lower() for s in submission_ids}
+        timings_by_sub: dict[str, StageTimings] = {
+            s: StageTimings(submission_id=s) for s in submission_ids
+        }
+        if not sub_id_set:
+            return timings_by_sub
+
+        uuid_pattern = re.compile(
+            r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+            re.IGNORECASE,
+        )
+
+        cur_start = start_epoch
+        while cur_start < end_epoch:
+            cur_end = min(end_epoch, cur_start + chunk_seconds)
+            start_ns = int((cur_start + self.clock_offset_s - 10.0) * 1_000_000_000)
+            end_ns = int((cur_end + self.clock_offset_s + 15.0) * 1_000_000_000)
+
+            query = '{namespace="swcp"} |= "pipeline."'
+            params = urllib.parse.urlencode({
+                "query": query,
+                "start": str(start_ns),
+                "end": str(end_ns),
+                "limit": "5000",
+                "direction": "FORWARD",
+            })
+            url = f"{self.loki_url}/loki/api/v1/query_range?{params}"
+            data = self._http_get_json(url, timeout=30.0)
+
+            if data and data.get("data", {}).get("result"):
+                for stream in data["data"]["result"]:
+                    stream_labels = stream.get("stream", {})
+                    stream_node = str(stream_labels.get("node", ""))
+                    for entry in stream.get("values", []):
+                        line = entry[1]
+                        idx = line.find("{")
+                        if idx == -1:
+                            continue
+                        try:
+                            payload = json.loads(line[idx:])
+                            state = payload.get("State") or payload.get("Properties") or payload
+
+                            sub_id = (
+                                state.get("submission_id")
+                                or state.get("SubmissionId")
+                                or payload.get("submission_id")
+                                or (payload.get("Properties", {}).get("submission_id") if isinstance(payload.get("Properties"), dict) else None)
+                            )
+                            if not sub_id:
+                                m = uuid_pattern.search(line)
+                                if m:
+                                    sub_id = m.group(0)
+
+                            if not sub_id:
+                                continue
+
+                            sub_id_str = str(sub_id).lower()
+                            if sub_id_str not in sub_id_set:
+                                continue
+
+                            target_timings = timings_by_sub.get(sub_id) or timings_by_sub.get(sub_id_str)
+                            if target_timings:
+                                self._apply_log_entry(target_timings, state, stream_node)
+                        except Exception:
+                            pass
+
+            cur_start = cur_end
+
+        return timings_by_sub
 
     @staticmethod
     def _vllm_role(metric: dict[str, Any]) -> str:
