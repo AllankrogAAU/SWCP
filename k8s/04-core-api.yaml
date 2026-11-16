@@ -190,7 +190,7 @@ spec:
               value: Host=postgres.swcp.svc.cluster.local;Port=5432;Database=$(POSTGRES_DB);Username=$(POSTGRES_USER);Password=$(POSTGRES_PASSWORD)
           resources:
             requests:
-              cpu: 250m
+              cpu: 400m
               memory: 256Mi
             limits:
               cpu: "1"

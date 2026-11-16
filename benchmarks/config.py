@@ -3,8 +3,32 @@
 from __future__ import annotations
 
 import os
+import tomllib
 from pathlib import Path
+from typing import Any
 from pydantic import BaseModel, Field
+
+DEFAULT_SUITES_CONFIG_PATH = Path(__file__).resolve().parent / "suites.toml"
+
+SUITE_ALIASES: dict[str, str] = {
+    "obj1_bottleneck": "sla_curve",
+    "obj4_sla_curve": "sla_curve",
+    "obj2_infinite_gpu": "infinite_gpu",
+    "obj3_vllm_sweep": "vllm_sweep",
+}
+
+
+def load_suites_config(path: Path | None = None) -> dict[str, Any]:
+    """Load suite defaults from TOML configuration file if present."""
+    cfg_path = path or DEFAULT_SUITES_CONFIG_PATH
+    if not cfg_path.exists():
+        return {"common": {}, "suites": {}}
+    with open(cfg_path, "rb") as f:
+        data = tomllib.load(f)
+    return {
+        "common": data.get("common", {}) or {},
+        "suites": data.get("suites", {}) or {},
+    }
 
 
 class BenchmarkConfig(BaseModel):
@@ -25,6 +49,9 @@ class BenchmarkConfig(BaseModel):
     hardware_tag: str = Field(default_factory=lambda: os.getenv("HARDWARE_TAG", "rtx5070ti-16gb"))
     suite_name: str = "custom"
     mock_llm_enabled: bool = False
+    inter_node_rtt_ms: float | None = Field(
+        default_factory=lambda: float(os.getenv("INTER_NODE_RTT_MS")) if os.getenv("INTER_NODE_RTT_MS") else None
+    )
     notes: str = ""
 
     # Submission distribution weights:

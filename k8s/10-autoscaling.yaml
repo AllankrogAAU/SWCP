@@ -27,11 +27,11 @@ spec:
           averageUtilization: 80
   behavior:
     scaleUp:
-      stabilizationWindowSeconds: 30
+      stabilizationWindowSeconds: 15
       policies:
         - type: Pods
-          value: 2
-          periodSeconds: 60
+          value: 1
+          periodSeconds: 30
     scaleDown:
       stabilizationWindowSeconds: 300
       policies:
@@ -94,7 +94,7 @@ spec:
     kind: Deployment
     name: c-sandbox
   minReplicaCount: 3
-  maxReplicaCount: 16
+  maxReplicaCount: 7
   cooldownPeriod: 120
   pollingInterval: 10
   advanced:
@@ -105,7 +105,7 @@ spec:
           stabilizationWindowSeconds: 0
           policies:
             - type: Pods
-              value: 4
+              value: 2
               periodSeconds: 15
         scaleDown:
           stabilizationWindowSeconds: 180
@@ -122,6 +122,6 @@ spec:
         account: "$G"
         stream: "SANDBOX_TASKS"
         consumer: "c-sandbox-workers"
-        lagThreshold: "4"
+        lagThreshold: "6"
         activationLagThreshold: "1"
         useHttps: "false"

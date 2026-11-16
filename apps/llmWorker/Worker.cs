@@ -196,9 +196,9 @@ public sealed class Worker(
                 ? Math.Round((double)completionTokens.Value / (stageTimer.ElapsedMilliseconds / 1000.0), 1)
                 : 0.0;
             logger.LogInformation(
-                "Pipeline stage completed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {backend} {attempt} {status} {prompt_tokens} {completion_tokens} {total_tokens} {tokens_per_second}",
+                "Pipeline stage completed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {backend} {llm_target} {attempt} {status} {prompt_tokens} {completion_tokens} {total_tokens} {tokens_per_second}",
                 "pipeline.stage.completed", "llm", task.SubmissionId, traceId, stageTimer.ElapsedMilliseconds,
-                task.Backend, attempt, "completed", promptTokens, completionTokens, totalTokens, tokensPerSec);
+                task.Backend, completion.Target ?? task.Backend, attempt, "completed", promptTokens, completionTokens, totalTokens, tokensPerSec);
             await PublishResultAsync(new LlmResult(
                 task.SubmissionId,
                 "success",

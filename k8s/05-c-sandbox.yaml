@@ -76,6 +76,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -83,11 +87,11 @@ spec:
               drop: ["ALL"]
           resources:
             requests:
-              cpu: 250m
-              memory: 256Mi
-            limits:
-              cpu: "1"
+              cpu: 1250m
               memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
           startupProbe:
             exec:
               command: ["sh", "-c", "test -f /tmp/healthy"]

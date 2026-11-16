@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import email.utils
 import json
 import logging
 import os
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -30,15 +32,27 @@ class StageTimings:
     tokens_per_sec: float = 0.0
     final_status: str = "COMPLETED"
     outcome: str = ""
+    llm_target: str = ""
+    sandbox_node: str = ""
+    llm_worker_node: str = ""
 
 
 @dataclass
 class PrometheusSnapshot:
     peak_kv_cache_pct: float = 0.0
+    primary_kv_cache_pct: float = 0.0
+    overflow_kv_cache_pct: float = 0.0
     mean_tok_per_s: float = 0.0
+    primary_mean_tok_per_s: float = 0.0
+    overflow_mean_tok_per_s: float = 0.0
+    primary_requests: int = 0
+    overflow_requests: int = 0
     max_replicas_sandbox: int = 3
     max_replicas_llm_worker: int = 2
     max_replicas_core_api: int = 2
+    max_replicas_sandbox_worker: int = 0
+    max_replicas_llm_worker_worker: int = 0
+    max_replicas_core_api_worker: int = 0
     timeseries: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -109,7 +123,44 @@ class TelemetryCollector:
         self.config = config
         self.prom_url = resolve_prometheus_url(config.prometheus_url)
         self.loki_url = resolve_loki_url(config.loki_url)
+        self.clock_offset_s = 0.0
+        self.target_http_rtt_ms = 0.0
         logger.info("Telemetry initialized: Prometheus=%s, Loki=%s", self.prom_url, self.loki_url)
+
+    def measure_target_baseline(self) -> tuple[float, float]:
+        """Measure client->target HTTP RTT (ms) and server-minus-client clock offset (s) via HTTP Date header."""
+        target = self.config.target_url.rstrip("/")
+        samples_rtt: list[float] = []
+        offsets: list[float] = []
+        for _ in range(3):
+            try:
+                t0 = time.perf_counter()
+                epoch_before = time.time()
+                req = urllib.request.Request(f"{target}/", method="GET")
+                with urllib.request.urlopen(req, timeout=5.0) as resp:
+                    resp.read(256)
+                    rtt_ms = (time.perf_counter() - t0) * 1000.0
+                    epoch_mid = 0.5 * (epoch_before + time.time())
+                    date_hdr = resp.headers.get("Date")
+                    samples_rtt.append(rtt_ms)
+                    if date_hdr:
+                        server_dt = email.utils.parsedate_to_datetime(date_hdr)
+                        offsets.append(server_dt.timestamp() - epoch_mid)
+            except Exception as e:
+                logger.debug("Baseline probe to %s failed: %s", target, e)
+
+        if samples_rtt:
+            self.target_http_rtt_ms = round(sum(samples_rtt) / len(samples_rtt), 2)
+        if offsets:
+            avg_offset = sum(offsets) / len(offsets)
+            # Ignore < 1.5s jitter (HTTP Date only has 1-second resolution)
+            self.clock_offset_s = round(avg_offset, 2) if abs(avg_offset) >= 1.5 else 0.0
+        if self.target_http_rtt_ms or self.clock_offset_s:
+            logger.info(
+                "Target baseline (%s): HTTP RTT=%.2f ms, clock_offset=%.2fs",
+                target, self.target_http_rtt_ms, self.clock_offset_s,
+            )
+        return self.target_http_rtt_ms, self.clock_offset_s
 
     def _http_get_json(self, url: str, timeout: float = 10.0) -> dict[str, Any] | None:
         try:
@@ -129,16 +180,18 @@ class TelemetryCollector:
         """Query Loki for structured stage logs for a single submission."""
         timings = StageTimings(submission_id=submission_id)
 
-        # Buffer timestamps slightly to ensure no window boundary edge loss
-        start_ns = int((start_epoch - 10.0) * 1_000_000_000)
-        end_ns = int((end_epoch + 15.0) * 1_000_000_000)
+        # Buffer timestamps slightly and align to cluster UTC if client clock differs
+        start_ns = int((start_epoch + self.clock_offset_s - 10.0) * 1_000_000_000)
+        end_ns = int((end_epoch + self.clock_offset_s + 15.0) * 1_000_000_000)
 
-        query = f'{{namespace="swcp"}} |= "{submission_id}"'
+        # Filter to structured pipeline.* stage events so high-frequency HTTP polling
+        # logs (api-gateway/core-api) cannot truncate stage timings via Loki's limit.
+        query = f'{{namespace="swcp"}} |= "{submission_id}" |= "pipeline."'
         params = urllib.parse.urlencode({
             "query": query,
             "start": str(start_ns),
             "end": str(end_ns),
-            "limit": "200",
+            "limit": "500",
             "direction": "FORWARD",
         })
         url = f"{self.loki_url}/loki/api/v1/query_range?{params}"
@@ -148,6 +201,8 @@ class TelemetryCollector:
             return timings
 
         for stream in data["data"]["result"]:
+            stream_labels = stream.get("stream", {})
+            stream_node = str(stream_labels.get("node", ""))
             for entry in stream.get("values", []):
                 line = entry[1]
                 idx = line.find("{")
@@ -173,6 +228,8 @@ class TelemetryCollector:
                         val = state.get("duration_ms")
                         if val is not None:
                             timings.sandbox_exec_ms = float(val)
+                        if stream_node and not timings.sandbox_node:
+                            timings.sandbox_node = stream_node
 
                     elif evt == "pipeline.stage.started" and stage == "llm":
                         val = state.get("queue_wait_ms")
@@ -183,6 +240,10 @@ class TelemetryCollector:
                         val = state.get("duration_ms")
                         if val is not None:
                             timings.llm_exec_ms = float(val)
+                        if state.get("llm_target") is not None:
+                            timings.llm_target = str(state["llm_target"])
+                        if stream_node and not timings.llm_worker_node:
+                            timings.llm_worker_node = stream_node
                         if state.get("prompt_tokens") is not None:
                             timings.prompt_tokens = int(state["prompt_tokens"])
                         if state.get("completion_tokens") is not None:
@@ -201,6 +262,27 @@ class TelemetryCollector:
 
         return timings
 
+    @staticmethod
+    def _vllm_role(metric: dict[str, Any]) -> str:
+        role = str(metric.get("swcp_io_vllm_role", "")).lower()
+        if role in ("primary", "overflow"):
+            return role
+        pod = str(metric.get("pod", "")).lower()
+        return "overflow" if "overflow" in pod else "primary"
+
+    def _discover_control_plane_nodes(self) -> set[str]:
+        url = f"{self.prom_url}/api/v1/query?{urllib.parse.urlencode({'query': 'up{job=\"kubernetes-nodes\",node_role_kubernetes_io_control_plane=\"true\"}'})}"
+        res = self._http_get_json(url)
+        if res and res.get("status") == "success":
+            nodes = {
+                str(item.get("metric", {}).get("node", ""))
+                for item in res.get("data", {}).get("result", [])
+            }
+            nodes.discard("")
+            if nodes:
+                return nodes
+        return {"control-node"}
+
     def collect_prometheus_snapshot(
         self,
         start_epoch: float,
@@ -209,44 +291,126 @@ class TelemetryCollector:
     ) -> PrometheusSnapshot:
         """Query Prometheus for GPU and pod scaling metrics over run window."""
         snapshot = PrometheusSnapshot()
+        prom_start = start_epoch + self.clock_offset_s
+        prom_end = end_epoch + self.clock_offset_s
 
-        # 1. Query peak KV cache %
+        # 1. Query peak KV cache % per vLLM role (primary vs overflow)
         kv_data = self._query_prom_range(
             'vllm:kv_cache_usage_perc{namespace="swcp"}',
-            start_epoch, end_epoch, step_s
+            prom_start, prom_end, step_s
         )
         if kv_data:
-            vals = [float(v[1]) for series in kv_data for v in series.get("values", [])]
-            if vals:
-                snapshot.peak_kv_cache_pct = max(vals) * (100.0 if max(vals) <= 1.0 else 1.0)
+            primary_vals: list[float] = []
+            overflow_vals: list[float] = []
+            for series in kv_data:
+                role = self._vllm_role(series.get("metric", {}))
+                vals = [float(v[1]) * (100.0 if float(v[1]) <= 1.0 else 1.0) for v in series.get("values", [])]
+                if role == "overflow":
+                    overflow_vals.extend(vals)
+                else:
+                    primary_vals.extend(vals)
+            if primary_vals:
+                snapshot.primary_kv_cache_pct = max(primary_vals)
+            if overflow_vals:
+                snapshot.overflow_kv_cache_pct = max(overflow_vals)
+            snapshot.peak_kv_cache_pct = max(snapshot.primary_kv_cache_pct, snapshot.overflow_kv_cache_pct)
 
-        # 2. Query mean token generation rate
+        # 2. Query summed token generation rate across active vLLM nodes
         tok_data = self._query_prom_range(
             'rate(vllm:generation_tokens_total{namespace="swcp"}[30s])',
-            start_epoch, end_epoch, step_s
+            prom_start, prom_end, step_s
         )
         if tok_data:
-            vals = [float(v[1]) for series in tok_data for v in series.get("values", [])]
-            if vals:
-                snapshot.mean_tok_per_s = sum(vals) / len(vals)
+            total_by_ts: dict[float, float] = {}
+            by_role: dict[str, dict[float, float]] = {"primary": {}, "overflow": {}}
+            for series in tok_data:
+                role = self._vllm_role(series.get("metric", {}))
+                for ts, raw_val in series.get("values", []):
+                    t_key = float(ts)
+                    val = max(0.0, float(raw_val))
+                    total_by_ts[t_key] = total_by_ts.get(t_key, 0.0) + val
+                    by_role[role][t_key] = by_role[role].get(t_key, 0.0) + val
+            active_total = [v for v in total_by_ts.values() if v > 0.1]
+            all_total = list(total_by_ts.values())
+            if active_total:
+                snapshot.mean_tok_per_s = sum(active_total) / len(active_total)
+            elif all_total:
+                snapshot.mean_tok_per_s = sum(all_total) / len(all_total)
+            prim_active = [v for v in by_role["primary"].values() if v > 0.1]
+            ovf_active = [v for v in by_role["overflow"].values() if v > 0.1]
+            if prim_active:
+                snapshot.primary_mean_tok_per_s = sum(prim_active) / len(prim_active)
+            if ovf_active:
+                snapshot.overflow_mean_tok_per_s = sum(ovf_active) / len(ovf_active)
 
-        # 3. Query replica counts per service via container_cpu_usage_seconds_total
+        # 3. Query completed request counts per vLLM role over window
+        req_data = self._query_prom_range(
+            'vllm:e2e_request_latency_seconds_count{namespace="swcp"}',
+            prom_start, prom_end, step_s
+        )
+        if req_data:
+            for series in req_data:
+                role = self._vllm_role(series.get("metric", {}))
+                vals = [float(v[1]) for v in series.get("values", [])]
+                if len(vals) >= 2:
+                    delta = max(0, int(round(vals[-1] - vals[0])))
+                    if role == "overflow":
+                        snapshot.overflow_requests += delta
+                    else:
+                        snapshot.primary_requests += delta
+
+        # 4. Query simultaneous replica counts per service and node
+        control_nodes = self._discover_control_plane_nodes()
         rep_data = self._query_prom_range(
-            'count by (pod) (container_cpu_usage_seconds_total{namespace="swcp",container!="",container!="POD"})',
-            start_epoch, end_epoch, step_s
+            'count by (pod, node) (container_cpu_usage_seconds_total{namespace="swcp",container!="",container!="POD"})',
+            prom_start, prom_end, step_s
         )
         if rep_data:
+            # Map timestamp -> (service, is_worker_node) -> set of pod names
+            active_at_ts: dict[float, dict[tuple[str, bool], set[str]]] = {}
             for series in rep_data:
-                name = series.get("metric", {}).get("pod", "")
-                vals = [int(float(v[1])) for v in series.get("values", [])]
-                if not vals:
+                metric = series.get("metric", {})
+                pod_name = str(metric.get("pod", ""))
+                node_name = str(metric.get("node", ""))
+                if "c-sandbox" in pod_name:
+                    service = "c-sandbox"
+                elif "llm-worker" in pod_name:
+                    service = "llm-worker"
+                elif "core-api" in pod_name:
+                    service = "core-api"
+                else:
                     continue
-                if "c-sandbox" in name:
-                    snapshot.max_replicas_sandbox += 1
-                elif "llm-worker" in name:
-                    snapshot.max_replicas_llm_worker += 1
-                elif "core-api" in name:
-                    snapshot.max_replicas_core_api += 1
+                is_worker = bool(node_name) and node_name not in control_nodes
+                for ts, _ in series.get("values", []):
+                    t_key = float(ts)
+                    buckets = active_at_ts.setdefault(t_key, {})
+                    buckets.setdefault((service, is_worker), set()).add(pod_name)
+
+            if active_at_ts:
+                snapshot.max_replicas_sandbox = max(
+                    (len(b.get(("c-sandbox", False), set())) + len(b.get(("c-sandbox", True), set())) for b in active_at_ts.values()),
+                    default=0,
+                )
+                snapshot.max_replicas_llm_worker = max(
+                    (len(b.get(("llm-worker", False), set())) + len(b.get(("llm-worker", True), set())) for b in active_at_ts.values()),
+                    default=0,
+                )
+                snapshot.max_replicas_core_api = max(
+                    (len(b.get(("core-api", False), set())) + len(b.get(("core-api", True), set())) for b in active_at_ts.values()),
+                    default=0,
+                )
+                snapshot.max_replicas_sandbox_worker = max(
+                    (len(b.get(("c-sandbox", True), set())) for b in active_at_ts.values()),
+                    default=0,
+                )
+                snapshot.max_replicas_llm_worker_worker = max(
+                    (len(b.get(("llm-worker", True), set())) for b in active_at_ts.values()),
+                    default=0,
+                )
+                snapshot.max_replicas_core_api_worker = max(
+                    (len(b.get(("core-api", True), set())) for b in active_at_ts.values()),
+                    default=0,
+                )
 
         return snapshot
 

@@ -14,7 +14,7 @@ using SWCP.Contracts;
 
 namespace llmWorker.Services;
 
-public sealed record LlmCompletion(string FeedbackMarkdown, LlmTokenUsage? TokenUsage, bool? TaskSolved);
+public sealed record LlmCompletion(string FeedbackMarkdown, LlmTokenUsage? TokenUsage, bool? TaskSolved, string? Target = null);
 
 public sealed class RetryableLlmException(TimeSpan retryDelay, Exception innerException)
     : Exception(innerException.Message, innerException)
@@ -108,7 +108,7 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                 ? null
                 : new LlmTokenUsage(result.Usage.InputTokenCount, result.Usage.OutputTokenCount, result.Usage.TotalTokenCount);
             var content = result.Content.Count > 0 ? result.Content[0].Text : string.Empty;
-            return ParseCompletion(content, usage, task);
+            return ParseCompletion(content, usage, task, "azure");
         }
         catch (ClientResultException exception) when (exception.Status == (int)HttpStatusCode.TooManyRequests)
         {
@@ -134,7 +134,8 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             return new LlmCompletion(
                 "Mock LLM feedback for infinite-GPU bottleneck benchmarking.",
                 new LlmTokenUsage(250, 80, 330),
-                solved);
+                solved,
+                "mock");
         }
 
         var modelName = configuration["LocalLlm:ModelName"] ?? configuration["LLM_MODEL_NAME"];
@@ -168,44 +169,46 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
         };
 
         var clientName = await SelectLocalClientNameAsync(cancellationToken);
-        using var response = await SendLocalCompletionAsync(clientName, payload, cancellationToken);
-
-        if ((int)response.StatusCode == 429)
+        var (response, target) = await SendLocalCompletionAsync(clientName, payload, cancellationToken);
+        using (response)
         {
-            var delay = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(10);
-            throw new RetryableLlmException(delay, new HttpRequestException("Local LLM returned 429."));
-        }
+            if ((int)response.StatusCode == 429)
+            {
+                var delay = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(10);
+                throw new RetryableLlmException(delay, new HttpRequestException("Local LLM returned 429."));
+            }
 
-        if ((int)response.StatusCode >= 500)
-        {
-            throw new RetryableLlmException(TimeSpan.FromSeconds(5), new HttpRequestException($"Local LLM returned {(int)response.StatusCode}."));
-        }
+            if ((int)response.StatusCode >= 500)
+            {
+                throw new RetryableLlmException(TimeSpan.FromSeconds(5), new HttpRequestException($"Local LLM returned {(int)response.StatusCode}."));
+            }
 
-        response.EnsureSuccessStatusCode();
-        using var document = await response.Content.ReadFromJsonAsync<JsonDocument>(cancellationToken: cancellationToken)
-            ?? throw new InvalidOperationException("Local LLM returned an empty response.");
-        var root = document.RootElement;
-        var choice = root.GetProperty("choices")[0];
-        var isLengthFinish = choice.TryGetProperty("finish_reason", out var finishReason) && finishReason.GetString() == "length";
-        var content = choice.GetProperty("message").GetProperty("content").GetString() ?? string.Empty;
-        if (isLengthFinish)
-        {
-            content = RecoverTruncatedJson(content, task);
-        }
+            response.EnsureSuccessStatusCode();
+            using var document = await response.Content.ReadFromJsonAsync<JsonDocument>(cancellationToken: cancellationToken)
+                ?? throw new InvalidOperationException("Local LLM returned an empty response.");
+            var root = document.RootElement;
+            var choice = root.GetProperty("choices")[0];
+            var isLengthFinish = choice.TryGetProperty("finish_reason", out var finishReason) && finishReason.GetString() == "length";
+            var content = choice.GetProperty("message").GetProperty("content").GetString() ?? string.Empty;
+            if (isLengthFinish)
+            {
+                content = RecoverTruncatedJson(content, task);
+            }
 
-        LlmTokenUsage? usage = null;
-        if (root.TryGetProperty("usage", out var tokenUsage))
-        {
-            usage = new LlmTokenUsage(
-                tokenUsage.GetProperty("prompt_tokens").GetInt32(),
-                tokenUsage.GetProperty("completion_tokens").GetInt32(),
-                tokenUsage.GetProperty("total_tokens").GetInt32());
-        }
+            LlmTokenUsage? usage = null;
+            if (root.TryGetProperty("usage", out var tokenUsage))
+            {
+                usage = new LlmTokenUsage(
+                    tokenUsage.GetProperty("prompt_tokens").GetInt32(),
+                    tokenUsage.GetProperty("completion_tokens").GetInt32(),
+                    tokenUsage.GetProperty("total_tokens").GetInt32());
+            }
 
-        return ParseCompletion(content, usage, task);
+            return ParseCompletion(content, usage, task, target);
+        }
     }
 
-    private static LlmCompletion ParseCompletion(string content, LlmTokenUsage? usage, LlmTask task)
+    private static LlmCompletion ParseCompletion(string content, LlmTokenUsage? usage, LlmTask task, string? target = null)
     {
         using var document = JsonDocument.Parse(content);
         var root = document.RootElement;
@@ -229,7 +232,7 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             taskSolved = null;
         }
 
-        return new LlmCompletion(feedbackElement.GetString()!, usage, taskSolved);
+        return new LlmCompletion(feedbackElement.GetString()!, usage, taskSolved, target);
     }
 
     private static string RecoverTruncatedJson(string content, LlmTask task)
@@ -294,11 +297,12 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
         return primaryLoad >= primaryThreshold ? OverflowClientName : PrimaryClientName;
     }
 
-    private async Task<HttpResponseMessage> SendLocalCompletionAsync(
+    private async Task<(HttpResponseMessage Response, string Target)> SendLocalCompletionAsync(
         string clientName,
         object payload,
         CancellationToken cancellationToken)
     {
+        var fellBackFromOverflow = false;
         if (clientName == OverflowClientName)
         {
             try
@@ -308,22 +312,25 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                 if (overflowResponse.StatusCode != HttpStatusCode.ServiceUnavailable &&
                     overflowResponse.StatusCode != HttpStatusCode.BadGateway)
                 {
-                    return overflowResponse;
+                    return (overflowResponse, "overflow");
                 }
 
                 overflowResponse.Dispose();
+                fellBackFromOverflow = true;
             }
             catch (HttpRequestException)
             {
                 // Overflow node is unreachable or starting up; fall back to primary vLLM.
+                fellBackFromOverflow = true;
             }
         }
 
         Interlocked.Increment(ref _primaryActiveCount);
         try
         {
-            return await httpClientFactory.CreateClient(PrimaryClientName)
+            var response = await httpClientFactory.CreateClient(PrimaryClientName)
                 .PostAsJsonAsync("/v1/chat/completions", payload, cancellationToken);
+            return (response, fellBackFromOverflow ? "overflow_fallback" : "primary");
         }
         finally
         {
