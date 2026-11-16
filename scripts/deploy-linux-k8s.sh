@@ -211,7 +211,7 @@ if [ "${#images_to_build[@]}" -gt 0 ]; then
     for worker_ssh in "${worker_ssh_targets[@]}"; do
       echo "--> Streaming $image to $worker_ssh..."
       $DOCKER_CMD save "$image" | ssh -o BatchMode=yes -o ConnectTimeout=10 "$worker_ssh" \
-        "sudo -n sh -c 'crictl rmi \"\$1\" >/dev/null 2>&1 || true; k3s ctr images rm \"\$1\" >/dev/null 2>&1 || true; exec k3s ctr images import -' _ $(printf '%q' "$image")"
+        "sudo -n sh -c 'crictl rmi \"$image\" >/dev/null 2>&1 || true; k3s ctr images rm \"$image\" >/dev/null 2>&1 || true; exec k3s ctr images import -'"
     done
   done
 fi
