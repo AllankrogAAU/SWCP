@@ -324,8 +324,6 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
         )
         await asyncio.sleep(delay)
         await message.nak()
-    finally:
-        tracer_provider.force_flush()
 
 
 async def run_worker() -> None:
@@ -418,6 +416,7 @@ async def run_worker() -> None:
         if running:
             await asyncio.wait(running, timeout=30)
         executor.shutdown(wait=False, cancel_futures=True)
+        tracer_provider.force_flush()
         provider.close()
         await connection.drain()
         await connection.close()
