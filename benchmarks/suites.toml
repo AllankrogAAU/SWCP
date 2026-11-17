@@ -27,9 +27,12 @@ seqs_values = "4,8,12,16,24,32,48"
 [suites.infinite_gpu]
 arrival_mode = "continuous-ramp"
 start_rate = 100.0
-end_rate = 800.0
-ramp_duration_s = 420.0
+end_rate = 4000.0
+ramp_duration_s = 780.0
 bucket_duration_s = 30.0
+stop_on_saturation = true
+saturation_confirm_buckets = 3
+saturation_deficit_ratio = 0.12
 mock_llm = true
 
 # Goal 3: 2-Node Spillover & Dual-GPU Saturation Ramp
@@ -38,8 +41,8 @@ mock_llm = true
 [suites.ramp_capacity]
 arrival_mode = "continuous-ramp"
 start_rate = 30.0
-end_rate = 1000.0
-ramp_duration_s = 970.0
+end_rate = 1500.0
+ramp_duration_s = 1470.0
 bucket_duration_s = 30.0
 stop_on_saturation = true
 saturation_confirm_buckets = 3

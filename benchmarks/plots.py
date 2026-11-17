@@ -79,6 +79,12 @@ def _sort_step_df(df: pd.DataFrame) -> pd.DataFrame:
 def _build_step_summary_frame(sub_df: pd.DataFrame, sum_df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate per-submission stage means merged with step summary telemetry."""
     if not sub_df.empty and "step_label" in sub_df.columns:
+        has_telem = (sub_df.get("sandbox_exec_ms", 0) > 0) | (sub_df.get("llm_exec_ms", 0) > 0)
+        stage_df = sub_df[has_telem].copy() if has_telem.any() else sub_df.copy()
+        if "final_status" in stage_df.columns and "delivery_overhead_ms" in stage_df.columns:
+            # Exclude 360s client timeout sentinel from delivery overhead mean
+            stage_df.loc[stage_df["final_status"] == "TIMEOUT", "delivery_overhead_ms"] = np.nan
+
         agg_spec: dict[str, Any] = {
             "http_enqueue_ms": "mean",
             "sandbox_queue_wait_ms": "mean",
@@ -88,9 +94,9 @@ def _build_step_summary_frame(sub_df: pd.DataFrame, sum_df: pd.DataFrame) -> pd.
             "client_e2e_ms": "mean",
         }
         for opt_col in ("orchestration_overhead_ms", "submit_edge_network_ms", "delivery_overhead_ms"):
-            if opt_col in sub_df.columns:
+            if opt_col in stage_df.columns:
                 agg_spec[opt_col] = "mean"
-        grouped = sub_df.groupby("step_label", as_index=False).agg(agg_spec)
+        grouped = stage_df.groupby("step_label", as_index=False).agg(agg_spec)
         if not sum_df.empty and "step_label" in sum_df.columns:
             extra_cols = [c for c in sum_df.columns if c not in grouped.columns and c != "run_id"]
             if extra_cols:
@@ -179,8 +185,8 @@ def plot_obj2_infinite_gpu_scaling(
     sum_df: pd.DataFrame,
     output_path: Path,
 ) -> None:
-    """Multi-panel chart isolating non-GPU throughput ceiling, stage latency, and 2-node pod scaling."""
-    fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(10.5, 11.5), sharex=True, dpi=300)
+    """Multi-panel chart isolating non-GPU throughput ceiling (sandbox node split), pod scaling, and bucket latency."""
+    fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(10.5, 13.8), sharex=False, dpi=300)
 
     grouped = _build_step_summary_frame(sub_df, sum_df)
     if grouped.empty:
@@ -196,88 +202,138 @@ def plot_obj2_infinite_gpu_scaling(
         grouped["p50_e2e_ms"] = grouped["p50"].fillna(grouped.get("p50_e2e_ms", 0.0))
         grouped["p95_e2e_ms"] = grouped["p95"].fillna(grouped.get("p95_e2e_ms", 0.0))
 
-    if "target_load" in grouped.columns and grouped["target_load"].notna().any():
-        labels = [f"{float(v):.0f}/m" for v in grouped["target_load"]]
-    else:
-        labels = [str(s) for s in grouped["step_label"].tolist()]
+        if "sandbox_node" in sub_df.columns:
+            node_counts = (
+                sub_df.assign(
+                    _is_worker=sub_df["sandbox_node"].fillna("").astype(str).apply(
+                        lambda n: 1 if (n != "" and n != "control-node") else 0
+                    ),
+                    _is_ctrl=sub_df["sandbox_node"].fillna("").astype(str).apply(
+                        lambda n: 1 if n == "control-node" else 0
+                    ),
+                )
+                .groupby("step_label", as_index=False)
+                .agg(sb_ctrl_reqs=("_is_ctrl", "sum"), sb_worker_reqs=("_is_worker", "sum"))
+            )
+            grouped = pd.merge(grouped, node_counts, on="step_label", how="left")
+
+    grouped = _sort_step_df(grouped)
+    target_rpm = grouped.get("target_load", pd.Series(range(1, len(grouped) + 1))).fillna(0).to_numpy(dtype=float)
+    labels = [f"{int(round(v))}" for v in target_rpm]
     x = np.arange(len(labels))
 
-    target_rpm = grouped.get("target_load", pd.Series([0.0] * len(labels))).fillna(0).to_numpy()
-    achieved_rpm = grouped.get("achieved_throughput_per_min", pd.Series([0.0] * len(labels))).fillna(0).to_numpy()
-    backlog = grouped.get("in_flight_end", pd.Series([0] * len(labels))).fillna(0).to_numpy()
+    achieved_rpm = grouped.get("achieved_throughput_per_min", pd.Series([0.0] * len(labels))).fillna(0).to_numpy(dtype=float)
+    dur_min = np.maximum(0.05, grouped.get("step_duration_actual_s", pd.Series([30.0] * len(labels))).fillna(30.0).to_numpy(dtype=float) / 60.0)
 
-    # Top Panel: Arrival vs Completion Rate + Queue Backlog
-    ax0.plot(x, target_rpm, linestyle="--", color="#64748b", linewidth=1.8, marker=".", label="Target Arrival Rate (subs/min)")
-    ax0.plot(x, achieved_rpm, color="#059669", linewidth=2.4, marker="o", label="Achieved Completion Rate (subs/min)")
-    ax0.set_ylabel("Throughput (subs/min)")
+    sb_ctrl_raw = grouped.get("sb_ctrl_reqs", pd.Series([1.0] * len(labels))).fillna(0).to_numpy(dtype=float)
+    sb_worker_raw = grouped.get("sb_worker_reqs", pd.Series([0.0] * len(labels))).fillna(0).to_numpy(dtype=float)
+    tot_sb_reqs = sb_ctrl_raw + sb_worker_raw
+    ctrl_share = np.where(tot_sb_reqs > 0, sb_ctrl_raw / np.maximum(1.0, tot_sb_reqs), 1.0)
+    worker_share = np.where(tot_sb_reqs > 0, sb_worker_raw / np.maximum(1.0, tot_sb_reqs), 0.0)
+    comp_ctrl_rpm = achieved_rpm * ctrl_share
+    comp_worker_rpm = achieved_rpm * worker_share
+
+    if "backlog_growth_per_min" in grouped.columns and grouped["backlog_growth_per_min"].notna().any():
+        backlog_growth_rpm = grouped["backlog_growth_per_min"].fillna(0).to_numpy(dtype=float)
+    else:
+        backlog_end = grouped.get("in_flight_end", pd.Series([0.0] * len(labels))).fillna(0).to_numpy(dtype=float)
+        prev_backlog = np.concatenate(([0.0], backlog_end[:-1]))
+        backlog_growth_rpm = (backlog_end - prev_backlog) / dur_min
+    backlog_pos_rpm = np.maximum(0.0, backlog_growth_rpm)
+
+    # Top Panel (Single Y-axis: subs/min): Target 1:1 vs Sandbox-Node-Split Completion Rate + Queue Growth (+dQ/dt)
+    ax0.bar(
+        x, comp_ctrl_rpm, width=0.56, color="#3b82f6", alpha=0.88,
+        label="Completed: Control-Node Sandbox (subs/min)",
+    )
+    ax0.bar(
+        x, comp_worker_rpm, width=0.56, bottom=comp_ctrl_rpm, color="#f97316", alpha=0.90,
+        label="Completed: Worker-Node Sandbox (subs/min)",
+    )
+    ax0.bar(
+        x, backlog_pos_rpm, width=0.56, bottom=achieved_rpm,
+        color="#fde68a", edgecolor="#d97706", hatch="///", alpha=0.72, linewidth=0.9,
+        label="Backlog Growth +dQ/dt (subs/min)",
+    )
+    ax0.plot(
+        x, target_rpm, linestyle="--", color="#475569", linewidth=1.9,
+        label="Target Arrival Rate 1:1 (subs/min)",
+    )
+    ax0.plot(
+        x, achieved_rpm, color="#0f172a", linewidth=2.2, marker="o", markersize=5.5,
+        label="Total Completion Rate (subs/min)",
+    )
+    ax0.set_ylabel("Throughput / Queue Flow (subs/min)")
+    ax0.set_xlabel("Submission Rate (subs/min)")
+    ax0.set_xticks(x)
+    ax0.set_xticklabels(labels)
+    ax0.set_ylim(bottom=0)
     ax0.grid(True, linestyle="--", alpha=0.7)
-
-    ax0_r = ax0.twinx()
-    ax0_r.bar(x, backlog, width=0.45, alpha=0.28, color="#f59e0b", label="Active Backlog (jobs)")
-    ax0_r.set_ylabel("In-Flight Backlog (jobs)", color="#b45309")
-    h1, l1 = ax0.get_legend_handles_labels()
-    h2, l2 = ax0_r.get_legend_handles_labels()
     _place_legend_above(
-        ax0, h1 + h2, l1 + l2, ncol=3, fontsize=8.5,
-        title="Infinite-GPU Scaling: Non-GPU Ceiling, Stage Latencies & 2-Node Pod Spillover",
+        ax0, ncol=3, fontsize=8.3,
+        title="Infinite-GPU Scaling: Non-GPU Ceiling & Sandbox Node Spillover",
     )
 
-    enqueue = grouped.get("http_enqueue_ms", grouped.get("mean_enqueue_ms", pd.Series([0.0] * len(labels)))).fillna(0).to_numpy()
-    sb_wait = grouped.get("sandbox_queue_wait_ms", grouped.get("p95_sandbox_wait_ms", pd.Series([0.0] * len(labels)))).fillna(0).to_numpy()
-    sb_exec = grouped.get("sandbox_exec_ms", grouped.get("p95_sandbox_exec_ms", pd.Series([0.0] * len(labels)))).fillna(0).to_numpy()
-    llm_wait = grouped.get("llm_queue_wait_ms", grouped.get("p95_llm_wait_ms", pd.Series([0.0] * len(labels)))).fillna(0).to_numpy()
-    llm_exec = grouped.get("llm_exec_ms", grouped.get("p95_llm_exec_ms", pd.Series([0.0] * len(labels)))).fillna(0).to_numpy()
-
-    p50_vals = grouped.get("p50_e2e_ms", pd.Series([0.0] * len(labels))).fillna(0).to_numpy()
-    p95_vals = grouped.get("p95_e2e_ms", pd.Series([0.0] * len(labels))).fillna(0).to_numpy()
-
-    # Middle Panel: Stacked Area Chart (contributing service latencies)
-    ax1.stackplot(
-        x,
-        enqueue,
-        sb_wait,
-        sb_exec,
-        llm_wait,
-        llm_exec,
-        labels=[
-            "API Gateway / DB Enqueue",
-            "Sandbox Queue Wait",
-            "Sandbox Exec (gVisor)",
-            "LLM Queue Wait",
-            "Mock LLM (5ms)",
-        ],
-        colors=["#94a3b8", "#38bdf8", "#0284c7", "#f97316", "#dc2626"],
-        alpha=0.75,
-    )
-    ax1.plot(x, p50_vals, marker="o", color="#1e3a8a", linewidth=2.2, label="Bucket Client p50 (Median)")
-    ax1.plot(x, p95_vals, marker="s", color="#b91c1c", linewidth=2.5, linestyle="--", label="Bucket Client p95 (Tail)")
-    ax1.set_ylabel("Latency (ms)")
-    _place_legend_above(ax1, ncol=4, fontsize=8.0)
-    ax1.grid(True, linestyle="--", alpha=0.7)
-
-    # Bottom Panel: Active Pod Replicas
+    # Middle Panel: Active Pod Replicas & Worker Node Spillover
     rep_sb = grouped.get("max_replicas_sandbox", pd.Series([3] * len(labels))).fillna(3)
     rep_llm = grouped.get("max_replicas_llm_worker", pd.Series([2] * len(labels))).fillna(2)
     rep_core = grouped.get("max_replicas_core_api", pd.Series([2] * len(labels))).fillna(2)
 
-    ax2.step(x, rep_sb, where="mid", marker="o", label="c-sandbox pods (total)", color="#0284c7")
-    ax2.step(x, rep_llm, where="mid", marker="s", label="llm-worker pods (total)", color="#f97316")
-    ax2.step(x, rep_core, where="mid", marker="^", label="core-api pods (total)", color="#64748b")
+    ax1.step(x, rep_sb, where="mid", marker="o", linewidth=2.0, label="c-sandbox pods (total)", color="#0284c7")
+    ax1.step(x, rep_llm, where="mid", marker="s", linewidth=1.8, label="llm-worker pods (total)", color="#f97316")
+    ax1.step(x, rep_core, where="mid", marker="^", linewidth=1.8, label="core-api pods (total)", color="#64748b")
 
     rep_sb_w = grouped.get("max_replicas_sandbox_worker", pd.Series([0] * len(labels))).fillna(0)
     rep_llm_w = grouped.get("max_replicas_llm_worker_worker", pd.Series([0] * len(labels))).fillna(0)
     if float(rep_sb_w.max()) > 0:
-        ax2.step(x, rep_sb_w, where="mid", linestyle="--", marker="o", label="c-sandbox pods (worker-node)", color="#38bdf8")
+        ax1.step(x, rep_sb_w, where="mid", linestyle="--", marker="o", linewidth=1.8, label="c-sandbox pods (worker-node)", color="#38bdf8")
     if float(rep_llm_w.max()) > 0:
-        ax2.step(x, rep_llm_w, where="mid", linestyle="--", marker="s", label="llm-worker pods (worker-node)", color="#fb923c")
-    ax2.set_ylabel("Active Pod Replicas")
-    ax2.set_xlabel("Arrival Rate Bucket (subs/min)")
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(labels, rotation=20, ha="right")
-    _place_legend_above(ax2, ncol=3, fontsize=8.5)
-    ax2.grid(True, linestyle="--", alpha=0.7)
+        ax1.step(x, rep_llm_w, where="mid", linestyle="--", marker="s", linewidth=1.8, label="llm-worker pods (worker-node)", color="#fb923c")
+    ax1.set_ylabel("Active Pod Replicas")
+    ax1.set_xlabel("Submission Rate (subs/min)")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels)
+    ax1.grid(True, linestyle="--", alpha=0.7)
+    _place_legend_above(
+        ax1, ncol=3, fontsize=8.5,
+        title="Cluster Autoscaling (KEDA / HPA Active Pod Replicas & Worker Spillover)",
+        title_fontsize=10.5,
+    )
 
-    plt.tight_layout(h_pad=2.4)
+    # Bottom Panel: Rolling Bucket Latency (s) + Failure Annotations
+    p50_s = grouped.get("p50_e2e_ms", pd.Series([0.0] * len(labels))).fillna(0).to_numpy(dtype=float) / 1000.0
+    p95_s = grouped.get("p95_e2e_ms", pd.Series([0.0] * len(labels))).fillna(0).to_numpy(dtype=float) / 1000.0
+    succ = grouped.get("success_rate", pd.Series([1.0] * len(labels))).fillna(1.0).to_numpy(dtype=float) * 100.0
+
+    ax2.plot(x, p50_s, marker="o", color="#0284c7", linewidth=2.0, label="Bucket p50 E2E (s)")
+    ax2.plot(x, p95_s, marker="s", color="#dc2626", linewidth=2.3, label="Bucket p95 E2E (s)")
+
+    fail_mask = succ < 99.95
+    if np.any(fail_mask):
+        ax2.scatter(
+            x[fail_mask], p95_s[fail_mask], s=110, facecolors="none", edgecolors="#991b1b",
+            linewidths=2.2, zorder=5, label="Bucket With Failures (<100% OK)",
+        )
+        for xi, yi, sr in zip(x[fail_mask], p95_s[fail_mask], succ[fail_mask]):
+            ax2.annotate(
+                f"{sr:.0f}% OK", (xi, yi), xytext=(0, 8), textcoords="offset points",
+                ha="center", fontsize=8, fontweight="bold", color="#991b1b",
+            )
+
+    ax2.set_ylabel("Latency (seconds)")
+    ax2.set_xlabel("Submission Rate (subs/min)")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(labels)
+    ax2.set_ylim(bottom=0, top=max(1.0, float(np.max(p95_s)) * 1.18))
+    ax2.grid(True, linestyle="--", alpha=0.7)
+    fail_suffix = "" if np.any(fail_mask) else " — 100% Success All Buckets"
+    _place_legend_above(
+        ax2, ncol=3, fontsize=8.5,
+        title=f"Rolling Bucket Latency (Transient Ramp — Includes Prior Backlog{fail_suffix})",
+        title_fontsize=10.5,
+    )
+
+    plt.tight_layout(h_pad=3.0)
     fig.savefig(output_path, bbox_inches="tight", pad_inches=0.2)
     plt.close(fig)
     logger.info("Saved %s", output_path)
@@ -354,8 +410,10 @@ def plot_ramp_spillover_capacity(
     )
 
     # Middle Panel: Diagnostic Cluster Health (GPU Dispatches + KV Cache % + Worker Spilled Pods)
-    prim_rpm = prim_raw / dur_min
-    ovf_rpm = ovf_raw / dur_min
+    tot_reqs = grouped.get("total_requests", pd.Series(tot_gpu_reqs)).fillna(0).to_numpy(dtype=float)
+    eff_reqs = np.maximum(tot_reqs, tot_gpu_reqs)
+    prim_rpm = (eff_reqs * prim_share) / dur_min
+    ovf_rpm = (eff_reqs * ovf_share) / dur_min
     ax1.bar(x, prim_rpm, width=0.55, color="#3b82f6", alpha=0.85, label="Primary GPU (control-node req/min)")
     ax1.bar(x, ovf_rpm, width=0.55, bottom=prim_rpm, color="#f97316", alpha=0.90, label="Overflow GPU (worker-node req/min)")
     ax1.set_ylabel("LLM Dispatches / min")
@@ -690,8 +748,10 @@ def generate_all_plots(
         generated.append(p_burst)
     elif suite_name in ("infinite_gpu", "obj2_infinite_gpu"):
         p2 = output_dir / "service_scaling_stacked_area.png"
+        p_stage = output_dir / "pipeline_latency_breakdown_stacked.png"
         plot_obj2_infinite_gpu_scaling(sub_df, sum_df, p2)
-        generated.append(p2)
+        plot_obj1_bottleneck_stacked(sub_df, sum_df, p_stage)
+        generated.extend([p2, p_stage])
     elif suite_name in ("vllm_sweep", "obj3_vllm_sweep"):
         p3 = output_dir / "vllm_tuning_matrix.png"
         plot_obj3_vllm_tuning_matrix(sum_df, p3)
