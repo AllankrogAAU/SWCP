@@ -409,7 +409,7 @@ class LoadRunner:
     ) -> list[ClientSubmissionResult]:
         """Run a continuous linear-rate Poisson ramp using exact Lewis-Shedler thinning."""
         all_results: list[ClientSubmissionResult] = []
-        client_limits = httpx.Limits(max_connections=400, max_keepalive_connections=150, keepalive_expiry=30.0)
+        client_limits = httpx.Limits(max_connections=1500, max_keepalive_connections=500, keepalive_expiry=30.0)
 
         ramp_duration_s = max(10.0, float(ramp_duration_s))
         bucket_duration_s = max(5.0, float(bucket_duration_s))
@@ -489,15 +489,14 @@ class LoadRunner:
 
         sampler_task = asyncio.create_task(_bucket_backlog_sampler())
 
+        next_candidate_perf = ramp_start_perf
         async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0, limits=client_limits) as client:
             while not stop_event.is_set():
-                elapsed = time.perf_counter() - ramp_start_perf
-                if elapsed >= ramp_duration_s:
-                    break
-
                 dt = -math.log(max(1e-12, random.random())) / lam_max
-                if elapsed + dt >= ramp_duration_s:
-                    rem = ramp_duration_s - elapsed
+                next_candidate_perf += dt
+                elapsed_target = next_candidate_perf - ramp_start_perf
+                if elapsed_target >= ramp_duration_s:
+                    rem = (ramp_start_perf + ramp_duration_s) - time.perf_counter()
                     if rem > 0:
                         try:
                             await asyncio.wait_for(stop_event.wait(), timeout=rem)
@@ -505,11 +504,15 @@ class LoadRunner:
                             pass
                     break
 
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=dt)
-                    break
-                except asyncio.TimeoutError:
-                    pass
+                wait_s = next_candidate_perf - time.perf_counter()
+                if wait_s > 0.001:
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=wait_s)
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(0)
 
                 if stop_event.is_set():
                     break

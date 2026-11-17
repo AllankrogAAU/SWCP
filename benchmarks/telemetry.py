@@ -272,7 +272,7 @@ class TelemetryCollector:
         submission_ids: list[str] | set[str],
         start_epoch: float,
         end_epoch: float,
-        chunk_seconds: float = 60.0,
+        chunk_seconds: float = 15.0,
     ) -> dict[str, StageTimings]:
         """Query Loki in chunked time windows for all pipeline stage events,
 
@@ -291,11 +291,13 @@ class TelemetryCollector:
             re.IGNORECASE,
         )
 
-        cur_start = start_epoch
-        while cur_start < end_epoch:
-            cur_end = min(end_epoch, cur_start + chunk_seconds)
-            start_ns = int((cur_start + self.clock_offset_s - 10.0) * 1_000_000_000)
-            end_ns = int((cur_end + self.clock_offset_s + 15.0) * 1_000_000_000)
+        padded_start = start_epoch + self.clock_offset_s - 10.0
+        padded_end = end_epoch + self.clock_offset_s + 15.0
+        cur_start = padded_start
+        while cur_start < padded_end:
+            cur_end = min(padded_end, cur_start + chunk_seconds)
+            start_ns = int(cur_start * 1_000_000_000)
+            end_ns = int(cur_end * 1_000_000_000)
 
             query = '{namespace="swcp"} |= "pipeline."'
             params = urllib.parse.urlencode({
