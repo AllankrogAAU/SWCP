@@ -13,13 +13,28 @@ from kubernetes.stream import stream
 
 from contracts import SandboxTestCase
 from evaluation.result import SandboxReport
-from sandbox.interface import Limits, SandboxError, SandboxStartError
+from sandbox.interface import (
+    Limits,
+    PermanentSandboxError,
+    SandboxError,
+    SandboxStartError,
+)
 from sandbox.report import parse_report
 
 logger = logging.getLogger("c-sandbox-worker")
 
 JOB_LABEL = {"app.kubernetes.io/name": "c-sandbox-job"}
 CREATED_AT_ANNOTATION = "swcp.io/created-at"
+PERMANENT_API_STATUSES = {400, 401, 403, 404, 422}
+
+
+def _api_sandbox_error(action: str, exception: ApiException) -> SandboxError:
+    error_type = (
+        PermanentSandboxError
+        if exception.status in PERMANENT_API_STATUSES
+        else SandboxError
+    )
+    return error_type(f"{action}: {exception}")
 
 
 @dataclass(frozen=True)
@@ -199,6 +214,8 @@ class KubePodSandbox:
                 ws.close()
         except SandboxError:
             raise
+        except ApiException as exception:
+            raise _api_sandbox_error("exec failed", exception) from exception
         except Exception as exception:
             raise SandboxError(f"exec failed: {exception}") from exception
 
@@ -253,6 +270,11 @@ class KubeSandboxProvider:
                 build_pod_manifest(self._cfg, name),  # type: ignore[arg-type]
             )
             self._wait_running(name)
+        except ApiException as exception:
+            sandbox.destroy()
+            raise _api_sandbox_error(
+                "could not start sandbox pod", exception
+            ) from exception
         except Exception as exception:
             sandbox.destroy()
             raise SandboxStartError(
