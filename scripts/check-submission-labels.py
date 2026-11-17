@@ -18,13 +18,15 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-VALID_CATEGORIES = {"correct", "random_error", "infinite_loop", "pointer_error"}
+VALID_CATEGORIES = {"correct", "random_error", "infinite_loop", "pointer_error", "compile_error"}
 # The sandbox reports these common fatal signals as shell exit codes (128 + signal).
-SIGNAL_EXIT_CODES = {132, 134, 135, 136, 139, -4, -6, -7, -8, -11}
+SIGNAL_EXIT_CODES = {132, 134, 135, 139, -4, -6, -7, -11}
 CRASH_OUTPUT = re.compile(
     r"segmentation fault|bus error|addresssanitizer|invalid (?:read|write|pointer)",
     re.IGNORECASE,
 )
+# LeakSanitizer reports end with "SUMMARY: AddressSanitizer: N byte(s) leaked"; a leak is not a crash.
+LEAK_REPORT_LINE = re.compile(r"^.*(?:LeakSanitizer|byte\(s\) leaked).*$", re.IGNORECASE | re.MULTILINE)
 REPORT_FIELDS = [
     "recordId",
     "assignmentTitle",
@@ -48,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     default_dataset = (
         Path(__file__).resolve().parents[1]
         / "data"
-        / "sample-submissions-10000-varied.jsonl"
+        / "sample-submissions-11000-with-compile-errors.jsonl"
     )
     parser = argparse.ArgumentParser(
         description="Submit a JSONL dataset to SWCP and compare category labels with sandbox behavior."
@@ -223,7 +225,7 @@ def poll_submission(
 
 def _is_crash(test_result: dict[str, Any]) -> bool:
     exit_code = test_result.get("exitCode")
-    stderr = test_result.get("stderr") or ""
+    stderr = LEAK_REPORT_LINE.sub("", str(test_result.get("stderr") or ""))
     return exit_code in SIGNAL_EXIT_CODES or bool(CRASH_OUTPUT.search(stderr))
 
 
@@ -234,6 +236,18 @@ def classify_sandbox_output(
     compilation = sandbox.get("compilation")
     test_results = sandbox.get("testResults")
     error_classification = str(sandbox.get("errorClassification") or "")
+    # A failed compile usually comes back without test results, so it is checked before requiring them.
+    if isinstance(compilation, dict) and compilation.get("success") is not True:
+        tests = test_results if isinstance(test_results, list) else []
+        return "compile_error", {
+            "errorClassification": error_classification,
+            "compileSuccess": False,
+            "passedTests": sum(isinstance(t, dict) and t.get("passed") is True for t in tests),
+            "totalTests": len(tests),
+            "timedOutTests": 0,
+            "crashedTests": 0,
+            "evidence": str(compilation.get("stderr") or "Compilation failed.")[:500],
+        }
     if not isinstance(compilation, dict) or not isinstance(test_results, list):
         return "incomplete_results", {
             "errorClassification": error_classification,
@@ -497,7 +511,7 @@ def main() -> int:
 
             def run_student(index: int) -> list[dict[str, Any]]:
                 outcomes = []
-                for record in student_jobs[index]:
+                for job_index, record in enumerate(student_jobs[index]):
                     try:
                         outcome = check_record(
                             args.api_url,
@@ -519,9 +533,12 @@ def main() -> int:
                         save_row(outcome)
                         outcomes.append(outcome)
                         print(
-                            f"{record['recordId']}: checker error: {error}",
+                            f"{record['recordId']}: checker error: {error}; "
+                            f"stopping this student's queue "
+                            f"({len(student_jobs[index]) - job_index - 1} records left unsubmitted)",
                             file=sys.stderr,
                         )
+                        # The accepted submission may still be active; don't submit more work for this student.
                         break
 
                     save_row(outcome)
