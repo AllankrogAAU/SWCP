@@ -123,6 +123,7 @@ class LoadRunner:
                     jwt_data = json.loads(base64.urlsafe_b64decode(padded.encode()))
                     uname = jwt_data.get("preferred_username") or jwt_data.get("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name")
                     if uname:
+                        logger.warning("Token expired during run for user %s. Auto-refreshing...", uname)
                         login_res = await client.post("/api/auth/login", json={"username": uname, "password": self.config.password})
                         if login_res.status_code == 200:
                             token = str(login_res.json().get("accessToken") or login_res.json().get("token"))
@@ -134,6 +135,8 @@ class LoadRunner:
                                 timeout=30.0,
                             )
                             http_accepted_ms = (time.perf_counter() - t_retry) * 1000.0
+                        else:
+                            logger.error("Token auto-refresh failed for user %s: HTTP %d", uname, login_res.status_code)
                 except Exception as refresh_err:
                     logger.warning("Token auto-refresh failed: %s", refresh_err)
 

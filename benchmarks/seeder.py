@@ -15,6 +15,17 @@ from benchmarks.config import BenchmarkConfig
 logger = logging.getLogger("benchmarks.seeder")
 
 
+def _parse_jwt_claims(token: str) -> dict[str, Any] | None:
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        padded = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+        return json.loads(base64.urlsafe_b64decode(padded.encode()))
+    except Exception:
+        return None
+
+
 class Seeder:
     def __init__(self, config: BenchmarkConfig) -> None:
         self.config = config
@@ -24,49 +35,84 @@ class Seeder:
         """Ensure `count` users are registered and return their valid JWT Bearer tokens."""
         needed_count = count or self.config.user_pool_size
         cached_tokens = self._load_cache()
+        now = time.time()
 
-        valid_cached: list[str] = []
-        if cached_tokens:
-            test_token = cached_tokens[0]
-            if await self._is_token_valid(test_token):
-                if len(cached_tokens) >= needed_count:
-                    logger.info("Reusing %d valid pre-seeded tokens from cache.", needed_count)
-                    return cached_tokens[:needed_count]
-                valid_cached = cached_tokens
-                logger.info(
-                    "Reusing %d valid cached tokens; seeding %d additional users...",
-                    len(valid_cached), needed_count - len(valid_cached),
-                )
-            else:
-                logger.warning("Cached tokens appear expired or invalid. Re-authenticating...")
+        # 1. Parse and validate all cached tokens locally
+        valid_by_user: dict[int, str] = {}
+        for token in cached_tokens:
+            payload = _parse_jwt_claims(token)
+            if not payload:
+                continue
+            exp = payload.get("exp")
+            # Require at least 15 minutes of remaining validity
+            if exp is None or (exp - now) < 900:
+                continue
+            uname = (
+                payload.get("preferred_username")
+                or payload.get("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name")
+                or payload.get("unique_name")
+                or payload.get("sub")
+            )
+            if uname and uname.startswith(self.config.user_prefix):
+                try:
+                    user_num = int(uname[len(self.config.user_prefix):])
+                    valid_by_user[user_num] = token
+                except ValueError:
+                    pass
 
-        tokens: list[str] = list(valid_cached)
-        start_idx = len(valid_cached) + 1
-        needed_additional = needed_count - len(valid_cached)
-        if needed_additional > 0:
-            logger.info("Pre-seeding %d virtual users on %s...", needed_additional, self.config.target_url)
-            semaphore = asyncio.Semaphore(15)
+        # 2. If candidate tokens exist, probe server once to verify signing key hasn't changed
+        if valid_by_user:
+            probe_user = min(valid_by_user.keys())
+            probe_token = valid_by_user[probe_user]
+            try:
+                async with httpx.AsyncClient(base_url=self.config.target_url, timeout=5.0) as client:
+                    resp = await client.get(
+                        "/api/assignments",
+                        headers={"Authorization": f"Bearer {probe_token}"},
+                    )
+                    if resp.status_code in (401, 403):
+                        logger.warning("Server rejected cached token (signing key changed or invalidated). Invalidating cache...")
+                        valid_by_user.clear()
+            except Exception as e:
+                logger.debug("Probe check warning: %s", e)
 
-            async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0) as client:
-                tasks = [
-                    self._ensure_single_user(client, i, semaphore)
-                    for i in range(start_idx, needed_count + 1)
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 3. Determine which virtual users from 1..needed_count are missing or expired
+        missing_users = [i for i in range(1, needed_count + 1) if i not in valid_by_user]
 
-            for res in results:
-                if isinstance(res, str):
-                    tokens.append(res)
-                elif isinstance(res, Exception):
-                    logger.error("Failed to seed user: %s", res)
+        if not missing_users:
+            logger.info("Reusing %d valid pre-seeded tokens from cache.", needed_count)
+            return [valid_by_user[i] for i in range(1, needed_count + 1)]
 
-            if len(tokens) < needed_count:
-                raise RuntimeError(f"Expected {needed_count} seeded users, but only got {len(tokens)}.")
+        logger.info(
+            "Token cache: %d valid tokens found. Authenticating %d users (missing/expired) on %s...",
+            len(valid_by_user), len(missing_users), self.config.target_url,
+        )
 
-            self._save_cache(tokens)
-            logger.info("Successfully seeded users and updated token cache (total=%d).", len(tokens))
+        # 4. Authenticate missing users in parallel
+        semaphore = asyncio.Semaphore(30)
+        async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0) as client:
+            tasks = [
+                self._ensure_single_user(client, i, semaphore)
+                for i in missing_users
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        return tokens[:needed_count]
+        for user_num, res in zip(missing_users, results):
+            if isinstance(res, str):
+                valid_by_user[user_num] = res
+            elif isinstance(res, Exception):
+                logger.error("Failed to authenticate user %d: %s", user_num, res)
+
+        final_tokens = [valid_by_user[i] for i in range(1, needed_count + 1) if i in valid_by_user]
+        if len(final_tokens) < needed_count:
+            raise RuntimeError(f"Expected {needed_count} authenticated users, but only got {len(final_tokens)}.")
+
+        # 5. Save all currently valid tokens back to disk cache sorted by user_num
+        sorted_tokens = [valid_by_user[k] for k in sorted(valid_by_user.keys())]
+        self._save_cache(sorted_tokens)
+        logger.info("Successfully updated token cache with %d valid tokens.", len(sorted_tokens))
+
+        return final_tokens
 
     async def resolve_assignment_id(self, auth_token: str) -> str:
         """Fetch available assignments and select the optimal benchmark target."""
@@ -102,7 +148,19 @@ class Seeder:
         password = self.config.password
 
         async with semaphore:
-            # 1. Register user (ignore 409 Conflict if user already exists)
+            # 1. Try login directly first to avoid 409 conflict roundtrip if user exists
+            try:
+                login_resp = await client.post(
+                    "/api/auth/login",
+                    json={"username": username, "password": password},
+                )
+                if login_resp.status_code == 200:
+                    data = login_resp.json()
+                    return str(data.get("accessToken") or data.get("token"))
+            except Exception:
+                pass
+
+            # 2. Register user if not existing
             try:
                 reg_resp = await client.post(
                     "/api/auth/register",
@@ -114,7 +172,7 @@ class Seeder:
                 if e.response.status_code != 409:
                     raise
 
-            # 2. Login to get JWT
+            # 3. Login to get JWT
             login_resp = await client.post(
                 "/api/auth/login",
                 json={"username": username, "password": password},
@@ -122,27 +180,6 @@ class Seeder:
             login_resp.raise_for_status()
             data = login_resp.json()
             return str(data.get("accessToken") or data.get("token"))
-
-    async def _is_token_valid(self, token: str) -> bool:
-        try:
-            # Check JWT expiry header/payload: require at least 30 minutes of remaining lifetime
-            parts = token.split(".")
-            if len(parts) == 3:
-                padded = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
-                payload = json.loads(base64.urlsafe_b64decode(padded.encode()))
-                exp = payload.get("exp")
-                if exp is not None and (exp - time.time()) < 1800:
-                    logger.info("Cached JWT token expires within 30 minutes (exp=%s). Treating as expired.", exp)
-                    return False
-
-            async with httpx.AsyncClient(base_url=self.config.target_url, timeout=5.0) as client:
-                resp = await client.get(
-                    "/api/assignments",
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-                return resp.status_code == 200
-        except Exception:
-            return False
 
     def _load_cache(self) -> list[str]:
         if not self.cache_path.exists():
@@ -158,10 +195,6 @@ class Seeder:
 
     def _save_cache(self, tokens: list[str]) -> None:
         try:
-            existing = self._load_cache()
-            if len(existing) > len(tokens):
-                token_set = set(tokens)
-                tokens = list(tokens) + [t for t in existing if t not in token_set]
             with open(self.cache_path, "w", encoding="utf-8") as f:
                 json.dump(
                     {
