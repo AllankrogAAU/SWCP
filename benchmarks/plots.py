@@ -82,8 +82,8 @@ def _build_step_summary_frame(sub_df: pd.DataFrame, sum_df: pd.DataFrame) -> pd.
         has_telem = (sub_df.get("sandbox_exec_ms", 0) > 0) | (sub_df.get("llm_exec_ms", 0) > 0)
         stage_df = sub_df[has_telem].copy() if has_telem.any() else sub_df.copy()
         if "final_status" in stage_df.columns and "delivery_overhead_ms" in stage_df.columns:
-            # Exclude 360s client timeout sentinel from delivery overhead mean
-            stage_df.loc[stage_df["final_status"] == "TIMEOUT", "delivery_overhead_ms"] = np.nan
+            # Exclude 360s client timeout sentinel and failed requests from delivery overhead mean
+            stage_df.loc[stage_df["final_status"].isin(["TIMEOUT", "FAILED"]), "delivery_overhead_ms"] = np.nan
 
         agg_spec: dict[str, Any] = {
             "http_enqueue_ms": "mean",

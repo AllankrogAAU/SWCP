@@ -9,6 +9,7 @@ import logging
 import math
 import random
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Coroutine
 from urllib.parse import urlparse
@@ -178,8 +179,9 @@ class LoadRunner:
             client_e2e_ms = (time.perf_counter() - t0) * 1000.0
             completed_epoch = time.time()
             logger.error("Submission failed or errored: %s", exc)
+            fallback_sub_id = submission_id if (submission_id and submission_id != "unassigned") else f"failed_{uuid.uuid4().hex[:12]}"
             return ClientSubmissionResult(
-                submission_id=submission_id or "unassigned",
+                submission_id=fallback_sub_id,
                 token=token,
                 step_label=step_label,
                 fixture_type=archetype,
@@ -475,11 +477,11 @@ class LoadRunner:
                 )
                 achieved_rpm = completed_in_window / (b_dur_s / 60.0)
                 min_queue_floor = max(8, int(round(0.06 * b["mid_rate"])))
-                is_growing = (in_flight_end > prev_backlog) and (in_flight_end >= min_queue_floor)
                 is_behind = achieved_rpm < (1.0 - saturation_deficit_ratio) * b["mid_rate"]
+                is_saturated_bucket = is_behind and (in_flight_end >= min_queue_floor)
 
                 if stop_on_saturation and len(executed_buckets) >= min_saturation_buckets:
-                    saturation_streak = (saturation_streak + 1) if (is_growing and is_behind) else 0
+                    saturation_streak = (saturation_streak + 1) if is_saturated_bucket else 0
                 else:
                     saturation_streak = 0
 

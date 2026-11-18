@@ -25,37 +25,48 @@ class Seeder:
         needed_count = count or self.config.user_pool_size
         cached_tokens = self._load_cache()
 
-        # Check if cached tokens are still valid against target API
-        if len(cached_tokens) >= needed_count:
+        valid_cached: list[str] = []
+        if cached_tokens:
             test_token = cached_tokens[0]
             if await self._is_token_valid(test_token):
-                logger.info("Reusing %d valid pre-seeded tokens from cache.", needed_count)
-                return cached_tokens[:needed_count]
-            logger.warning("Cached tokens appear expired or invalid. Re-authenticating...")
+                if len(cached_tokens) >= needed_count:
+                    logger.info("Reusing %d valid pre-seeded tokens from cache.", needed_count)
+                    return cached_tokens[:needed_count]
+                valid_cached = cached_tokens
+                logger.info(
+                    "Reusing %d valid cached tokens; seeding %d additional users...",
+                    len(valid_cached), needed_count - len(valid_cached),
+                )
+            else:
+                logger.warning("Cached tokens appear expired or invalid. Re-authenticating...")
 
-        logger.info("Pre-seeding %d virtual users on %s...", needed_count, self.config.target_url)
-        tokens: list[str] = []
-        semaphore = asyncio.Semaphore(15)
+        tokens: list[str] = list(valid_cached)
+        start_idx = len(valid_cached) + 1
+        needed_additional = needed_count - len(valid_cached)
+        if needed_additional > 0:
+            logger.info("Pre-seeding %d virtual users on %s...", needed_additional, self.config.target_url)
+            semaphore = asyncio.Semaphore(15)
 
-        async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0) as client:
-            tasks = [
-                self._ensure_single_user(client, i, semaphore)
-                for i in range(1, needed_count + 1)
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0) as client:
+                tasks = [
+                    self._ensure_single_user(client, i, semaphore)
+                    for i in range(start_idx, needed_count + 1)
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for res in results:
-            if isinstance(res, str):
-                tokens.append(res)
-            elif isinstance(res, Exception):
-                logger.error("Failed to seed user: %s", res)
+            for res in results:
+                if isinstance(res, str):
+                    tokens.append(res)
+                elif isinstance(res, Exception):
+                    logger.error("Failed to seed user: %s", res)
 
-        if len(tokens) < needed_count:
-            raise RuntimeError(f"Expected {needed_count} seeded users, but only got {len(tokens)}.")
+            if len(tokens) < needed_count:
+                raise RuntimeError(f"Expected {needed_count} seeded users, but only got {len(tokens)}.")
 
-        self._save_cache(tokens)
-        logger.info("Successfully seeded %d users and updated token cache.", len(tokens))
-        return tokens
+            self._save_cache(tokens)
+            logger.info("Successfully seeded users and updated token cache (total=%d).", len(tokens))
+
+        return tokens[:needed_count]
 
     async def resolve_assignment_id(self, auth_token: str) -> str:
         """Fetch available assignments and select the optimal benchmark target."""
@@ -147,6 +158,10 @@ class Seeder:
 
     def _save_cache(self, tokens: list[str]) -> None:
         try:
+            existing = self._load_cache()
+            if len(existing) > len(tokens):
+                token_set = set(tokens)
+                tokens = list(tokens) + [t for t in existing if t not in token_set]
             with open(self.cache_path, "w", encoding="utf-8") as f:
                 json.dump(
                     {
