@@ -275,6 +275,10 @@ public static class SubmissionEndpoints
         context.Response.Headers.CacheControl = "no-cache";
         context.Response.Headers.TryAdd("X-Accel-Buffering", "no");
 
+        // Flush initial SSE connection header and comment immediately so clients & proxies know stream is open
+        await context.Response.WriteAsync(": connected\n\n", cancellationToken);
+        await context.Response.Body.FlushAsync(cancellationToken);
+
         // If the submission is already COMPLETED or FAILED, stream final result immediately and return
         if (submission.Status is SubmissionStatus.COMPLETED or SubmissionStatus.FAILED)
         {

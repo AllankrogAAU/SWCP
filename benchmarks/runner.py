@@ -73,6 +73,7 @@ class LoadRunner:
         archetype: str | None = None,
         timeout_s: float = 240.0,
         poll_client: httpx.AsyncClient | None = None,
+        sse_client: httpx.AsyncClient | None = None,
     ) -> ClientSubmissionResult:
         """Execute one complete submission lifecycle guaranteed to have a dedicated user."""
         if self.user_queue.empty():
@@ -142,10 +143,11 @@ class LoadRunner:
             body = resp.json()
             submission_id = str(body.get("submissionId") or body.get("id"))
 
-            # 2. Concurrently wait via SSE and fallback Polling (using dedicated poll client if available)
+            # 2. Concurrently wait via SSE and fallback Polling (using dedicated poll/sse clients if available)
+            active_sse_client = sse_client or client
             active_poll_client = poll_client or client
             final_status, terminal_via, events_cnt, err = await self._wait_for_completion(
-                submission_id, token, client, active_poll_client, timeout_s=timeout_s
+                submission_id, token, active_sse_client, active_poll_client, timeout_s=timeout_s
             )
 
             client_e2e_ms = (time.perf_counter() - t0) * 1000.0
@@ -168,7 +170,8 @@ class LoadRunner:
         except Exception as exc:
             client_e2e_ms = (time.perf_counter() - t0) * 1000.0
             completed_epoch = time.time()
-            logger.error("Submission failed or errored: %s", exc)
+            err_msg = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            logger.error("Submission failed or errored: %s", err_msg)
             fallback_sub_id = submission_id if (submission_id and submission_id != "unassigned") else f"failed_{uuid.uuid4().hex[:12]}"
             return ClientSubmissionResult(
                 submission_id=fallback_sub_id,
@@ -178,7 +181,7 @@ class LoadRunner:
                 client_e2e_ms=client_e2e_ms,
                 http_accepted_ms=http_accepted_ms,
                 final_status="FAILED",
-                error_message=str(exc),
+                error_message=err_msg,
                 terminal_via="exception",
                 dispatched_epoch=t0_epoch,
                 completed_epoch=completed_epoch,
@@ -299,7 +302,7 @@ class LoadRunner:
                     logger.debug("Unexpected polling error for %s: %s", submission_id, poll_err)
 
                 # Relax cadence if SSE is connected and streaming; poll faster if SSE is disconnected
-                interval = 1.0 if sse_connected.is_set() else 0.5
+                interval = 4.0 if sse_connected.is_set() else 1.0
                 await asyncio.sleep(interval)
 
         sse_task = asyncio.create_task(sse_listener())
@@ -330,11 +333,13 @@ class LoadRunner:
     ) -> list[ClientSubmissionResult]:
         """Run stepped Poisson arrival rate plateaus."""
         all_results: list[ClientSubmissionResult] = []
-        submit_limits = httpx.Limits(max_connections=200, max_keepalive_connections=100, keepalive_expiry=30.0)
-        poll_limits = httpx.Limits(max_connections=300, max_keepalive_connections=150, keepalive_expiry=30.0)
+        submit_limits = httpx.Limits(max_connections=1000, max_keepalive_connections=500, keepalive_expiry=30.0)
+        sse_limits = httpx.Limits(max_connections=4000, max_keepalive_connections=2000, keepalive_expiry=60.0)
+        poll_limits = httpx.Limits(max_connections=2000, max_keepalive_connections=1000, keepalive_expiry=30.0)
 
         async with (
             httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0, limits=submit_limits) as client,
+            httpx.AsyncClient(base_url=self.config.target_url, timeout=360.0, limits=sse_limits) as sse_client,
             httpx.AsyncClient(base_url=self.config.target_url, timeout=15.0, limits=poll_limits) as poll_client,
         ):
             for rate in rates_per_minute:
@@ -354,7 +359,9 @@ class LoadRunner:
                     inter_arrival_s = -math.log(random.random()) / lam if lam > 0 else 1.0
 
                     task = asyncio.create_task(
-                        self.execute_single_submission(step_label, client, poll_client=poll_client)
+                        self.execute_single_submission(
+                            step_label, client, poll_client=poll_client, sse_client=sse_client
+                        )
                     )
                     dispatched_count += 1
                     in_flight.add(task)
@@ -430,8 +437,9 @@ class LoadRunner:
     ) -> list[ClientSubmissionResult]:
         """Run a continuous linear-rate Poisson ramp using exact Lewis-Shedler thinning."""
         all_results: list[ClientSubmissionResult] = []
-        submit_limits = httpx.Limits(max_connections=500, max_keepalive_connections=200, keepalive_expiry=30.0)
-        poll_limits = httpx.Limits(max_connections=1000, max_keepalive_connections=400, keepalive_expiry=30.0)
+        submit_limits = httpx.Limits(max_connections=1000, max_keepalive_connections=500, keepalive_expiry=30.0)
+        sse_limits = httpx.Limits(max_connections=4000, max_keepalive_connections=2000, keepalive_expiry=60.0)
+        poll_limits = httpx.Limits(max_connections=2000, max_keepalive_connections=1000, keepalive_expiry=30.0)
 
         ramp_duration_s = max(10.0, float(ramp_duration_s))
         bucket_duration_s = max(5.0, float(bucket_duration_s))
@@ -515,6 +523,7 @@ class LoadRunner:
         next_candidate_perf = ramp_start_perf
         async with (
             httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0, limits=submit_limits) as client,
+            httpx.AsyncClient(base_url=self.config.target_url, timeout=360.0, limits=sse_limits) as sse_client,
             httpx.AsyncClient(base_url=self.config.target_url, timeout=15.0, limits=poll_limits) as poll_client,
         ):
             while not stop_event.is_set():
@@ -555,7 +564,9 @@ class LoadRunner:
                 b_idx = min(num_buckets - 1, int(elapsed_now // bucket_duration_s))
                 step_label = buckets[b_idx]["label"]
                 task = asyncio.create_task(
-                    self.execute_single_submission(step_label, client, timeout_s=360.0, poll_client=poll_client)
+                    self.execute_single_submission(
+                        step_label, client, timeout_s=360.0, poll_client=poll_client, sse_client=sse_client
+                    )
                 )
                 in_flight.add(task)
 
@@ -660,14 +671,16 @@ class LoadRunner:
     ) -> list[ClientSubmissionResult]:
         """Dynamically ramp Poisson arrival rate until p95 exceeds target_p95_s, plus confirmation."""
         all_results: list[ClientSubmissionResult] = []
-        submit_limits = httpx.Limits(max_connections=200, max_keepalive_connections=100, keepalive_expiry=30.0)
-        poll_limits = httpx.Limits(max_connections=300, max_keepalive_connections=150, keepalive_expiry=30.0)
+        submit_limits = httpx.Limits(max_connections=1000, max_keepalive_connections=500, keepalive_expiry=30.0)
+        sse_limits = httpx.Limits(max_connections=4000, max_keepalive_connections=2000, keepalive_expiry=60.0)
+        poll_limits = httpx.Limits(max_connections=2000, max_keepalive_connections=1000, keepalive_expiry=30.0)
 
         current_rate = start_rate
         confirmation_done = 0
 
         async with (
             httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0, limits=submit_limits) as client,
+            httpx.AsyncClient(base_url=self.config.target_url, timeout=360.0, limits=sse_limits) as sse_client,
             httpx.AsyncClient(base_url=self.config.target_url, timeout=15.0, limits=poll_limits) as poll_client,
         ):
             while max_rate <= 0 or current_rate <= max_rate:
@@ -688,7 +701,9 @@ class LoadRunner:
                     inter_arrival_s = -math.log(random.random()) / lam if lam > 0 else 1.0
 
                     task = asyncio.create_task(
-                        self.execute_single_submission(step_label, client, poll_client=poll_client)
+                        self.execute_single_submission(
+                            step_label, client, poll_client=poll_client, sse_client=sse_client
+                        )
                     )
                     dispatched_count += 1
                     in_flight.add(task)
@@ -766,11 +781,13 @@ class LoadRunner:
     ) -> list[ClientSubmissionResult]:
         """Run closed-loop virtual students who submit, wait, think, and repeat."""
         all_results: list[ClientSubmissionResult] = []
-        submit_limits = httpx.Limits(max_connections=200, max_keepalive_connections=100, keepalive_expiry=30.0)
-        poll_limits = httpx.Limits(max_connections=300, max_keepalive_connections=150, keepalive_expiry=30.0)
+        submit_limits = httpx.Limits(max_connections=1000, max_keepalive_connections=500, keepalive_expiry=30.0)
+        sse_limits = httpx.Limits(max_connections=4000, max_keepalive_connections=2000, keepalive_expiry=60.0)
+        poll_limits = httpx.Limits(max_connections=2000, max_keepalive_connections=1000, keepalive_expiry=30.0)
 
         async with (
             httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0, limits=submit_limits) as client,
+            httpx.AsyncClient(base_url=self.config.target_url, timeout=360.0, limits=sse_limits) as sse_client,
             httpx.AsyncClient(base_url=self.config.target_url, timeout=15.0, limits=poll_limits) as poll_client,
         ):
             for users_count in concurrency_levels:
@@ -782,7 +799,9 @@ class LoadRunner:
 
                 async def virtual_student() -> None:
                     while not stop_event.is_set():
-                        res = await self.execute_single_submission(step_label, client, poll_client=poll_client)
+                        res = await self.execute_single_submission(
+                            step_label, client, poll_client=poll_client, sse_client=sse_client
+                        )
                         all_results.append(res)
                         if on_result:
                             await on_result(res)
@@ -816,11 +835,13 @@ class LoadRunner:
     ) -> list[ClientSubmissionResult]:
         """Fire B simultaneous submissions within a short burst window."""
         all_results: list[ClientSubmissionResult] = []
-        submit_limits = httpx.Limits(max_connections=200, max_keepalive_connections=100, keepalive_expiry=30.0)
-        poll_limits = httpx.Limits(max_connections=300, max_keepalive_connections=150, keepalive_expiry=30.0)
+        submit_limits = httpx.Limits(max_connections=1000, max_keepalive_connections=500, keepalive_expiry=30.0)
+        sse_limits = httpx.Limits(max_connections=4000, max_keepalive_connections=2000, keepalive_expiry=60.0)
+        poll_limits = httpx.Limits(max_connections=2000, max_keepalive_connections=1000, keepalive_expiry=30.0)
 
         async with (
             httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0, limits=submit_limits) as client,
+            httpx.AsyncClient(base_url=self.config.target_url, timeout=360.0, limits=sse_limits) as sse_client,
             httpx.AsyncClient(base_url=self.config.target_url, timeout=15.0, limits=poll_limits) as poll_client,
         ):
             for b_size in burst_sizes:
@@ -833,7 +854,9 @@ class LoadRunner:
 
                 for _ in range(b_size):
                     t = asyncio.create_task(
-                        self.execute_single_submission(step_label, client, timeout_s=drain_timeout_s, poll_client=poll_client)
+                        self.execute_single_submission(
+                            step_label, client, timeout_s=drain_timeout_s, poll_client=poll_client, sse_client=sse_client
+                        )
                     )
                     tasks.append(t)
                     if interval > 0.01:
