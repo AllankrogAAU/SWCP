@@ -161,3 +161,30 @@ All outputs are stored under `benchmarks/results/<RUN_ID>/`:
 - `summary.csv`: Per-step/bucket percentiles, completion rate, queue backlog, KV cache %, and per-node pod replicas.
 - `*.png`: Suite-specific 300 DPI Matplotlib charts.
 - `benchmarks.sqlite`: Master SQLite database across all runs.
+
+
+
+
+Commands I run :smile:
+
+Remote benchmarks:
+
+Smoketest:
+.\scripts\run-benchmarks.ps1 smoke-test --ssh-host school-project-pc
+
+Dual-GPU Continuous Ramp Test:
+.\scripts\run-benchmarks.ps1 run --suite ramp_capacity --ssh-host school-project-pc
+
+Infinite-GPU Scaling Test
+.\scripts\run-benchmarks.ps1 run --suite infinite_gpu --ssh-host school-project-pc
+
+SLA Capacity & Stage Breakdown Plateaus
+.\scripts\run-benchmarks.ps1 run --suite sla_curve --ssh-host school-project-pc
+
+Synchronized Burst Drain Test
+.\scripts\run-benchmarks.ps1 run --suite burst --ssh-host school-project-pc
+
+
+Deployment status on control-node:
+
+kubectl get pods -n swcp -o wide

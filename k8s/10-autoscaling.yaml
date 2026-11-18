@@ -93,7 +93,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: c-sandbox
-  minReplicaCount: 3
+  minReplicaCount: 2
   maxReplicaCount: 7
   cooldownPeriod: 120
   pollingInterval: 10
