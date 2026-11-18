@@ -91,7 +91,7 @@ def _store_submission_and_step_metrics(
             else 0.0
         )
         delivery_overhead_ms = (
-            max(0.0, r.client_e2e_ms - stages.pipeline_total_ms)
+            max(0.0, r.client_e2e_ms - submit_edge_ms - stages.pipeline_total_ms)
             if stages.pipeline_total_ms > 0
             else 0.0
         )

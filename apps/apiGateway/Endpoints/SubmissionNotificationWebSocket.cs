@@ -68,20 +68,66 @@ public static class SubmissionNotificationWebSocket
         using var socketLifetime = CancellationTokenSource.CreateLinkedTokenSource(requestAborted);
         var sendTask = ForwardNotificationsAsync(socket, nats, submissionId, socketLifetime.Token);
         var receiveTask = WaitForClientCloseAsync(socket, socketLifetime.Token);
-        await Task.WhenAny(sendTask, receiveTask);
+
+        var finishedTask = await Task.WhenAny(sendTask, receiveTask);
+        if (finishedTask == sendTask)
+        {
+            // Server finished sending terminal notification ("COMPLETED" / "FAILED").
+            // Initiate graceful WebSocket close handshake so client receives close frame instead of TCP RST.
+            if (socket.State == WebSocketState.Open)
+            {
+                try
+                {
+                    await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Submission stream closed", CancellationToken.None);
+                }
+                catch
+                {
+                    // Ignore socket write failures during shutdown
+                }
+            }
+
+            // Give the client up to 5 seconds to acknowledge the close frame
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var gracefulCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, requestAborted);
+            try
+            {
+                await receiveTask.WaitAsync(gracefulCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // Timeout or requestAborted while waiting for client ack
+            }
+            catch
+            {
+            }
+        }
+        else
+        {
+            // Client closed connection first or connection dropped
+            if (socket.State is WebSocketState.CloseReceived or WebSocketState.Open)
+            {
+                try
+                {
+                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Submission stream closed", CancellationToken.None);
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        // Cancel any remaining background task (e.g. NATS subscription if client closed early)
         await socketLifetime.CancelAsync();
 
         try
         {
             await Task.WhenAll(sendTask, receiveTask);
         }
-        catch (OperationCanceledException) when (socketLifetime.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
         }
-
-        if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+        catch
         {
-            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Submission stream closed", CancellationToken.None);
         }
     }
 
@@ -91,31 +137,53 @@ public static class SubmissionNotificationWebSocket
         Guid submissionId,
         CancellationToken cancellationToken)
     {
-        await foreach (var notification in nats.SubscribeAsync<SubmissionNotification>(
-            Messaging.NotificationSubject(submissionId),
-            cancellationToken: cancellationToken))
+        try
         {
-            var data = notification.Data;
-            if (data is null)
+            await foreach (var notification in nats.SubscribeAsync<SubmissionNotification>(
+                Messaging.NotificationSubject(submissionId),
+                cancellationToken: cancellationToken))
             {
-                continue;
-            }
+                var data = notification.Data;
+                if (data is null)
+                {
+                    continue;
+                }
 
-            var payload = JsonSerializer.SerializeToUtf8Bytes(data, JsonOptions);
-            await socket.SendAsync(payload, WebSocketMessageType.Text, true, cancellationToken);
-            if (data.EventType is "COMPLETED" or "FAILED" or "completed" or "failed")
-            {
-                return;
+                var payload = JsonSerializer.SerializeToUtf8Bytes(data, JsonOptions);
+                await socket.SendAsync(payload, WebSocketMessageType.Text, true, cancellationToken);
+                if (data.EventType is "COMPLETED" or "FAILED" or "completed" or "failed")
+                {
+                    return;
+                }
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (WebSocketException)
+        {
         }
     }
 
     private static async Task WaitForClientCloseAsync(WebSocket socket, CancellationToken cancellationToken)
     {
         var buffer = new byte[1024];
-        while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
+        while ((socket.State == WebSocketState.Open || socket.State == WebSocketState.CloseSent) && !cancellationToken.IsCancellationRequested)
         {
-            var result = await socket.ReceiveAsync(buffer, cancellationToken);
+            WebSocketReceiveResult result;
+            try
+            {
+                result = await socket.ReceiveAsync(buffer, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (WebSocketException)
+            {
+                return;
+            }
+
             if (result.MessageType == WebSocketMessageType.Close)
             {
                 return;
