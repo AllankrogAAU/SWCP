@@ -122,6 +122,6 @@ spec:
         account: "$G"
         stream: "SANDBOX_TASKS"
         consumer: "c-sandbox-workers"
-        lagThreshold: "6"
+        lagThreshold: "4"
         activationLagThreshold: "1"
         useHttps: "false"

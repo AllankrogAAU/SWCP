@@ -167,7 +167,6 @@ public sealed class SandboxResultConsumer(
 
         submission.Status = SubmissionStatus.LLM_QUEUED;
         await database.SaveChangesAsync(cancellationToken);
-        await events.PublishAsync(submission, "stage", "Queued for LLM feedback", 60, cancellationToken, traceParent);
 
         var queueTimer = System.Diagnostics.Stopwatch.StartNew();
         await publisher.PublishLlmTaskAsync(

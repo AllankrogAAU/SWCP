@@ -5,6 +5,7 @@ using coreApi.Data;
 using coreApi.Models;
 using coreApi.Services;
 using Microsoft.EntityFrameworkCore;
+using NATS.Client.Core;
 using SWCP.Contracts;
 
 namespace coreApi.Endpoints;
@@ -19,6 +20,7 @@ public static class SubmissionEndpoints
         group.MapPost("/run", Run);
         group.MapPost("/{id:guid}/cancel", Cancel);
         group.MapGet("/{id:guid}", Get);
+        group.MapGet("/{id:guid}/events", Events);
         group.MapGet("/", ListMine);
         return group;
     }
@@ -121,7 +123,6 @@ public static class SubmissionEndpoints
         }
 
         var queueTimer = Stopwatch.StartNew();
-        await events.PublishAsync(submission, "stage", "Queued for sandbox evaluation", 5, cancellationToken, traceParent);
 
         try
         {
@@ -239,6 +240,99 @@ public static class SubmissionEndpoints
         }
 
         return Results.Ok(ToResponse(submission));
+    }
+
+    private static async Task Events(
+        Guid id,
+        ClaimsPrincipal principal,
+        CoreDbContext database,
+        NatsConnection nats,
+        HttpContext context,
+        CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(principal.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return;
+        }
+
+        var submission = await database.Submissions.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == id, cancellationToken);
+        if (submission is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
+        var isTeacher = principal.IsInRole(UserRole.Teacher.ToString());
+        if (!isTeacher && submission.UserId != userId)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+
+        context.Response.ContentType = "text/event-stream";
+        context.Response.Headers.CacheControl = "no-cache";
+        context.Response.Headers.TryAdd("X-Accel-Buffering", "no");
+
+        // If the submission is already COMPLETED or FAILED, stream final result immediately and return
+        if (submission.Status is SubmissionStatus.COMPLETED or SubmissionStatus.FAILED)
+        {
+            await SendSseEventAsync(context.Response, "completed", ToResponse(submission), cancellationToken);
+            return;
+        }
+
+        // Keep-alive heartbeat task (every 15s)
+        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var heartbeatTask = Task.Run(async () =>
+        {
+            try
+            {
+                using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+                while (await timer.WaitForNextTickAsync(heartbeatCts.Token))
+                {
+                    await context.Response.WriteAsync(": ping\n\n", heartbeatCts.Token);
+                    await context.Response.Body.FlushAsync(heartbeatCts.Token);
+                }
+            }
+            catch (OperationCanceledException) { }
+        }, heartbeatCts.Token);
+
+        try
+        {
+            await foreach (var notification in nats.SubscribeAsync<SubmissionNotification>(
+                Messaging.NotificationSubject(id),
+                cancellationToken: cancellationToken))
+            {
+                var data = notification.Data;
+                if (data is null) continue;
+
+                if (data.EventType is "COMPLETED" or "FAILED" or "completed" or "failed" ||
+                    data.Stage is "COMPLETED" or "FAILED")
+                {
+                    var completedSub = await database.Submissions.AsNoTracking()
+                        .SingleOrDefaultAsync(item => item.Id == id, cancellationToken) ?? submission;
+                    await SendSseEventAsync(context.Response, "completed", ToResponse(completedSub), cancellationToken);
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Client closed stream
+        }
+        finally
+        {
+            await heartbeatCts.CancelAsync();
+            try { await heartbeatTask; } catch { }
+        }
+    }
+
+    private static async Task SendSseEventAsync<T>(HttpResponse response, string eventType, T data, CancellationToken ct)
+    {
+        var json = JsonSerializer.Serialize(data, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        await response.WriteAsync($"event: {eventType}\ndata: {json}\n\n", ct);
+        await response.Body.FlushAsync(ct);
     }
 
     private static async Task<IResult> ListMine(

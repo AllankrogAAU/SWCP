@@ -16,7 +16,6 @@ from urllib.parse import urlparse
 
 import httpx
 import numpy as np
-import websockets
 
 from benchmarks.config import BenchmarkConfig
 from benchmarks.workloads import get_workload_source, pick_archetype
@@ -66,14 +65,6 @@ class LoadRunner:
         async with self._seq_lock:
             self._submission_seq += 1
             return self._submission_seq
-
-    def _resolve_ws_url(self, submission_id: str) -> str:
-        parsed = urlparse(self.config.target_url)
-        scheme = "wss" if parsed.scheme == "https" else "ws"
-        netloc = parsed.netloc
-        if not netloc:
-            netloc = "localhost"
-        return f"{scheme}://{netloc}/ws/submissions/{submission_id}"
 
     async def execute_single_submission(
         self,
@@ -151,11 +142,10 @@ class LoadRunner:
             body = resp.json()
             submission_id = str(body.get("submissionId") or body.get("id"))
 
-            # 2. Concurrently wait via WebSocket and fallback Polling (using dedicated poll client if available)
-            ws_url = self._resolve_ws_url(submission_id)
+            # 2. Concurrently wait via SSE and fallback Polling (using dedicated poll client if available)
             active_poll_client = poll_client or client
             final_status, terminal_via, events_cnt, err = await self._wait_for_completion(
-                submission_id, ws_url, token, active_poll_client, timeout_s=timeout_s
+                submission_id, token, client, active_poll_client, timeout_s=timeout_s
             )
 
             client_e2e_ms = (time.perf_counter() - t0) * 1000.0
@@ -200,77 +190,93 @@ class LoadRunner:
     async def _wait_for_completion(
         self,
         submission_id: str,
-        ws_url: str,
         token: str,
-        client: httpx.AsyncClient,
+        sse_client: httpx.AsyncClient,
+        poll_client: httpx.AsyncClient,
         timeout_s: float,
     ) -> tuple[str, str, int, str | None]:
-        """Dual-wait: WebSocket stream + periodic HTTP polling fallback."""
+        """Dual-wait: SSE stream + periodic HTTP polling fallback."""
         event_count = 0
         terminal_status: str | None = None
         terminal_via = "timeout"
         error_msg: str | None = None
 
         done_event = asyncio.Event()
-        ws_connected = asyncio.Event()
+        sse_connected = asyncio.Event()
 
-        async def ws_listener() -> None:
+        async def sse_listener() -> None:
             nonlocal event_count, terminal_status, terminal_via, error_msg
-            subprotocols = ["swcp", f"bearer.{token}"]
-            headers = {"Authorization": f"Bearer {token}"}
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "text/event-stream",
+            }
 
             while not done_event.is_set():
                 try:
-                    # websockets >= 14 uses additional_headers; < 14 uses extra_headers
-                    try:
-                        ws_conn = websockets.connect(
-                            ws_url,
-                            subprotocols=subprotocols,
-                            additional_headers=headers,
-                            open_timeout=10.0,
-                            close_timeout=5.0,
-                        )
-                    except TypeError:
-                        ws_conn = websockets.connect(
-                            ws_url,
-                            subprotocols=subprotocols,
-                            extra_headers=headers,
-                            open_timeout=10.0,
-                            close_timeout=5.0,
-                        )
+                    stream_timeout = httpx.Timeout(timeout_s, connect=10.0, read=timeout_s)
+                    async with sse_client.stream(
+                        "GET",
+                        f"/api/submissions/{submission_id}/events",
+                        headers=headers,
+                        timeout=stream_timeout,
+                    ) as resp:
+                        if resp.status_code != 200:
+                            logger.debug("SSE stream returned HTTP %d for %s", resp.status_code, submission_id)
+                            await asyncio.sleep(1.0)
+                            continue
 
-                    async with ws_conn as ws:
-                        ws_connected.set()
-                        async for message in ws:
-                            event_count += 1
-                            try:
-                                data = json.loads(message)
-                                evt_type = str(data.get("eventType") or data.get("stage") or "").upper()
-                                if evt_type in ("COMPLETED", "FAILED"):
-                                    terminal_status = evt_type
-                                    terminal_via = "websocket"
-                                    error_msg = data.get("errorMessage")
-                                    done_event.set()
-                                    return
-                            except Exception:
-                                pass
+                        sse_connected.set()
+                        buffer = ""
+                        async for chunk in resp.aiter_text():
+                            if done_event.is_set():
+                                return
+                            buffer += chunk
+                            while "\n\n" in buffer:
+                                block, buffer = buffer.split("\n\n", 1)
+                                event_type = "message"
+                                data_lines: list[str] = []
+                                for line in block.splitlines():
+                                    line_str = line.strip()
+                                    if line_str.startswith("event:"):
+                                        event_type = line_str[6:].strip()
+                                    elif line_str.startswith("data:"):
+                                        data_lines.append(line_str[5:].strip())
+                                    elif line_str.startswith(":"):
+                                        continue
+
+                                if not data_lines:
+                                    continue
+
+                                data_str = "\n".join(data_lines)
+                                event_count += 1
+                                try:
+                                    data = json.loads(data_str)
+                                    if event_type == "completed":
+                                        st = str(data.get("status") or "COMPLETED").upper()
+                                        terminal_status = st if st in ("COMPLETED", "FAILED") else "COMPLETED"
+                                        terminal_via = "sse"
+                                        error_msg = data.get("errorMessage")
+                                        done_event.set()
+                                        return
+                                except Exception:
+                                    pass
                 except Exception as e:
-                    logger.debug("WS connection ended for %s: %s", submission_id, e)
+                    logger.debug("SSE stream ended for %s: %s", submission_id, e)
                 finally:
-                    ws_connected.clear()
+                    sse_connected.clear()
 
                 if done_event.is_set():
                     return
-                # Brief pause before retrying WS connection if still awaiting completion
-                await asyncio.sleep(2.0)
+                # Brief pause before retrying SSE stream if still awaiting completion
+                await asyncio.sleep(1.0)
 
         async def poll_fallback() -> None:
             nonlocal terminal_status, terminal_via, error_msg
-            # Initial grace window: pipeline takes minimum ~1.0s, giving WebSocket time to connect
-            await asyncio.sleep(1.0)
+            # Initial grace window: pipeline takes minimum ~0.3s, giving SSE time to connect
+            await asyncio.sleep(0.5)
             while not done_event.is_set():
                 try:
-                    r = await client.get(
+                    r = await poll_client.get(
                         f"/api/submissions/{submission_id}",
                         headers={"Authorization": f"Bearer {token}"},
                         timeout=10.0,
@@ -292,11 +298,11 @@ class LoadRunner:
                 except Exception as poll_err:
                     logger.debug("Unexpected polling error for %s: %s", submission_id, poll_err)
 
-                # Relax cadence if WebSocket is connected and streaming; poll faster if WS is disconnected
-                interval = 1.0 if ws_connected.is_set() else 0.5
+                # Relax cadence if SSE is connected and streaming; poll faster if SSE is disconnected
+                interval = 1.0 if sse_connected.is_set() else 0.5
                 await asyncio.sleep(interval)
 
-        ws_task = asyncio.create_task(ws_listener())
+        sse_task = asyncio.create_task(sse_listener())
         poll_task = asyncio.create_task(poll_fallback())
 
         try:
@@ -306,9 +312,9 @@ class LoadRunner:
             terminal_via = "timeout"
             error_msg = f"Timed out waiting for completion after {timeout_s}s"
         finally:
-            ws_task.cancel()
+            sse_task.cancel()
             poll_task.cancel()
-            await asyncio.gather(ws_task, poll_task, return_exceptions=True)
+            await asyncio.gather(sse_task, poll_task, return_exceptions=True)
 
         return terminal_status or "FAILED", terminal_via, event_count, error_msg
 

@@ -50,15 +50,6 @@ export interface SubmissionResponse {
   updatedAtUtc: string
 }
 
-export interface SubmissionNotification {
-  submissionId: string
-  eventType: string
-  stage: string
-  message: string
-  percentComplete: number
-  timestampUtc: string
-}
-
 interface ApiProblem {
   title?: string
   detail?: string
@@ -191,25 +182,68 @@ export function cancelSubmission(submissionId: string) {
   })
 }
 
-export function openSubmissionSocket(
+export function streamSubmissionEvents(
   submissionId: string,
-  onNotification: (notification: SubmissionNotification) => void,
-  onClose: () => void,
-): WebSocket {
+  onCompleted: (result: SubmissionResponse) => void,
+  onError: () => void,
+): () => void {
   const token = getAccessToken()
-  const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const url = new URL(`/ws/submissions/${submissionId}`, `${scheme}//${window.location.host}`)
+  const controller = new AbortController()
 
-  const protocols = token ? ['swcp', `bearer.${token}`] : ['swcp']
-  const socket = new WebSocket(url, protocols)
-  socket.addEventListener('message', (event) => {
-    try {
-      onNotification(JSON.parse(String(event.data)) as SubmissionNotification)
-    } catch {
-      onClose()
-    }
+  const headers: Record<string, string> = {
+    Accept: 'text/event-stream',
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
+  fetch(`/api/submissions/${submissionId}/events`, {
+    headers,
+    signal: controller.signal,
   })
-  socket.addEventListener('close', onClose)
-  socket.addEventListener('error', onClose)
-  return socket
+    .then(async (response) => {
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('No body')
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() ?? ''
+
+        for (const block of parts) {
+          if (!block.trim() || block.startsWith(':')) continue
+          let eventType = 'message'
+          let dataStr = ''
+          for (const line of block.split('\n')) {
+            if (line.startsWith('event: ')) {
+              eventType = line.slice(7).trim()
+            } else if (line.startsWith('data: ')) {
+              dataStr += line.slice(6)
+            }
+          }
+          if (dataStr && eventType === 'completed') {
+            try {
+              const parsed = JSON.parse(dataStr)
+              onCompleted(parsed as SubmissionResponse)
+            } catch {
+              // Ignore invalid JSON
+            }
+          }
+        }
+      }
+    })
+    .catch(() => {
+      if (!controller.signal.aborted) {
+        onError()
+      }
+    })
+
+  return () => controller.abort()
 }

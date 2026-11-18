@@ -12,16 +12,16 @@ import {
   getSubmissionHistory,
   getSubmission,
   login,
-  openSubmissionSocket,
   requestHint,
   register,
   runSource,
   setAccessToken,
+  streamSubmissionEvents,
   submitSource,
   type Assignment,
   type LlmBackend,
   type SubmissionAction,
-  type SubmissionNotification,
+  type SubmissionResponse,
   type SubmissionStatus,
 } from './services/api'
 
@@ -37,7 +37,6 @@ const feedback = ref('')
 const busyAction = ref<'hint' | 'run' | 'submit' | null>(null)
 const error = ref('')
 const terminalOutput = ref('')
-const progress = ref('')
 const status = ref<SubmissionStatus | ''>('')
 const backend = ref<LlmBackend>('azure')
 const username = ref('')
@@ -50,9 +49,7 @@ const submissionId = ref('')
 const canceling = ref(false)
 const loading = computed(() => busyAction.value === 'submit' || busyAction.value === 'hint')
 const waitingForAction = computed(() => busyAction.value !== null)
-let socket: WebSocket | undefined
-let reconnectTimer: number | undefined
-let reconnectAttempts = 0
+let stopStream: (() => void) | undefined
 let pollGeneration = 0
 
 function selectAssignment(id: string) {
@@ -116,62 +113,58 @@ function logout() {
   submissionId.value = ''
   busyAction.value = null
   pollGeneration++
-  window.clearTimeout(reconnectTimer)
-  socket?.close()
+  stopStream?.()
+  stopStream = undefined
 }
 
-function onProgress(notification: SubmissionNotification) {
-  progress.value = notification.message
-  if (notification.stage) status.value = notification.stage as SubmissionStatus
-}
-
-function connectSocket(id: string, generation: number) {
-  socket = openSubmissionSocket(id, onProgress, () => {
-    if (generation !== pollGeneration || !waitingForAction.value || reconnectAttempts >= 5) return
-    const delay = Math.min(1000 * 2 ** reconnectAttempts, 10000)
-    reconnectAttempts++
-    progress.value = 'Reconnecting to live updates; status polling remains active'
-    reconnectTimer = window.setTimeout(() => connectSocket(id, generation), delay)
-  })
-  socket.addEventListener('open', () => {
-    reconnectAttempts = 0
-  })
+function applyCompletion(result: SubmissionResponse) {
+  status.value = result.status
+  if (result.status === 'COMPLETED') {
+    if (result.action === 'submit') {
+      solvedByAssignmentId.value[result.assignmentId] = result.taskSolved
+    }
+    error.value = ''
+    feedback.value =
+      result.action === 'run'
+        ? ''
+        : (result.llmFeedback ?? JSON.stringify(result.sandboxOutput, null, 2))
+    terminalOutput.value = formatTerminalOutput(result.sandboxOutput)
+    busyAction.value = null
+    stopStream?.()
+    stopStream = undefined
+    pollGeneration++
+    return
+  }
+  if (result.status === 'FAILED') {
+    error.value = result.errorMessage ?? 'The submission failed.'
+    terminalOutput.value = error.value
+    if (result.action === 'submit') {
+      solvedByAssignmentId.value[result.assignmentId] = result.taskSolved
+    }
+    busyAction.value = null
+    stopStream?.()
+    stopStream = undefined
+    pollGeneration++
+    return
+  }
 }
 
 async function pollSubmission(id: string, generation: number) {
-  while (generation === pollGeneration) {
+  while (generation === pollGeneration && busyAction.value !== null) {
     try {
       const result = await getSubmission(id)
+      if (generation !== pollGeneration) return
+      if (result.status === 'COMPLETED' || result.status === 'FAILED') {
+        applyCompletion(result)
+        return
+      }
       status.value = result.status
-      if (result.status === 'COMPLETED') {
-        if (result.action === 'submit') {
-          solvedByAssignmentId.value[result.assignmentId] = result.taskSolved
-        }
-        error.value = ''
-        feedback.value =
-          result.action === 'run'
-            ? ''
-            : (result.llmFeedback ?? JSON.stringify(result.sandboxOutput, null, 2))
-        terminalOutput.value = formatTerminalOutput(result.sandboxOutput)
-        progress.value = 'Completed'
-        busyAction.value = null
-        socket?.close()
-        return
-      }
-      if (result.status === 'FAILED') {
-        error.value = result.errorMessage ?? 'The submission failed.'
-        terminalOutput.value = error.value
-        if (result.action === 'submit') {
-          solvedByAssignmentId.value[result.assignmentId] = result.taskSolved
-        }
-        progress.value = 'Failed'
-        busyAction.value = null
-        socket?.close()
-        return
-      }
     } catch (cause) {
+      if (generation !== pollGeneration) return
       error.value = cause instanceof Error ? cause.message : 'Could not retrieve submission status.'
       busyAction.value = null
+      stopStream?.()
+      stopStream = undefined
       return
     }
 
@@ -181,20 +174,22 @@ async function pollSubmission(id: string, generation: number) {
 
 function trackSubmission(
   accepted: { submissionId: string; status: SubmissionStatus },
-  action: SubmissionAction,
+  _action: SubmissionAction,
 ) {
   submissionId.value = accepted.submissionId
   status.value = accepted.status
-  progress.value =
-    action === 'run'
-      ? 'Queued for sandbox run'
-      : action === 'hint'
-        ? 'Queued for a hint'
-        : 'Queued for sandbox evaluation'
-  reconnectAttempts = 0
   const generation = ++pollGeneration
-  socket?.close()
-  connectSocket(accepted.submissionId, generation)
+  stopStream?.()
+  stopStream = streamSubmissionEvents(
+    accepted.submissionId,
+    (result) => {
+      if (generation !== pollGeneration) return
+      applyCompletion(result)
+    },
+    () => {
+      // SSE connection error: fallback polling continues
+    },
+  )
   void pollSubmission(accepted.submissionId, generation)
 }
 
@@ -219,11 +214,10 @@ async function cancelActiveSubmission() {
   try {
     await cancelSubmission(submissionId.value)
     pollGeneration++
-    window.clearTimeout(reconnectTimer)
-    socket?.close()
+    stopStream?.()
+    stopStream = undefined
     busyAction.value = null
     status.value = 'FAILED'
-    progress.value = 'Canceled'
     error.value = 'Canceled by user.'
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Could not cancel submission.'
@@ -238,7 +232,6 @@ async function requestFeedback() {
   error.value = ''
   feedback.value = ''
   solvedByAssignmentId.value[selected.value.id] = null
-  progress.value = 'Submitting code'
   terminalOutput.value = ''
   status.value = 'PENDING'
   try {
@@ -344,8 +337,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   pollGeneration++
-  window.clearTimeout(reconnectTimer)
-  socket?.close()
+  stopStream?.()
+  stopStream = undefined
 })
 </script>
 
@@ -421,24 +414,6 @@ onBeforeUnmount(() => {
                 item-value="value"
                 class="backend-select"
               />
-              <v-alert v-if="progress" type="info" variant="tonal" class="mb-2">
-                <div class="d-flex align-center justify-space-between ga-2">
-                  <span>
-                    {{ status }} · {{ progress }}
-                    <span v-if="submissionId" class="ml-2">{{ submissionId }}</span>
-                  </span>
-                  <v-btn
-                    v-if="waitingForAction && submissionId"
-                    size="small"
-                    variant="text"
-                    color="error"
-                    :loading="canceling"
-                    @click="cancelActiveSubmission"
-                  >
-                    Cancel
-                  </v-btn>
-                </div>
-              </v-alert>
 
               <v-row class="mt-2">
                 <v-col cols="12" md="7">

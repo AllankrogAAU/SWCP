@@ -29,7 +29,7 @@ const api = vi.hoisted(() => ({
   getSubmissionHistory: vi.fn<(...args: unknown[]) => unknown>(),
   getSubmission: vi.fn<(...args: unknown[]) => unknown>(),
   login: vi.fn<(...args: unknown[]) => unknown>(),
-  openSubmissionSocket: vi.fn<(...args: unknown[]) => unknown>(),
+  streamSubmissionEvents: vi.fn<(...args: unknown[]) => unknown>(),
   register: vi.fn<(...args: unknown[]) => unknown>(),
   setAccessToken: vi.fn<(...args: unknown[]) => unknown>(),
   submitSource: vi.fn<(...args: unknown[]) => unknown>(),
@@ -81,10 +81,7 @@ describe('App', () => {
       taskSolved: true,
       errorMessage: null,
     })
-    api.openSubmissionSocket.mockReturnValue({
-      close: vi.fn<(...args: unknown[]) => unknown>(),
-      addEventListener: vi.fn<(...args: unknown[]) => unknown>(),
-    })
+    api.streamSubmissionEvents.mockReturnValue(vi.fn())
   })
 
   it('shows the login and registration entry point when unauthenticated', () => {
@@ -108,7 +105,7 @@ describe('App', () => {
     await flushPromises()
 
     expect(api.submitSource).toHaveBeenCalledWith('assignment-id', expect.any(String), 'azure')
-    expect(api.openSubmissionSocket).toHaveBeenCalledWith(
+    expect(api.streamSubmissionEvents).toHaveBeenCalledWith(
       'submission-id',
       expect.any(Function),
       expect.any(Function),

@@ -163,4 +163,38 @@ public sealed class SubmissionEndpointsTests : IClassFixture<CoreApiTestFixture>
         var retryResp = await _client.SendAsync(retryReq);
         Assert.Equal(HttpStatusCode.Accepted, retryResp.StatusCode);
     }
+
+    [Fact]
+    public async Task GetEvents_Unauthenticated_Returns401Unauthorized()
+    {
+        var response = await _client.GetAsync($"/api/submissions/{Guid.NewGuid()}/events");
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetEvents_Authenticated_ReturnsEventStream()
+    {
+        var student = await _fixture.SeedUserAsync("student_events", "pass123", UserRole.Student);
+        var assignment = await _fixture.SeedAssignmentAsync("Events Assignment");
+        var token = _fixture.GenerateJwt(student);
+
+        using var submitReq = new HttpRequestMessage(HttpMethod.Post, "/api/submissions");
+        submitReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        submitReq.Content = JsonContent.Create(new CreateSubmissionRequest(
+            assignment.Id, "int main() { return 0; }", "azure", "submit"));
+        var submitResp = await _client.SendAsync(submitReq);
+        Assert.Equal(HttpStatusCode.Accepted, submitResp.StatusCode);
+        var submitJson = await submitResp.Content.ReadFromJsonAsync<JsonElement>();
+        var submissionId = submitJson.GetProperty("submissionId").GetGuid();
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/submissions/{submissionId}/events");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var response = await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/event-stream", response.Content.Headers.ContentType?.MediaType);
+    }
 }
