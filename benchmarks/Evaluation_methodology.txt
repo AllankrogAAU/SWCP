@@ -1,0 +1,25 @@
+\subsection{Evaluation Methodology and Oracle Validation}
+
+Each submission passed through the full assessment pipeline, and responses were evaluated in two different ways:
+\begin{enumerate}
+    \item \textbf{Deterministic Measurements:} We recorded Time to First Token (TTFT), end-to-end (E2E) completion latency, generated token throughput, peak GPU memory, and a solution-leak detector. The leak detector flagged any response containing $\ge 3$ C-like lines in fenced code blocks, $\ge 5$ C-like lines inline, an \verb|int main(| definition, or $\ge 3$ non-trivial lines copied from the Accepted reference solution.
+    \item \textbf{LLM-as-a-Judge with Human Calibration:} To grade semantic and educational quality across all 4,000 sequential responses, \verb|Azure GPT-6-sol| served as a judge. For each submission, the judge received the CodeNet status, problem statement, line-numbered student code, \verb|cSandbox| report, Accepted reference solution with a diff, and the anonymized model response. Because relying solely on a cloud LLM oracle introduces potential self-preference bias, we manually audited random samples of the judge's evaluations against our domain knowledge.
+\end{enumerate}
+
+The overall quality score (0--100) is the unweighted mean of seven distinct metrics. The first three measure the model's technical ability to locate and diagnose bugs, while the remaining four evaluate its subjective educational feedback quality using the LLM-as-a-Judge paradigm \cite{zheng_judging_2023}. The seven components are:
+
+\vspace{0.5em}\noindent\textbf{Technical Code-Review Quality}
+\begin{enumerate}
+    \item \textbf{Bug-localization F1:} Measures whether the model identifies the exact faulty line(s). It is calculated by matching the model's identified faulty lines against the ground truth within a $\pm 1$ line tolerance (evaluated on \verb|CE|, \verb|RE|, and \verb|WA| submissions).
+    \item \textbf{Root-cause diagnosis accuracy:} Measures whether the model understands why the bug occurs. It is scored by the automated judge as 1.0 for a completely correct explanation, 0.5 for a partial explanation, and 0.0 for an incorrect diagnosis.
+    \item \textbf{Non-hallucination rate:} Measures the model's restraint when reviewing perfectly working code. Calculated as $100 - \text{false-positive rate}$, rewarding models that do not invent fake defects on correct (\verb|AC|) submissions.
+\end{enumerate}
+
+\vspace{0.5em}\noindent\textbf{Educational Feedback Quality}
+\begin{enumerate}
+    \setcounter{enumi}{3}
+    \item \textbf{Non-spoiler compliance:} Ensures the model does not simply solve the problem for the student. It scores 100\% only if neither the LLM judge nor our deterministic code-block detector finds leaked solution code.
+    \item \textbf{Socratic guidance (1--5 Likert):} Evaluates tutoring quality. It assesses whether the model asks guiding questions (elicitation), builds on the student's current code (scaffolding), and uses an encouraging tone. (Normalized to 0--100 using $(\text{score}-1)/4 \times 100$).
+    \item \textbf{Actionability and clarity (1--5 Likert):} Evaluates beginner-friendliness. It penalizes confusing OS/compiler jargon and rewards hints that give the student a clear, understandable next step. (Normalized identically to 0--100).
+    \item \textbf{5-point binary checklist:} A strict pass/fail rubric requiring the model's response to hit all five tutoring essentials simultaneously: (1) correct defect recognition, (2) correct concept explanation, (3) zero code leak, (4) presence of a guiding question, and (5) a beginner-friendly tone.
+\end{enumerate}
