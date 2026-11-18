@@ -274,6 +274,7 @@ public static class SubmissionEndpoints
         context.Response.ContentType = "text/event-stream";
         context.Response.Headers.CacheControl = "no-cache";
         context.Response.Headers.TryAdd("X-Accel-Buffering", "no");
+        context.Response.Headers.Connection = "close";
 
         // Flush initial SSE connection header and comment immediately so clients & proxies know stream is open
         await context.Response.WriteAsync(": connected\n\n", cancellationToken);

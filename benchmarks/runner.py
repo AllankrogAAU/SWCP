@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import json
 import logging
 import math
@@ -61,6 +62,14 @@ class LoadRunner:
         self._seq_lock = asyncio.Lock()
         self._user_wait_events = 0
 
+        # Live monitoring state
+        self._dispatched_timestamps: collections.deque[float] = collections.deque()
+        self._accepted_timestamps: collections.deque[float] = collections.deque()
+        self._completed_timestamps: collections.deque[float] = collections.deque()
+        self._recent_submit_latencies: collections.deque[float] = collections.deque()
+        self._current_step_label: str = "init"
+        self._current_target_rpm: float = 0.0
+
     async def _next_seq(self) -> int:
         async with self._seq_lock:
             self._submission_seq += 1
@@ -97,6 +106,7 @@ class LoadRunner:
         t0_epoch = time.time()
         submission_id = ""
         http_accepted_ms = 0.0
+        self._dispatched_timestamps.append(t0)
 
         try:
             # 1. Post submission to API
@@ -143,6 +153,9 @@ class LoadRunner:
             if resp.status_code != 202:
                 resp.raise_for_status()
 
+            self._accepted_timestamps.append(time.perf_counter())
+            self._recent_submit_latencies.append(http_accepted_ms)
+
             body = resp.json()
             submission_id = str(body.get("submissionId") or body.get("id"))
 
@@ -155,6 +168,7 @@ class LoadRunner:
 
             client_e2e_ms = (time.perf_counter() - t0) * 1000.0
             completed_epoch = time.time()
+            self._completed_timestamps.append(completed_epoch)
 
             return ClientSubmissionResult(
                 submission_id=submission_id,
@@ -215,6 +229,7 @@ class LoadRunner:
             headers = {
                 "Authorization": f"Bearer {token}",
                 "Accept": "text/event-stream",
+                "Connection": "close",
             }
 
             while not done_event.is_set():
@@ -324,6 +339,82 @@ class LoadRunner:
 
         return terminal_status or "FAILED", terminal_via, event_count, error_msg
 
+    async def _start_live_monitor(self, in_flight: set[asyncio.Task], stop_event: asyncio.Event) -> None:
+        """Background live monitor that computes and logs actual real-time dispatch and completion rates."""
+        telemetry_path = self.config.results_dir / ".live_telemetry.json"
+        start_time = time.perf_counter()
+
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=3.0)
+                break
+            except asyncio.TimeoutError:
+                pass
+
+            now = time.perf_counter()
+            elapsed_total_s = now - start_time
+
+            cutoff_10s = now - 10.0
+            cutoff_30s = now - 30.0
+
+            while self._dispatched_timestamps and self._dispatched_timestamps[0] < cutoff_30s:
+                self._dispatched_timestamps.popleft()
+            while self._accepted_timestamps and self._accepted_timestamps[0] < cutoff_30s:
+                self._accepted_timestamps.popleft()
+            while self._completed_timestamps and self._completed_timestamps[0] < cutoff_30s:
+                self._completed_timestamps.popleft()
+            while len(self._recent_submit_latencies) > 200:
+                self._recent_submit_latencies.popleft()
+
+            dur_10s = min(elapsed_total_s, 10.0)
+            if dur_10s > 0.5:
+                dispatched_10s = sum(1 for t in self._dispatched_timestamps if t >= cutoff_10s)
+                accepted_10s = sum(1 for t in self._accepted_timestamps if t >= cutoff_10s)
+                completed_10s = sum(1 for t in self._completed_timestamps if t >= cutoff_10s)
+
+                sent_rpm = (dispatched_10s / dur_10s) * 60.0
+                accepted_rpm = (accepted_10s / dur_10s) * 60.0
+                completed_rpm = (completed_10s / dur_10s) * 60.0
+            else:
+                sent_rpm = accepted_rpm = completed_rpm = 0.0
+
+            median_submit_ms = float(np.median(self._recent_submit_latencies)) if self._recent_submit_latencies else 0.0
+            available_users = self.user_queue.qsize()
+            total_users = len(self.tokens)
+
+            logger.info(
+                "[MONITOR] [%s | Target: %.0frpm] Sent: %.1f/min (actual) | Accepted: %.1f/min | Done: %.1f/min | In-flight: %d | Free Users: %d/%d | SubmitLat: %.1fms",
+                self._current_step_label,
+                self._current_target_rpm,
+                sent_rpm,
+                accepted_rpm,
+                completed_rpm,
+                len(in_flight),
+                available_users,
+                total_users,
+                median_submit_ms,
+            )
+
+            try:
+                live_data = {
+                    "timestamp": time.time(),
+                    "elapsed_s": round(elapsed_total_s, 1),
+                    "step_label": self._current_step_label,
+                    "target_rpm": self._current_target_rpm,
+                    "sent_rpm": round(sent_rpm, 1),
+                    "accepted_rpm": round(accepted_rpm, 1),
+                    "completed_rpm": round(completed_rpm, 1),
+                    "in_flight": len(in_flight),
+                    "available_users": available_users,
+                    "total_users": total_users,
+                    "submit_latency_median_ms": round(median_submit_ms, 1),
+                    "total_dispatched": self._submission_seq,
+                }
+                with open(telemetry_path, "w", encoding="utf-8") as f:
+                    json.dump(live_data, f)
+            except Exception:
+                pass
+
     # =========================================================================
     # Arrival Pattern 1: Stepped Poisson
     # =========================================================================
@@ -336,9 +427,9 @@ class LoadRunner:
     ) -> list[ClientSubmissionResult]:
         """Run stepped Poisson arrival rate plateaus."""
         all_results: list[ClientSubmissionResult] = []
-        submit_limits = httpx.Limits(max_connections=1000, max_keepalive_connections=500, keepalive_expiry=30.0)
-        sse_limits = httpx.Limits(max_connections=4000, max_keepalive_connections=2000, keepalive_expiry=60.0)
-        poll_limits = httpx.Limits(max_connections=2000, max_keepalive_connections=1000, keepalive_expiry=30.0)
+        submit_limits = httpx.Limits(max_connections=1500, max_keepalive_connections=500, keepalive_expiry=30.0)
+        sse_limits = httpx.Limits(max_connections=None, max_keepalive_connections=0)
+        poll_limits = httpx.Limits(max_connections=1500, max_keepalive_connections=200, keepalive_expiry=10.0)
 
         async with (
             httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0, limits=submit_limits) as client,
@@ -440,9 +531,9 @@ class LoadRunner:
     ) -> list[ClientSubmissionResult]:
         """Run a continuous linear-rate Poisson ramp using exact Lewis-Shedler thinning."""
         all_results: list[ClientSubmissionResult] = []
-        submit_limits = httpx.Limits(max_connections=1000, max_keepalive_connections=500, keepalive_expiry=30.0)
-        sse_limits = httpx.Limits(max_connections=4000, max_keepalive_connections=2000, keepalive_expiry=60.0)
-        poll_limits = httpx.Limits(max_connections=2000, max_keepalive_connections=1000, keepalive_expiry=30.0)
+        submit_limits = httpx.Limits(max_connections=1500, max_keepalive_connections=500, keepalive_expiry=30.0)
+        sse_limits = httpx.Limits(max_connections=None, max_keepalive_connections=0)
+        poll_limits = httpx.Limits(max_connections=1500, max_keepalive_connections=200, keepalive_expiry=10.0)
 
         ramp_duration_s = max(10.0, float(ramp_duration_s))
         bucket_duration_s = max(5.0, float(bucket_duration_s))
@@ -478,6 +569,8 @@ class LoadRunner:
             saturation_streak = 0
             prev_backlog = 0
             for b in buckets:
+                self._current_step_label = b["label"]
+                self._current_target_rpm = float(b["mid_rate"])
                 wait_s = (ramp_start_perf + b["rel_end"]) - time.perf_counter()
                 if wait_s > 0:
                     await asyncio.sleep(wait_s)
@@ -522,6 +615,7 @@ class LoadRunner:
                     break
 
         sampler_task = asyncio.create_task(_bucket_backlog_sampler())
+        monitor_task = asyncio.create_task(self._start_live_monitor(in_flight, stop_event))
 
         next_candidate_perf = ramp_start_perf
         async with (
@@ -583,7 +677,9 @@ class LoadRunner:
 
                 task.add_done_callback(_done_cb)
 
+            stop_event.set()
             await sampler_task
+            await monitor_task
             if in_flight:
                 logger.info("Draining %d remaining submissions after continuous ramp...", len(in_flight))
                 await asyncio.gather(*in_flight, return_exceptions=True)
@@ -674,9 +770,9 @@ class LoadRunner:
     ) -> list[ClientSubmissionResult]:
         """Dynamically ramp Poisson arrival rate until p95 exceeds target_p95_s, plus confirmation."""
         all_results: list[ClientSubmissionResult] = []
-        submit_limits = httpx.Limits(max_connections=1000, max_keepalive_connections=500, keepalive_expiry=30.0)
-        sse_limits = httpx.Limits(max_connections=4000, max_keepalive_connections=2000, keepalive_expiry=60.0)
-        poll_limits = httpx.Limits(max_connections=2000, max_keepalive_connections=1000, keepalive_expiry=30.0)
+        submit_limits = httpx.Limits(max_connections=1500, max_keepalive_connections=500, keepalive_expiry=30.0)
+        sse_limits = httpx.Limits(max_connections=None, max_keepalive_connections=0)
+        poll_limits = httpx.Limits(max_connections=1500, max_keepalive_connections=200, keepalive_expiry=10.0)
 
         current_rate = start_rate
         confirmation_done = 0
@@ -784,9 +880,9 @@ class LoadRunner:
     ) -> list[ClientSubmissionResult]:
         """Run closed-loop virtual students who submit, wait, think, and repeat."""
         all_results: list[ClientSubmissionResult] = []
-        submit_limits = httpx.Limits(max_connections=1000, max_keepalive_connections=500, keepalive_expiry=30.0)
-        sse_limits = httpx.Limits(max_connections=4000, max_keepalive_connections=2000, keepalive_expiry=60.0)
-        poll_limits = httpx.Limits(max_connections=2000, max_keepalive_connections=1000, keepalive_expiry=30.0)
+        submit_limits = httpx.Limits(max_connections=1500, max_keepalive_connections=500, keepalive_expiry=30.0)
+        sse_limits = httpx.Limits(max_connections=None, max_keepalive_connections=0)
+        poll_limits = httpx.Limits(max_connections=1500, max_keepalive_connections=200, keepalive_expiry=10.0)
 
         async with (
             httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0, limits=submit_limits) as client,
@@ -838,9 +934,9 @@ class LoadRunner:
     ) -> list[ClientSubmissionResult]:
         """Fire B simultaneous submissions within a short burst window."""
         all_results: list[ClientSubmissionResult] = []
-        submit_limits = httpx.Limits(max_connections=1000, max_keepalive_connections=500, keepalive_expiry=30.0)
-        sse_limits = httpx.Limits(max_connections=4000, max_keepalive_connections=2000, keepalive_expiry=60.0)
-        poll_limits = httpx.Limits(max_connections=2000, max_keepalive_connections=1000, keepalive_expiry=30.0)
+        submit_limits = httpx.Limits(max_connections=1500, max_keepalive_connections=500, keepalive_expiry=30.0)
+        sse_limits = httpx.Limits(max_connections=None, max_keepalive_connections=0)
+        poll_limits = httpx.Limits(max_connections=1500, max_keepalive_connections=200, keepalive_expiry=10.0)
 
         async with (
             httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0, limits=submit_limits) as client,
