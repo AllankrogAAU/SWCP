@@ -145,10 +145,18 @@ public static class SubmissionEndpoints
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            submission.Status = SubmissionStatus.PENDING;
-            submission.ErrorMessage = exception.Message;
-            submission.UpdatedAtUtc = DateTimeOffset.UtcNow;
-            await database.SaveChangesAsync(cancellationToken);
+            try
+            {
+                submission.Status = SubmissionStatus.FAILED;
+                submission.ErrorMessage = exception.Message;
+                submission.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                await database.SaveChangesAsync(cancellationToken);
+            }
+            catch (Exception dbEx)
+            {
+                logger.LogError(dbEx, "Failed to update submission {submission_id} status to FAILED after enqueue exception", submission.Id);
+            }
+
             logger.LogError(exception,
                 "Pipeline stage failed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {status} {backend} {attempt} {error_type}",
                 "pipeline.stage.failed", "submission_enqueue", submission.Id, TraceId(traceParent), requestTimer.ElapsedMilliseconds,

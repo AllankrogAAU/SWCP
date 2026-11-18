@@ -187,7 +187,7 @@ spec:
                   name: postgres-credentials
                   key: POSTGRES_PASSWORD
             - name: ConnectionStrings__Default
-              value: Host=postgres.swcp.svc.cluster.local;Port=5432;Database=$(POSTGRES_DB);Username=$(POSTGRES_USER);Password=$(POSTGRES_PASSWORD)
+              value: Host=postgres.swcp.svc.cluster.local;Port=5432;Database=$(POSTGRES_DB);Username=$(POSTGRES_USER);Password=$(POSTGRES_PASSWORD);Maximum Pool Size=30;
           resources:
             requests:
               cpu: 400m
