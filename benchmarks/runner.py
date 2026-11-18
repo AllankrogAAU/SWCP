@@ -22,6 +22,8 @@ from benchmarks.config import BenchmarkConfig
 from benchmarks.workloads import get_workload_source, pick_archetype
 
 logger = logging.getLogger("benchmarks.runner")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 @dataclass
@@ -293,13 +295,13 @@ class LoadRunner:
 
         async def poll_fallback() -> None:
             nonlocal terminal_status, terminal_via, error_msg
-            # Initial grace window: pipeline takes minimum ~0.3s, giving SSE time to connect
-            await asyncio.sleep(0.5)
+            # Initial grace window: allow SSE stream to connect and receive fast completions
+            await asyncio.sleep(3.0)
             while not done_event.is_set():
                 try:
                     r = await poll_client.get(
                         f"/api/submissions/{submission_id}",
-                        headers={"Authorization": f"Bearer {token}"},
+                        headers={"Authorization": f"Bearer {token}", "Connection": "close"},
                         timeout=10.0,
                     )
                     if r.status_code == 200:
@@ -319,8 +321,9 @@ class LoadRunner:
                 except Exception as poll_err:
                     logger.debug("Unexpected polling error for %s: %s", submission_id, poll_err)
 
-                # Relax cadence if SSE is connected and streaming; poll faster if SSE is disconnected
-                interval = 4.0 if sse_connected.is_set() else 1.0
+                # Relax cadence: poll infrequently (15s) if SSE is actively connected;
+                # poll moderately (3s) only if SSE failed to connect.
+                interval = 15.0 if sse_connected.is_set() else 3.0
                 await asyncio.sleep(interval)
 
         sse_task = asyncio.create_task(sse_listener())
@@ -586,10 +589,11 @@ class LoadRunner:
                     if r.final_status == "COMPLETED" and b_start_epoch <= r.completed_epoch < b_end_epoch
                 )
                 achieved_rpm = completed_in_window / (b_dur_s / 60.0)
-                min_queue_floor = max(8, int(round(0.06 * b["mid_rate"])))
+                min_queue_floor = max(8, int(round(0.04 * b["mid_rate"])))
                 is_behind = achieved_rpm < (1.0 - saturation_deficit_ratio) * b["mid_rate"]
-                has_backlog = (in_flight_end >= min_queue_floor) or (prev_backlog >= min_queue_floor)
-                is_saturated_bucket = is_behind and has_backlog
+                has_backlog = (in_flight_end >= min_queue_floor) or (in_flight_end >= 25) or (prev_backlog >= 25)
+                is_severe_deficit = achieved_rpm < 0.80 * b["mid_rate"]
+                is_saturated_bucket = is_behind and (has_backlog or is_severe_deficit)
 
                 if stop_on_saturation and len(executed_buckets) >= min_saturation_buckets:
                     saturation_streak = (saturation_streak + 1) if is_saturated_bucket else 0
@@ -617,12 +621,21 @@ class LoadRunner:
         sampler_task = asyncio.create_task(_bucket_backlog_sampler())
         monitor_task = asyncio.create_task(self._start_live_monitor(in_flight, stop_event))
 
+        def _done_cb(res_task: asyncio.Task) -> None:
+            in_flight.discard(res_task)
+            if not res_task.cancelled() and res_task.exception() is None:
+                res = res_task.result()
+                all_results.append(res)
+                if on_result:
+                    asyncio.create_task(on_result(res))
+
         next_candidate_perf = ramp_start_perf
         async with (
             httpx.AsyncClient(base_url=self.config.target_url, timeout=30.0, limits=submit_limits) as client,
             httpx.AsyncClient(base_url=self.config.target_url, timeout=360.0, limits=sse_limits) as sse_client,
             httpx.AsyncClient(base_url=self.config.target_url, timeout=15.0, limits=poll_limits) as poll_client,
         ):
+            batch_count = 0
             while not stop_event.is_set():
                 dt = -math.log(max(1e-12, random.random())) / lam_max
                 next_candidate_perf += dt
@@ -636,29 +649,30 @@ class LoadRunner:
                             pass
                     break
 
-                wait_s = next_candidate_perf - time.perf_counter()
+                now = time.perf_counter()
+                wait_s = next_candidate_perf - now
                 if wait_s > 0.001:
+                    batch_count = 0
                     try:
                         await asyncio.wait_for(stop_event.wait(), timeout=wait_s)
                         break
                     except asyncio.TimeoutError:
                         pass
                 else:
-                    await asyncio.sleep(0)
+                    batch_count += 1
+                    if batch_count >= 50:
+                        batch_count = 0
+                        await asyncio.sleep(0)
 
                 if stop_event.is_set():
                     break
 
-                elapsed_now = time.perf_counter() - ramp_start_perf
-                if elapsed_now >= ramp_duration_s:
-                    break
-
-                inst_rate = start_rate + (end_rate - start_rate) * (elapsed_now / ramp_duration_s)
+                inst_rate = start_rate + (end_rate - start_rate) * (elapsed_target / ramp_duration_s)
                 accept_prob = inst_rate / max(start_rate, end_rate, 0.1)
                 if random.random() > accept_prob:
                     continue
 
-                b_idx = min(num_buckets - 1, int(elapsed_now // bucket_duration_s))
+                b_idx = min(num_buckets - 1, int(elapsed_target // bucket_duration_s))
                 step_label = buckets[b_idx]["label"]
                 task = asyncio.create_task(
                     self.execute_single_submission(
@@ -666,15 +680,6 @@ class LoadRunner:
                     )
                 )
                 in_flight.add(task)
-
-                def _done_cb(res_task: asyncio.Task) -> None:
-                    in_flight.discard(res_task)
-                    if not res_task.cancelled() and res_task.exception() is None:
-                        res = res_task.result()
-                        all_results.append(res)
-                        if on_result:
-                            asyncio.create_task(on_result(res))
-
                 task.add_done_callback(_done_cb)
 
             stop_event.set()

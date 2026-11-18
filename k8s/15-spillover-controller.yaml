@@ -108,7 +108,11 @@ spec:
                 # evict it so kube-scheduler re-places it on control-node according to nodeAffinity.
                 for app in c-sandbox llm-worker core-api api-gateway; do
                   cur_reps=$(kubectl get deployment "$app" -n swcp -o jsonpath="{.spec.replicas}" 2>/dev/null || echo 0)
-                  if [ "$cur_reps" -gt 0 ] && [ "$cur_reps" -le 2 ]; then
+                  base_max=2
+                  if [ "$app" = "core-api" ] || [ "$app" = "api-gateway" ]; then
+                    base_max=3
+                  fi
+                  if [ "$cur_reps" -gt 0 ] && [ "$cur_reps" -le "$base_max" ]; then
                     worker_pods=$(kubectl get pods -n swcp -l "app.kubernetes.io/name=$app" --no-headers \
                       -o custom-columns="NAME:.metadata.name,NODE:.spec.nodeName" 2>/dev/null | \
                       awk '$2 != "control-node" && $2 != "<none>" && $2 != "" {print $1}')

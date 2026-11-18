@@ -41,7 +41,7 @@ metadata:
     app.kubernetes.io/name: api-gateway
     app.kubernetes.io/part-of: swcp
 spec:
-  replicas: 2
+  replicas: 3
   strategy:
     type: RollingUpdate
     rollingUpdate:
