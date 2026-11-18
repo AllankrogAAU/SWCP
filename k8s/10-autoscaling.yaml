@@ -94,7 +94,7 @@ spec:
     kind: Deployment
     name: c-sandbox
   minReplicaCount: 2
-  maxReplicaCount: 14
+  maxReplicaCount: 16
   cooldownPeriod: 120
   pollingInterval: 10
   advanced:

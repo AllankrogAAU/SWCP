@@ -478,7 +478,8 @@ class LoadRunner:
                 achieved_rpm = completed_in_window / (b_dur_s / 60.0)
                 min_queue_floor = max(8, int(round(0.06 * b["mid_rate"])))
                 is_behind = achieved_rpm < (1.0 - saturation_deficit_ratio) * b["mid_rate"]
-                is_saturated_bucket = is_behind and (in_flight_end >= min_queue_floor)
+                has_backlog = (in_flight_end >= min_queue_floor) or (prev_backlog >= min_queue_floor)
+                is_saturated_bucket = is_behind and has_backlog
 
                 if stop_on_saturation and len(executed_buckets) >= min_saturation_buckets:
                     saturation_streak = (saturation_streak + 1) if is_saturated_bucket else 0
