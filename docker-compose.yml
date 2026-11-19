@@ -206,6 +206,7 @@ services:
       - '--structured-outputs-config={"backend":"xgrammar","disable_any_whitespace":true}'
       - "--host=0.0.0.0"
       - "--port=8080"
+      - "--max-logprobs=5"
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
       interval: 15s

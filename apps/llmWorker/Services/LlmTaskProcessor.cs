@@ -14,7 +14,13 @@ using SWCP.Contracts;
 
 namespace llmWorker.Services;
 
-public sealed record LlmCompletion(string FeedbackMarkdown, LlmTokenUsage? TokenUsage, bool? TaskSolved);
+public sealed record LlmCompletion(
+    string FeedbackMarkdown,
+    LlmTokenUsage? TokenUsage,
+    bool? TaskSolved,
+    JsonElement? LogProbabilities = null,
+    double? ConfidenceScorePercent = null,
+    string? BackendUsed = null);
 
 public sealed class RetryableLlmException(TimeSpan retryDelay, Exception innerException)
     : Exception(innerException.Message, innerException)
@@ -49,13 +55,38 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                 """;
     private readonly ConcurrentDictionary<string, (ChatClient Client, string Deployment)> _azureClients = new();
 
-    public Task<LlmCompletion> CompleteAsync(LlmTask task, CancellationToken cancellationToken) =>
-        task.Backend switch
+    public async Task<LlmCompletion> CompleteAsync(LlmTask task, CancellationToken cancellationToken)
+    {
+        if (task.Backend == "azure")
         {
-            "azure" => CompleteAzureAsync(task, cancellationToken),
-            "local" => CompleteLocalAsync(task, cancellationToken),
-            _ => throw new InvalidOperationException($"Unsupported LLM backend '{task.Backend}'.")
-        };
+            return (await CompleteAzureAsync(task, cancellationToken)) with { BackendUsed = "azure" };
+        }
+
+        if (task.Backend != "local")
+        {
+            throw new InvalidOperationException($"Unsupported LLM backend '{task.Backend}'.");
+        }
+
+        var fallbackThreshold = configuration.GetValue<double>("LocalLlm:AzureFallbackThreshold", 0);
+        if (fallbackThreshold is < 0 or > 100)
+        {
+            throw new InvalidOperationException("LocalLlm:AzureFallbackThreshold must be between 0 and 100.");
+        }
+
+        var localCompletion = await CompleteLocalAsync(task, cancellationToken);
+        if (localCompletion.ConfidenceScorePercent is double score && score < fallbackThreshold)
+        {
+            var azureCompletion = await CompleteAzureAsync(task, cancellationToken);
+            return azureCompletion with
+            {
+                LogProbabilities = localCompletion.LogProbabilities,
+                ConfidenceScorePercent = score,
+                BackendUsed = "azure"
+            };
+        }
+
+        return localCompletion with { BackendUsed = "local" };
+    }
 
     private async Task<LlmCompletion> CompleteAzureAsync(LlmTask task, CancellationToken cancellationToken)
     {
@@ -148,6 +179,8 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             temperature = task.Parameters.Temperature,
             max_tokens = task.Parameters.MaxTokens,
             top_p = task.Parameters.TopP,
+            logprobs = true,
+            top_logprobs = 5,
             presence_penalty = 0.3,
             frequency_penalty = 0.3,
             response_format = new
@@ -177,6 +210,10 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             ?? throw new InvalidOperationException("Local LLM returned an empty response.");
         var root = document.RootElement;
         var choice = root.GetProperty("choices")[0];
+        JsonElement? logProbabilities = choice.TryGetProperty("logprobs", out var logProbabilitiesElement) &&
+            logProbabilitiesElement.ValueKind != JsonValueKind.Null
+                ? logProbabilitiesElement.Clone()
+                : null;
         var isLengthFinish = choice.TryGetProperty("finish_reason", out var finishReason) && finishReason.GetString() == "length";
         var content = choice.GetProperty("message").GetProperty("content").GetString() ?? string.Empty;
         if (isLengthFinish)
@@ -193,10 +230,14 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                 tokenUsage.GetProperty("total_tokens").GetInt32());
         }
 
-        return ParseCompletion(content, usage, task);
+        return ParseCompletion(content, usage, task, logProbabilities);
     }
 
-    private static LlmCompletion ParseCompletion(string content, LlmTokenUsage? usage, LlmTask task)
+    private static LlmCompletion ParseCompletion(
+        string content,
+        LlmTokenUsage? usage,
+        LlmTask task,
+        JsonElement? logProbabilities = null)
     {
         using var document = JsonDocument.Parse(content);
         var root = document.RootElement;
@@ -220,7 +261,49 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             taskSolved = null;
         }
 
-        return new LlmCompletion(feedbackElement.GetString()!, usage, taskSolved);
+        return new LlmCompletion(
+            feedbackElement.GetString()!,
+            usage,
+            taskSolved,
+            logProbabilities,
+            CalculateConfidenceScorePercent(logProbabilities));
+    }
+
+    private static double? CalculateConfidenceScorePercent(JsonElement? logProbabilities)
+    {
+        if (logProbabilities is not JsonElement probabilities ||
+            !probabilities.TryGetProperty("content", out var content) ||
+            content.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var logProbabilitySum = 0.0;
+        var tokenCount = 0;
+        foreach (var token in content.EnumerateArray())
+        {
+            if (!token.TryGetProperty("logprob", out var logProbability) ||
+                logProbability.ValueKind != JsonValueKind.Number)
+            {
+                continue;
+            }
+
+            var value = logProbability.GetDouble();
+            if (!double.IsFinite(value))
+            {
+                continue;
+            }
+
+            logProbabilitySum += value;
+            tokenCount++;
+        }
+
+        if (tokenCount == 0)
+        {
+            return null;
+        }
+
+        return Math.Clamp(Math.Exp(logProbabilitySum / tokenCount) * 100, 0, 100);
     }
 
     private static string RecoverTruncatedJson(string content, LlmTask task)
