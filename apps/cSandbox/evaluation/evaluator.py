@@ -5,7 +5,12 @@ from typing import Any
 
 from contracts import SandboxTestCase, StaticAnalysisWarning
 from evaluation.result import EvaluationResult, SandboxReport, Status
-from sandbox.interface import Limits, SandboxError, SandboxProvider
+from sandbox.interface import (
+    Limits,
+    PermanentSandboxError,
+    SandboxError,
+    SandboxProvider,
+)
 
 logger = logging.getLogger("c-sandbox-worker")
 _STATIC_ANALYSIS_PATTERN = re.compile(
@@ -116,6 +121,8 @@ def evaluate(
                     f"for {len(test_cases)} test cases"
                 )
             return to_result(report)
+        except PermanentSandboxError:
+            raise
         except SandboxError as exception:
             last_error = exception
             logger.warning("Sandbox attempt %d failed: %s", attempt, exception)
