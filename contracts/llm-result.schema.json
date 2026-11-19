@@ -10,6 +10,7 @@
     "status": { "enum": ["success", "error"] },
     "feedbackMarkdown": { "type": ["string", "null"] },
     "taskSolved": { "type": ["boolean", "null"] },
+    "confidenceScorePercent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
     "tokenUsage": {
       "type": ["object", "null"],
       "additionalProperties": false,

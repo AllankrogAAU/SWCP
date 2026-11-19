@@ -73,6 +73,25 @@ public sealed partial class MessagingContractsTests
     }
 
     [Fact]
+    public void LlmResult_SerializationRoundTrip_PreservesConfidenceScore()
+    {
+        var result = new LlmResult(
+            Guid.NewGuid(),
+            "success",
+            "Feedback",
+            new LlmTokenUsage(10, 5, 15),
+            null,
+            true,
+            87.5);
+
+        var json = JsonSerializer.Serialize(result);
+        var deserialized = JsonSerializer.Deserialize<LlmResult>(json);
+
+        Assert.NotNull(deserialized);
+        Assert.Equal(87.5, deserialized.ConfidenceScorePercent);
+    }
+
+    [Fact]
     public void Deserializing_MalformedJson_ThrowsJsonException()
     {
         var malformedJson = "{ \"submissionId\": \"not-a-guid\", \"broken\": ";

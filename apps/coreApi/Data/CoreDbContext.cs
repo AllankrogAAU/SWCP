@@ -41,6 +41,7 @@ public sealed class CoreDbContext(DbContextOptions<CoreDbContext> options) : DbC
             entity.Property(submission => submission.SandboxOutputJson).HasColumnType("jsonb");
             entity.Property(submission => submission.LlmFeedback).HasColumnType("text");
             entity.Property(submission => submission.TaskSolved);
+            entity.Property(submission => submission.ConfidenceScorePercent);
             entity.Property(submission => submission.ErrorMessage).HasColumnType("text");
             entity.HasOne(submission => submission.User)
                 .WithMany()
