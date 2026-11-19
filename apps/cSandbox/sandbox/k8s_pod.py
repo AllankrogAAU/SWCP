@@ -47,6 +47,9 @@ class PodConfig:
     tmp_size_limit: str = "64Mi"
     ready_timeout_s: float = 30.0
     owner: str = "worker"
+    node_name: str = ""
+    headroom_node: str = ""
+    node_soft_max_pods: int = 0
     image_pull_secret: str = "ghcr-pull-secret"
 
     @staticmethod
@@ -60,13 +63,37 @@ class PodConfig:
             tmp_size_limit=os.getenv("SANDBOX_TMP_SIZE_LIMIT", "64Mi"),
             ready_timeout_s=float(os.getenv("SANDBOX_READY_TIMEOUT_S", "30")),
             owner=os.getenv("POD_NAME", "worker"),
+            node_name=os.getenv("NODE_NAME", "").strip(),
+            headroom_node=os.getenv("SANDBOX_HEADROOM_NODE", "").strip(),
+            node_soft_max_pods=int(os.getenv("SANDBOX_NODE_SOFT_MAX_PODS", "0")),
             image_pull_secret=os.getenv(
                 "SANDBOX_IMAGE_PULL_SECRET", "ghcr-pull-secret"
             ),
         )
 
 
-def build_pod_manifest(cfg: PodConfig, name: str) -> dict:
+def build_pod_manifest(
+    cfg: PodConfig, name: str, overflow_to_worker: bool = False
+) -> dict:
+    # Prefer the owning worker's node so normal load stays on control-node while spilled
+    # workers keep sandboxes local; overflow_to_worker shifts excess pods onto worker nodes
+    # before the headroom node approaches its pod limit.
+    if overflow_to_worker:
+        affinity_expr = {
+            "key": "node-role.kubernetes.io/control-plane",
+            "operator": "DoesNotExist",
+        }
+    elif cfg.node_name:
+        affinity_expr = {
+            "key": "kubernetes.io/hostname",
+            "operator": "In",
+            "values": [cfg.node_name],
+        }
+    else:
+        affinity_expr = {
+            "key": "node-role.kubernetes.io/control-plane",
+            "operator": "Exists",
+        }
     spec: dict = {
         "automountServiceAccountToken": False,
         "enableServiceLinks": False,
@@ -76,6 +103,18 @@ def build_pod_manifest(cfg: PodConfig, name: str) -> dict:
         "hostNetwork": False,
         "hostPID": False,
         "hostIPC": False,
+        "affinity": {
+            "nodeAffinity": {
+                "preferredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                        "weight": 100,
+                        "preference": {
+                            "matchExpressions": [affinity_expr]
+                        },
+                    }
+                ]
+            }
+        },
         "securityContext": {
             "runAsNonRoot": True,
             "runAsUser": 10001,
@@ -124,7 +163,11 @@ def build_pod_manifest(cfg: PodConfig, name: str) -> dict:
 
 
 def _core_api() -> client.CoreV1Api:
-    return client.CoreV1Api(client.ApiClient())
+    configuration = client.Configuration.get_default_copy()
+    configuration.connection_pool_maxsize = max(
+        4, int(os.getenv("SANDBOX_K8S_POOL_MAXSIZE", "32"))
+    )
+    return client.CoreV1Api(client.ApiClient(configuration=configuration))
 
 
 def load_kube_config() -> None:
@@ -241,19 +284,30 @@ class KubePodSandbox:
 
 class KubeSandboxProvider:
     def __init__(
-        self, cfg: PodConfig, pool_size: int = 0, max_idle_s: float = 600.0
+        self,
+        cfg: PodConfig,
+        pool_size: int = 0,
+        max_idle_s: float = 600.0,
+        pool_workers: int = 1,
     ) -> None:
         load_kube_config()
         self._cfg = cfg
         self._api = _core_api()
         self._pool_size = pool_size
         self._max_idle_s = max_idle_s
+        self._pool_workers = max(1, pool_workers)
         self._ready: queue.Queue[KubePodSandbox] = queue.Queue()
+        self._pool_lock = threading.Lock()
+        self._inflight_creates = 0
+        self._headroom_lock = threading.Lock()
+        self._headroom_checked_at = 0.0
+        self._headroom_spill = False
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self.cleanup_stale()
         if pool_size > 0:
-            self._start_thread(self._fill_loop, "sandbox-pool-fill")
+            for index in range(self._pool_workers):
+                self._start_thread(self._fill_loop, f"sandbox-pool-fill-{index}")
         self._start_thread(self._janitor_loop, "sandbox-janitor")
 
     def _start_thread(self, target, name: str) -> None:
@@ -261,13 +315,38 @@ class KubeSandboxProvider:
         thread.start()
         self._threads.append(thread)
 
+    def _should_spill_from_headroom_node(self) -> bool:
+        if self._cfg.node_soft_max_pods <= 0 or not self._cfg.node_name:
+            return False
+        if self._cfg.headroom_node and self._cfg.node_name != self._cfg.headroom_node:
+            return False
+        now = time.monotonic()
+        with self._headroom_lock:
+            if now - self._headroom_checked_at < 1.0:
+                return self._headroom_spill
+            try:
+                pods = self._api.list_namespaced_pod(self._cfg.namespace).items
+                active_on_node = sum(
+                    1
+                    for pod in pods
+                    if getattr(pod.spec, "node_name", None) == self._cfg.node_name
+                    and (pod.status.phase if pod.status else None)
+                    in ("Pending", "Running")
+                )
+                self._headroom_spill = active_on_node >= self._cfg.node_soft_max_pods
+                self._headroom_checked_at = now
+            except Exception as exception:
+                logger.warning("Failed headroom pod count check: %s", exception)
+            return self._headroom_spill
+
     def _create(self) -> KubePodSandbox:
         name = f"sbx-{uuid.uuid4().hex[:12]}"
         sandbox = KubePodSandbox(self._cfg, name, self._api)
+        overflow = self._should_spill_from_headroom_node()
         try:
             self._api.create_namespaced_pod(
                 self._cfg.namespace,
-                build_pod_manifest(self._cfg, name),  # type: ignore[arg-type]
+                build_pod_manifest(self._cfg, name, overflow_to_worker=overflow),  # type: ignore[arg-type]
             )
             self._wait_running(name)
         except ApiException as exception:
@@ -344,17 +423,34 @@ class KubeSandboxProvider:
                 return sandbox
             sandbox.destroy()
 
+    def _try_claim_pool_slot(self) -> bool:
+        with self._pool_lock:
+            if self._ready.qsize() + self._inflight_creates >= self._pool_size:
+                return False
+            self._inflight_creates += 1
+            return True
+
     def _fill_loop(self) -> None:
         while not self._stop.is_set():
+            if not self._try_claim_pool_slot():
+                self._stop.wait(0.2)
+                continue
             try:
-                if self._ready.qsize() < self._pool_size:
-                    self._ready.put(self._create())
-                    continue
+                sandbox = self._create()
             except Exception:
                 logger.exception("Warm pool fill failed")
+                with self._pool_lock:
+                    self._inflight_creates -= 1
                 self._stop.wait(5)
                 continue
-            self._stop.wait(0.5)
+            if self._stop.is_set():
+                with self._pool_lock:
+                    self._inflight_creates -= 1
+                sandbox.destroy()
+                return
+            with self._pool_lock:
+                self._ready.put(sandbox)
+                self._inflight_creates -= 1
 
     def _janitor_loop(self) -> None:
         while not self._stop.wait(300):

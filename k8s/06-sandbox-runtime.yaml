@@ -77,7 +77,7 @@ metadata:
   namespace: swcp-sandbox
 spec:
   hard:
-    pods: "200"
+    pods: "240"
     requests.cpu: "16"
     requests.memory: 28Gi
     limits.cpu: "300"

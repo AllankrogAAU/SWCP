@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import datetime
+import json
 import logging
 import re
 import sqlite3
@@ -19,7 +21,11 @@ import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
-from benchmarks.config import BenchmarkConfig
+from benchmarks.config import (
+    SUITE_ALIASES,
+    BenchmarkConfig,
+    load_suites_config,
+)
 from benchmarks.plots import generate_all_plots, plot_obj3_vllm_tuning_matrix
 from benchmarks.runner import ClientSubmissionResult, LoadRunner
 from benchmarks.seeder import Seeder
@@ -37,6 +43,8 @@ def setup_logging(verbose: bool = False) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 async def _run_warmup(config: BenchmarkConfig, count: int = 3) -> int:
@@ -55,11 +63,202 @@ async def _run_warmup(config: BenchmarkConfig, count: int = 3) -> int:
     return 0
 
 
+def _extract_user_id(token: str) -> str:
+    try:
+        parts = token.split(".")
+        if len(parts) >= 2:
+            padded = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+            data = json.loads(base64.urlsafe_b64decode(padded.encode()))
+            uname = data.get("preferred_username") or data.get("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name")
+            if uname:
+                return str(uname)
+    except Exception:
+        pass
+    return token[:12]
+
+
+def _store_submission_and_step_metrics(
+    storage: BenchmarkStorage,
+    telemetry: TelemetryCollector,
+    run_id: str,
+    results: list[ClientSubmissionResult],
+    step_windows: dict[str, tuple[float, float]],
+    start_epoch: float,
+    end_epoch: float,
+    step_meta: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    sub_ids = [r.submission_id for r in results if r.submission_id and not r.submission_id.startswith("failed_")]
+    stages_by_sub = telemetry.collect_batch_submission_stages(sub_ids, start_epoch, end_epoch)
+
+    # For tiny tests (<= 5 submissions), if batch missed any stage details, fallback to individual query
+    if len(results) <= 5:
+        for r in results:
+            if r.submission_id.startswith("failed_"):
+                continue
+            st = stages_by_sub.get(r.submission_id)
+            if not st or (st.sandbox_exec_ms == 0.0 and st.llm_exec_ms == 0.0):
+                stages_by_sub[r.submission_id] = telemetry.collect_submission_stages(
+                    r.submission_id, start_epoch, end_epoch
+                )
+
+    records_by_step: dict[str, list[dict[str, Any]]] = {}
+    for r in results:
+        stages = stages_by_sub.get(r.submission_id) or StageTimings(submission_id=r.submission_id)
+        stages_by_sub[r.submission_id] = stages
+        submit_edge_ms = (
+            max(0.0, r.http_accepted_ms - stages.http_enqueue_ms)
+            if stages.http_enqueue_ms > 0
+            else 0.0
+        )
+        delivery_overhead_ms = (
+            max(0.0, r.client_e2e_ms - submit_edge_ms - stages.pipeline_total_ms)
+            if stages.pipeline_total_ms > 0
+            else 0.0
+        )
+        known_stages_ms = (
+            stages.http_enqueue_ms
+            + stages.sandbox_queue_wait_ms
+            + stages.sandbox_exec_ms
+            + stages.llm_queue_wait_ms
+            + stages.llm_exec_ms
+        )
+        orchestration_overhead_ms = (
+            max(0.0, stages.pipeline_total_ms - known_stages_ms)
+            if stages.pipeline_total_ms > 0
+            else 0.0
+        )
+        rec = {
+            "submission_id": r.submission_id,
+            "run_id": run_id,
+            "step_label": r.step_label,
+            "user_id": _extract_user_id(r.token),
+            "fixture_type": r.fixture_type,
+            "client_e2e_ms": r.client_e2e_ms,
+            "client_submit_ms": r.http_accepted_ms,
+            "http_enqueue_ms": stages.http_enqueue_ms or r.http_accepted_ms,
+            "submit_edge_network_ms": submit_edge_ms,
+            "sandbox_queue_wait_ms": stages.sandbox_queue_wait_ms,
+            "sandbox_exec_ms": stages.sandbox_exec_ms,
+            "llm_queue_wait_ms": stages.llm_queue_wait_ms,
+            "llm_exec_ms": stages.llm_exec_ms,
+            "orchestration_overhead_ms": orchestration_overhead_ms,
+            "pipeline_total_ms": stages.pipeline_total_ms or r.client_e2e_ms,
+            "delivery_overhead_ms": delivery_overhead_ms,
+            "prompt_tokens": stages.prompt_tokens,
+            "completion_tokens": stages.completion_tokens,
+            "tokens_per_sec": stages.tokens_per_sec,
+            "final_status": r.final_status,
+            "terminal_via": r.terminal_via,
+            "outcome": stages.outcome or r.error_message or r.terminal_via,
+            "llm_target": stages.llm_target,
+            "sandbox_node": stages.sandbox_node,
+            "llm_worker_node": stages.llm_worker_node,
+        }
+        storage.insert_submission(rec)
+        records_by_step.setdefault(r.step_label, []).append(rec)
+
+    by_step: dict[str, list[ClientSubmissionResult]] = {}
+    for r in results:
+        by_step.setdefault(r.step_label, []).append(r)
+
+    ordered_labels = list(step_windows.keys())
+    for lbl in by_step.keys():
+        if lbl not in step_windows:
+            ordered_labels.append(lbl)
+
+    for step_label in ordered_labels:
+        step_subs = by_step.get(step_label, [])
+        step_recs = records_by_step.get(step_label, [])
+        step_start_s, step_end_s = step_windows.get(step_label, (start_epoch, end_epoch))
+        step_duration_s = max(0.6, step_end_s - step_start_s)
+        step_duration_min = step_duration_s / 60.0
+        prom_snap = telemetry.collect_prometheus_snapshot(step_start_s, step_end_s)
+
+        e2e_vals = [s.client_e2e_ms for s in step_subs]
+        subs_stages = [stages_by_sub[s.submission_id] for s in step_subs if s.submission_id in stages_by_sub]
+        loki_tok_rates = [st.tokens_per_sec for st in subs_stages if st.tokens_per_sec > 0]
+        mean_tok_s = prom_snap.mean_tok_per_s if prom_snap.mean_tok_per_s > 0 else (
+            float(np.mean(loki_tok_rates)) if loki_tok_rates else 0.0
+        )
+        loki_primary = sum(1 for st in subs_stages if st.llm_target in ("primary", "overflow_fallback"))
+        loki_overflow = sum(1 for st in subs_stages if st.llm_target == "overflow")
+        primary_reqs = loki_primary if (loki_primary + loki_overflow) > 0 else prom_snap.primary_requests
+        overflow_reqs = loki_overflow if (loki_primary + loki_overflow) > 0 else prom_snap.overflow_requests
+        primary_exec_vals = [
+            st.llm_exec_ms for st in subs_stages
+            if st.llm_target in ("primary", "overflow_fallback") and st.llm_exec_ms > 0
+        ]
+        overflow_exec_vals = [
+            st.llm_exec_ms for st in subs_stages
+            if st.llm_target == "overflow" and st.llm_exec_ms > 0
+        ]
+
+        meta = (step_meta or {}).get(step_label, {})
+        m_rate = re.findall(r"([0-9]+(?:\.[0-9]+)?)", step_label)
+        default_target = float(m_rate[-1]) if m_rate else float(len(step_subs))
+        target_load_val = float(meta.get("target_load", default_target))
+        achieved_rpm = float(meta.get("achieved_throughput_per_min", len(step_subs) / step_duration_min))
+        in_flight_end = int(meta.get("in_flight_end", 0))
+        backlog_growth_rpm = float(meta.get("backlog_growth_per_min", 0.0))
+        actual_dur_s = float(meta.get("step_duration_actual_s", step_duration_s))
+        max_e2e_ms = float(meta.get("max_e2e_ms", max(e2e_vals) if e2e_vals else 0.0))
+        is_sustained = int(meta.get("is_sustained", 1 if backlog_growth_rpm <= max(4.0, 0.15 * target_load_val) else 0))
+
+        n_subs = len(step_subs)
+        storage.insert_step_summary({
+            "run_id": run_id,
+            "step_label": step_label,
+            "target_load": target_load_val,
+            "achieved_throughput_per_min": achieved_rpm,
+            "total_requests": n_subs,
+            "success_rate": (sum(1 for s in step_subs if s.final_status == "COMPLETED") / n_subs) if n_subs else 1.0,
+            "p50_e2e_ms": float(np.percentile(e2e_vals, 50)) if e2e_vals else 0.0,
+            "p90_e2e_ms": float(np.percentile(e2e_vals, 90)) if e2e_vals else 0.0,
+            "p95_e2e_ms": float(np.percentile(e2e_vals, 95)) if e2e_vals else 0.0,
+            "p99_e2e_ms": float(np.percentile(e2e_vals, 99)) if e2e_vals else 0.0,
+            "max_e2e_ms": max_e2e_ms,
+            "in_flight_end": in_flight_end,
+            "backlog_growth_per_min": backlog_growth_rpm,
+            "step_duration_actual_s": actual_dur_s,
+            "is_sustained": is_sustained,
+            "mean_enqueue_ms": float(np.mean([rec["http_enqueue_ms"] for rec in step_recs])) if step_recs else 0.0,
+            "p95_submit_edge_ms": float(np.percentile([rec["submit_edge_network_ms"] for rec in step_recs], 95)) if step_recs else 0.0,
+            "p95_sandbox_wait_ms": float(np.percentile([st.sandbox_queue_wait_ms for st in subs_stages], 95)) if subs_stages else 0.0,
+            "p95_sandbox_exec_ms": float(np.percentile([st.sandbox_exec_ms for st in subs_stages], 95)) if subs_stages else 0.0,
+            "p95_llm_wait_ms": float(np.percentile([st.llm_queue_wait_ms for st in subs_stages], 95)) if subs_stages else 0.0,
+            "p95_llm_exec_ms": float(np.percentile([st.llm_exec_ms for st in subs_stages], 95)) if subs_stages else 0.0,
+            "p95_llm_exec_primary_ms": float(np.percentile(primary_exec_vals, 95)) if primary_exec_vals else 0.0,
+            "p95_llm_exec_overflow_ms": float(np.percentile(overflow_exec_vals, 95)) if overflow_exec_vals else 0.0,
+            "p95_orchestration_overhead_ms": float(np.percentile([rec["orchestration_overhead_ms"] for rec in step_recs], 95)) if step_recs else 0.0,
+            "p95_delivery_overhead_ms": float(np.percentile([rec["delivery_overhead_ms"] for rec in step_recs], 95)) if step_recs else 0.0,
+            "ws_completion_rate": (sum(1 for s in step_subs if s.terminal_via in ("websocket", "sse")) / n_subs) if n_subs else 1.0,
+            "peak_kv_cache_pct": prom_snap.peak_kv_cache_pct,
+            "primary_kv_cache_pct": prom_snap.primary_kv_cache_pct,
+            "overflow_kv_cache_pct": prom_snap.overflow_kv_cache_pct,
+            "mean_tok_per_s": mean_tok_s,
+            "primary_requests": primary_reqs,
+            "overflow_requests": overflow_reqs,
+            "max_replicas_sandbox": prom_snap.max_replicas_sandbox,
+            "max_replicas_llm_worker": prom_snap.max_replicas_llm_worker,
+            "max_replicas_core_api": prom_snap.max_replicas_core_api,
+            "max_replicas_sandbox_worker": prom_snap.max_replicas_sandbox_worker,
+            "max_replicas_llm_worker_worker": prom_snap.max_replicas_llm_worker_worker,
+            "max_replicas_core_api_worker": prom_snap.max_replicas_core_api_worker,
+        })
+
+
 async def _run_smoke_test(config: BenchmarkConfig) -> int:
     console.print("[bold cyan]=== SWCP Benchmark Smoke Test ===[/bold cyan]")
-    run_id = f"smoke_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    now_str = datetime.datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+    run_id = f"{now_str}_smoke_{uuid.uuid4().hex[:6]}"
     storage = BenchmarkStorage(config)
     telemetry = TelemetryCollector(config)
+    target_http_rtt_ms, clock_offset_s = telemetry.measure_target_baseline()
+    console.print(
+        f"[cyan]Target baseline: HTTP RTT={target_http_rtt_ms:.2f}ms, clock_offset={clock_offset_s:+.2f}s"
+        + (f", inter_node_rtt={config.inter_node_rtt_ms:.2f}ms" if config.inter_node_rtt_ms is not None else "")
+        + "[/cyan]"
+    )
 
     console.print("[yellow]Phase A: Ensuring virtual test users and caching JWTs...[/yellow]")
     seeder = Seeder(config)
@@ -84,6 +283,10 @@ async def _run_smoke_test(config: BenchmarkConfig) -> int:
         "target_rate_per_min": 2.0,
         "concurrent_users": 1,
         "cold_start": 0,
+        "target_url": config.target_url,
+        "target_http_rtt_ms": target_http_rtt_ms,
+        "inter_node_rtt_ms": config.inter_node_rtt_ms,
+        "clock_offset_s": clock_offset_s,
         "notes": "Minimal verification smoke test",
     })
 
@@ -110,56 +313,9 @@ async def _run_smoke_test(config: BenchmarkConfig) -> int:
 
     console.print("\n[yellow]Phase C: Querying Loki logs and Prometheus metrics...[/yellow]")
     await asyncio.sleep(2.0)
-
-    collected_stages = []
-    for r in results:
-        stages = telemetry.collect_submission_stages(r.submission_id, start_epoch, end_epoch)
-        collected_stages.append(stages)
-        storage.insert_submission({
-            "submission_id": r.submission_id,
-            "run_id": run_id,
-            "step_label": r.step_label,
-            "user_id": r.token[:12],
-            "fixture_type": r.fixture_type,
-            "client_e2e_ms": r.client_e2e_ms,
-            "http_enqueue_ms": stages.http_enqueue_ms or r.http_accepted_ms,
-            "sandbox_queue_wait_ms": stages.sandbox_queue_wait_ms,
-            "sandbox_exec_ms": stages.sandbox_exec_ms,
-            "llm_queue_wait_ms": stages.llm_queue_wait_ms,
-            "llm_exec_ms": stages.llm_exec_ms,
-            "pipeline_total_ms": stages.pipeline_total_ms or r.client_e2e_ms,
-            "prompt_tokens": stages.prompt_tokens,
-            "completion_tokens": stages.completion_tokens,
-            "tokens_per_sec": stages.tokens_per_sec,
-            "final_status": r.final_status,
-            "outcome": stages.outcome or r.terminal_via,
-        })
-
-    prom_snap = telemetry.collect_prometheus_snapshot(start_epoch, end_epoch)
-
-    e2e_vals = [r.client_e2e_ms for r in results]
-    storage.insert_step_summary({
-        "run_id": run_id,
-        "step_label": step_label,
-        "target_load": 2.0,
-        "achieved_throughput_per_min": len(results) / ((end_epoch - start_epoch) / 60.0),
-        "total_requests": len(results),
-        "success_rate": sum(1 for r in results if r.final_status == "COMPLETED") / len(results),
-        "p50_e2e_ms": float(np.percentile(e2e_vals, 50)),
-        "p90_e2e_ms": float(np.percentile(e2e_vals, 90)),
-        "p95_e2e_ms": float(np.percentile(e2e_vals, 95)),
-        "p99_e2e_ms": float(np.percentile(e2e_vals, 99)),
-        "mean_enqueue_ms": float(np.mean([r.http_accepted_ms for r in results])),
-        "p95_sandbox_wait_ms": float(np.percentile([s.sandbox_queue_wait_ms for s in collected_stages], 95)) if collected_stages else 0.0,
-        "p95_sandbox_exec_ms": float(np.percentile([s.sandbox_exec_ms for s in collected_stages], 95)) if collected_stages else 0.0,
-        "p95_llm_wait_ms": float(np.percentile([s.llm_queue_wait_ms for s in collected_stages], 95)) if collected_stages else 0.0,
-        "p95_llm_exec_ms": float(np.percentile([s.llm_exec_ms for s in collected_stages], 95)) if collected_stages else 0.0,
-        "peak_kv_cache_pct": prom_snap.peak_kv_cache_pct,
-        "mean_tok_per_s": prom_snap.mean_tok_per_s,
-        "max_replicas_sandbox": prom_snap.max_replicas_sandbox,
-        "max_replicas_llm_worker": prom_snap.max_replicas_llm_worker,
-        "max_replicas_core_api": prom_snap.max_replicas_core_api,
-    })
+    _store_submission_and_step_metrics(
+        storage, telemetry, run_id, results, {step_label: (start_epoch, end_epoch)}, start_epoch, end_epoch
+    )
 
     console.print("\n[yellow]Phase D: Exporting CSV artifacts and generating charts...[/yellow]")
     run_dir = config.results_dir / run_id
@@ -185,9 +341,16 @@ async def _run_smoke_test(config: BenchmarkConfig) -> int:
 
 async def _run_benchmark(config: BenchmarkConfig, args: argparse.Namespace) -> int:
     console.print(f"[bold cyan]=== Starting SWCP Benchmark Suite: {args.suite} ===[/bold cyan]")
-    run_id = f"{args.suite}_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    now_str = datetime.datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+    run_id = f"{now_str}_{args.suite}_{uuid.uuid4().hex[:6]}"
     storage = BenchmarkStorage(config)
     telemetry = TelemetryCollector(config)
+    target_http_rtt_ms, clock_offset_s = telemetry.measure_target_baseline()
+    console.print(
+        f"[cyan]Target baseline: HTTP RTT={target_http_rtt_ms:.2f}ms, clock_offset={clock_offset_s:+.2f}s"
+        + (f", inter_node_rtt={config.inter_node_rtt_ms:.2f}ms" if config.inter_node_rtt_ms is not None else "")
+        + "[/cyan]"
+    )
     seeder = Seeder(config)
 
     console.print(f"[yellow]Ensuring {config.user_pool_size} virtual test users...[/yellow]")
@@ -221,40 +384,57 @@ async def _run_benchmark(config: BenchmarkConfig, args: argparse.Namespace) -> i
         "target_rate_per_min": 0.0,
         "concurrent_users": 0,
         "cold_start": 1 if getattr(args, "cold_start", False) else 0,
+        "target_url": config.target_url,
+        "target_http_rtt_ms": target_http_rtt_ms,
+        "inter_node_rtt_ms": config.inter_node_rtt_ms,
+        "clock_offset_s": clock_offset_s,
         "notes": sweep_id or config.notes,
     })
 
     runner = LoadRunner(config, tokens, assignment_id, run_id)
     results: list[ClientSubmissionResult] = []
 
-    if args.arrival_mode == "adaptive-poisson":
+    if args.arrival_mode == "continuous-ramp":
+        results = await runner.run_continuous_ramp(
+            start_rate=float(args.start_rate),
+            end_rate=float(args.end_rate),
+            ramp_duration_s=float(args.ramp_duration_s),
+            bucket_duration_s=float(args.bucket_duration_s),
+            stop_on_saturation=bool(args.stop_on_saturation),
+            saturation_confirm_buckets=int(args.saturation_confirm_buckets),
+            saturation_deficit_ratio=float(args.saturation_deficit_ratio),
+        )
+    elif args.arrival_mode == "adaptive-poisson":
         results = await runner.run_adaptive_poisson(
-            start_rate=float(getattr(args, "start_rate", 10.0)),
-            rate_delta=float(getattr(args, "rate_delta", 5.0)),
-            max_rate=float(getattr(args, "max_rate", 0.0) or 0.0),
-            target_p95_s=float(getattr(args, "target_p95_s", 30.0)),
-            step_duration_s=args.step_duration_s,
-            min_completions=args.min_completions,
-            confirmation_steps=int(getattr(args, "confirmation_steps", 1)),
+            start_rate=float(args.start_rate),
+            rate_delta=float(args.rate_delta),
+            max_rate=float(args.max_rate or 0.0),
+            target_p95_s=float(args.target_p95_s),
+            step_duration_s=float(args.step_duration_s),
+            min_completions=int(args.min_completions),
+            confirmation_steps=int(args.confirmation_steps),
         )
     elif args.arrival_mode == "stepped-poisson":
-        rates = [float(r.strip()) for r in args.rates.split(",") if r.strip()]
+        rates = [float(r.strip()) for r in str(args.rates).split(",") if r.strip()]
         results = await runner.run_stepped_poisson(
             rates_per_minute=rates,
-            step_duration_s=args.step_duration_s,
-            min_completions=args.min_completions,
+            step_duration_s=float(args.step_duration_s),
+            min_completions=int(args.min_completions),
         )
     elif args.arrival_mode == "closed-loop":
-        concurrencies = [int(c.strip()) for c in args.concurrency.split(",") if c.strip()]
+        concurrencies = [int(c.strip()) for c in str(getattr(args, "concurrency", "")).split(",") if c.strip()]
         results = await runner.run_closed_loop(
             concurrency_levels=concurrencies,
-            step_duration_s=args.step_duration_s,
+            step_duration_s=float(args.step_duration_s),
+            think_time_min_s=float(args.think_time_min_s),
+            think_time_max_s=float(args.think_time_max_s),
         )
     elif args.arrival_mode == "burst":
-        bursts = [int(b.strip()) for b in args.bursts.split(",") if b.strip()]
+        bursts = [int(b.strip()) for b in str(args.bursts).split(",") if b.strip()]
         results = await runner.run_burst(
             burst_sizes=bursts,
-            burst_window_s=args.burst_window_s,
+            burst_window_s=float(args.burst_window_s),
+            drain_timeout_s=float(args.drain_timeout_s),
         )
 
     end_epoch = time.time()
@@ -263,71 +443,10 @@ async def _run_benchmark(config: BenchmarkConfig, args: argparse.Namespace) -> i
 
     console.print("\n[yellow]Collecting telemetry from cluster Loki & Prometheus...[/yellow]")
     await asyncio.sleep(2.0)
-    stages_by_sub: dict[str, StageTimings] = {}
-    for r in results:
-        stages = telemetry.collect_submission_stages(r.submission_id, start_epoch, end_epoch)
-        stages_by_sub[r.submission_id] = stages
-        storage.insert_submission({
-            "submission_id": r.submission_id,
-            "run_id": run_id,
-            "step_label": r.step_label,
-            "user_id": r.token[:12],
-            "fixture_type": r.fixture_type,
-            "client_e2e_ms": r.client_e2e_ms,
-            "http_enqueue_ms": stages.http_enqueue_ms or r.http_accepted_ms,
-            "sandbox_queue_wait_ms": stages.sandbox_queue_wait_ms,
-            "sandbox_exec_ms": stages.sandbox_exec_ms,
-            "llm_queue_wait_ms": stages.llm_queue_wait_ms,
-            "llm_exec_ms": stages.llm_exec_ms,
-            "pipeline_total_ms": stages.pipeline_total_ms or r.client_e2e_ms,
-            "prompt_tokens": stages.prompt_tokens,
-            "completion_tokens": stages.completion_tokens,
-            "tokens_per_sec": stages.tokens_per_sec,
-            "final_status": r.final_status,
-            "outcome": stages.outcome or r.terminal_via,
-        })
-
-    by_step: dict[str, list[ClientSubmissionResult]] = {}
-    for r in results:
-        by_step.setdefault(r.step_label, []).append(r)
-
-    for step_label, step_subs in by_step.items():
-        step_start_s, step_end_s = runner.step_windows.get(step_label, (start_epoch, end_epoch))
-        step_duration_min = max(0.01, (step_end_s - step_start_s) / 60.0)
-        prom_snap = telemetry.collect_prometheus_snapshot(step_start_s, step_end_s)
-
-        e2e_vals = [s.client_e2e_ms for s in step_subs]
-        subs_stages = [stages_by_sub[s.submission_id] for s in step_subs if s.submission_id in stages_by_sub]
-        loki_tok_rates = [st.tokens_per_sec for st in subs_stages if st.tokens_per_sec > 0]
-        mean_tok_s = prom_snap.mean_tok_per_s if prom_snap.mean_tok_per_s > 0 else (
-            float(np.mean(loki_tok_rates)) if loki_tok_rates else 0.0
-        )
-        # Extract target rate from step_label (e.g. poisson_16.0rpm -> 16.0) if possible
-        m_rate = re.search(r"([0-9]+(?:\.[0-9]+)?)", step_label)
-        target_load_val = float(m_rate.group(1)) if m_rate else float(len(step_subs))
-
-        storage.insert_step_summary({
-            "run_id": run_id,
-            "step_label": step_label,
-            "target_load": target_load_val,
-            "achieved_throughput_per_min": len(step_subs) / step_duration_min,
-            "total_requests": len(step_subs),
-            "success_rate": sum(1 for s in step_subs if s.final_status == "COMPLETED") / len(step_subs),
-            "p50_e2e_ms": float(np.percentile(e2e_vals, 50)),
-            "p90_e2e_ms": float(np.percentile(e2e_vals, 90)),
-            "p95_e2e_ms": float(np.percentile(e2e_vals, 95)),
-            "p99_e2e_ms": float(np.percentile(e2e_vals, 99)),
-            "mean_enqueue_ms": float(np.mean([s.http_accepted_ms for s in step_subs])),
-            "p95_sandbox_wait_ms": float(np.percentile([st.sandbox_queue_wait_ms for st in subs_stages], 95)) if subs_stages else 0.0,
-            "p95_sandbox_exec_ms": float(np.percentile([st.sandbox_exec_ms for st in subs_stages], 95)) if subs_stages else 0.0,
-            "p95_llm_wait_ms": float(np.percentile([st.llm_queue_wait_ms for st in subs_stages], 95)) if subs_stages else 0.0,
-            "p95_llm_exec_ms": float(np.percentile([st.llm_exec_ms for st in subs_stages], 95)) if subs_stages else 0.0,
-            "peak_kv_cache_pct": prom_snap.peak_kv_cache_pct,
-            "mean_tok_per_s": mean_tok_s,
-            "max_replicas_sandbox": prom_snap.max_replicas_sandbox,
-            "max_replicas_llm_worker": prom_snap.max_replicas_llm_worker,
-            "max_replicas_core_api": prom_snap.max_replicas_core_api,
-        })
+    _store_submission_and_step_metrics(
+        storage, telemetry, run_id, results, runner.step_windows, start_epoch, end_epoch,
+        step_meta=runner.step_meta,
+    )
 
     if skip_plots:
         console.print(f"[bold green]✓ Recorded sweep step ({run_id}) into SQLite database.[/bold green]")
@@ -491,13 +610,15 @@ def _get_latest_run_id(db_path: Path) -> str | None:
 
 def main() -> None:
     parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser.add_argument("--config", default=None, help="Path to suite configuration TOML (default: benchmarks/suites.toml)")
     parent_parser.add_argument("--target-url", default=None, help="Target Ingress URL (e.g. http://localhost)")
     parent_parser.add_argument("--prometheus-url", default=None, help="Cluster Prometheus URL")
     parent_parser.add_argument("--loki-url", default=None, help="Cluster Loki URL")
     parent_parser.add_argument("--results-dir", default=None, help="Directory to store sqlite DB, csv, and plots")
-    parent_parser.add_argument("--users", type=int, default=100, help="User pool size")
-    parent_parser.add_argument("--hardware-tag", default="rtx5070ti-16gb", help="Hardware tag for runs")
-    parent_parser.add_argument("--mock-llm", action="store_true", help="Set flag if running in infinite-GPU mock mode")
+    parent_parser.add_argument("--users", type=int, default=None, help="User pool size (default from suites.toml or 100)")
+    parent_parser.add_argument("--hardware-tag", default=None, help="Hardware tag for runs (default from suites.toml)")
+    parent_parser.add_argument("--inter-node-rtt-ms", type=float, default=None, help="Measured baseline inter-node ping RTT (ms)")
+    parent_parser.add_argument("--mock-llm", action="store_true", default=None, help="Set flag if running in infinite-GPU mock mode")
     parent_parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
 
     parser = argparse.ArgumentParser(description="SWCP Benchmark and Stress-Testing Suite", parents=[parent_parser])
@@ -519,27 +640,39 @@ def main() -> None:
         "--suite",
         required=True,
         choices=[
-            "sla_curve", "burst", "infinite_gpu", "vllm_sweep",
+            "ramp_capacity", "sla_curve", "burst", "infinite_gpu", "vllm_sweep",
             "obj1_bottleneck", "obj2_infinite_gpu", "obj3_vllm_sweep", "obj4_sla_curve", "custom"
         ]
     )
     run_parser.add_argument(
         "--arrival-mode",
-        default="stepped-poisson",
-        choices=["adaptive-poisson", "stepped-poisson", "closed-loop", "burst"]
+        default=None,
+        choices=["continuous-ramp", "adaptive-poisson", "stepped-poisson", "closed-loop", "burst"],
+        help="Arrival traffic model (defaults from benchmarks/suites.toml)"
     )
-    run_parser.add_argument("--rates", default="2,4,8,12,16", help="Comma-separated rates/min for stepped-poisson")
-    run_parser.add_argument("--start-rate", type=float, default=10.0, help="Initial arrival rate for adaptive-poisson (default: 10)")
-    run_parser.add_argument("--rate-delta", type=float, default=5.0, help="Rate step increment for adaptive-poisson (default: 5)")
-    run_parser.add_argument("--max-rate", type=float, default=0.0, help="Optional maximum rate ceiling for adaptive-poisson (default: 0 = unbounded)")
-    run_parser.add_argument("--target-p95-s", type=float, default=30.0, help="Saturation threshold in seconds for adaptive-poisson (default: 30)")
-    run_parser.add_argument("--confirmation-steps", type=int, default=1, help="Steps to run after crossing target-p95-s before stopping (default: 1)")
-    run_parser.add_argument("--concurrency", default="5,10,20,35,50", help="Comma-separated concurrent users for closed-loop")
-    run_parser.add_argument("--bursts", default="10,20,30", help="Comma-separated burst sizes for burst mode")
-    run_parser.add_argument("--step-duration-s", type=float, default=120.0, help="Duration of each step in seconds")
-    run_parser.add_argument("--min-completions", type=int, default=8, help="Minimum completions per step")
-    run_parser.add_argument("--burst-window-s", type=float, default=2.0, help="Window duration for burst mode in seconds")
-    run_parser.add_argument("--warmup", action="store_true", default=False, help="Send 3 warmup requests prior to benchmark execution")
+    run_parser.add_argument("--rates", default=None, help="Comma-separated rates/min for stepped-poisson")
+    run_parser.add_argument("--start-rate", type=float, default=None, help="Initial arrival rate (rpm) for ramp/adaptive-poisson")
+    run_parser.add_argument("--end-rate", type=float, default=None, help="Final arrival rate (rpm) for continuous-ramp")
+    run_parser.add_argument("--ramp-duration-s", type=float, default=None, help="Total duration (s) for continuous-ramp")
+    run_parser.add_argument("--bucket-duration-s", type=float, default=None, help="Bucket slice width (s) for continuous-ramp")
+    run_parser.add_argument("--stop-on-saturation", dest="stop_on_saturation", action="store_true", default=None, help="Auto-stop continuous-ramp cleanly after confirming sustained saturation")
+    run_parser.add_argument("--no-stop-on-saturation", dest="stop_on_saturation", action="store_false", help="Run full continuous-ramp duration without saturation early stop")
+    run_parser.add_argument("--saturation-confirm-buckets", type=int, default=None, help="Consecutive saturated buckets required before stopping continuous-ramp")
+    run_parser.add_argument("--saturation-deficit-ratio", type=float, default=None, help="Completion shortfall fraction vs target rate required for saturation (default: 0.12)")
+    run_parser.add_argument("--rate-delta", type=float, default=None, help="Rate step increment for adaptive-poisson")
+    run_parser.add_argument("--max-rate", type=float, default=None, help="Optional max rate ceiling for adaptive-poisson")
+    run_parser.add_argument("--target-p95-s", type=float, default=None, help="Saturation threshold (s) for adaptive-poisson")
+    run_parser.add_argument("--confirmation-steps", type=int, default=None, help="Steps to run after crossing target-p95-s")
+    run_parser.add_argument("--concurrency", default=None, help="Comma-separated concurrent users for closed-loop")
+    run_parser.add_argument("--think-time-min-s", type=float, default=None, help="Minimum think time (s) between closed-loop requests")
+    run_parser.add_argument("--think-time-max-s", type=float, default=None, help="Maximum think time (s) between closed-loop requests")
+    run_parser.add_argument("--bursts", default=None, help="Comma-separated burst sizes for burst mode")
+    run_parser.add_argument("--step-duration-s", type=float, default=None, help="Duration of each step in seconds")
+    run_parser.add_argument("--min-completions", type=int, default=None, help="Minimum completions per step")
+    run_parser.add_argument("--burst-window-s", type=float, default=None, help="Window duration for burst mode in seconds")
+    run_parser.add_argument("--drain-timeout-s", type=float, default=None, help="Max drain timeout per burst in seconds")
+    run_parser.add_argument("--warmup", dest="warmup", action="store_true", default=None, help="Send 3 warmup requests before run")
+    run_parser.add_argument("--no-warmup", dest="warmup", action="store_false", help="Skip pre-run warmup requests")
     run_parser.add_argument("--cold-start", action="store_true", help="Flag if testing cold start from min replicas")
     run_parser.add_argument("--vllm-gpu-mem", type=float, default=0.88, help="Configured VLLM_GPU_MEMORY_UTILIZATION")
     run_parser.add_argument("--vllm-max-seqs", type=int, default=4, help="Configured VLLM_MAX_NUM_SEQS")
@@ -561,9 +694,55 @@ def main() -> None:
     args = parser.parse_args()
     setup_logging(args.verbose)
 
+    suites_toml = load_suites_config(Path(args.config) if args.config else None)
+    common_cfg = suites_toml.get("common", {})
+    raw_suite = getattr(args, "suite", None) or "custom"
+    canonical_suite = SUITE_ALIASES.get(raw_suite, raw_suite)
+    suite_cfg = suites_toml.get("suites", {}).get(canonical_suite, {}) if args.command == "run" else {}
+
+    fallback_defaults: dict[str, Any] = {
+        "users": 100,
+        "hardware_tag": "2node-rtx5070ti",
+        "mock_llm": False,
+        "arrival_mode": "stepped-poisson",
+        "rates": "40,80,120,160,200,240",
+        "start_rate": 30.0,
+        "end_rate": 260.0,
+        "ramp_duration_s": 480.0,
+        "bucket_duration_s": 30.0,
+        "stop_on_saturation": False,
+        "saturation_confirm_buckets": 3,
+        "saturation_deficit_ratio": 0.12,
+        "rate_delta": 10.0,
+        "max_rate": 0.0,
+        "target_p95_s": 30.0,
+        "confirmation_steps": 1,
+        "concurrency": "16",
+        "think_time_min_s": 10.0,
+        "think_time_max_s": 20.0,
+        "bursts": "20,40,60,80,100,120",
+        "step_duration_s": 90.0,
+        "min_completions": 12,
+        "burst_window_s": 3.0,
+        "drain_timeout_s": 300.0,
+        "warmup": False,
+    }
+
+    for key, fb in fallback_defaults.items():
+        if getattr(args, key, None) is None:
+            if key in suite_cfg:
+                setattr(args, key, suite_cfg[key])
+            elif key in common_cfg:
+                setattr(args, key, common_cfg[key])
+            else:
+                setattr(args, key, fb)
+
+    if getattr(args, "sweep_id", "") and "--warmup" not in sys.argv:
+        args.warmup = False
+
     config_kwargs: dict[str, Any] = {
-        "hardware_tag": args.hardware_tag,
-        "mock_llm_enabled": args.mock_llm,
+        "hardware_tag": str(args.hardware_tag),
+        "mock_llm_enabled": bool(args.mock_llm),
     }
     if args.target_url:
         config_kwargs["target_url"] = args.target_url
@@ -574,17 +753,31 @@ def main() -> None:
     if args.results_dir:
         config_kwargs["results_dir"] = Path(args.results_dir)
     if args.users:
-        config_kwargs["user_pool_size"] = args.users
+        config_kwargs["user_pool_size"] = int(args.users)
+    if args.inter_node_rtt_ms is not None:
+        config_kwargs["inter_node_rtt_ms"] = args.inter_node_rtt_ms
 
-    # Auto-scale user pool size if concurrency or burst exceeds specified pool
-    if getattr(args, "arrival_mode", None) == "closed-loop":
-        concurrencies = [int(c.strip()) for c in getattr(args, "concurrency", "").split(",") if c.strip()]
+    # Auto-scale user pool size if concurrency, burst, or high-rate arrivals could saturate pool
+    mode = getattr(args, "arrival_mode", None)
+    cur_pool = config_kwargs.get("user_pool_size", 200)
+    if mode == "closed-loop":
+        concurrencies = [int(c.strip()) for c in str(getattr(args, "concurrency", "")).split(",") if c.strip()]
         if concurrencies:
-            config_kwargs["user_pool_size"] = max(config_kwargs.get("user_pool_size", 100), max(concurrencies) + 10)
-    elif getattr(args, "arrival_mode", None) == "burst":
-        bursts = [int(b.strip()) for b in getattr(args, "bursts", "").split(",") if b.strip()]
+            config_kwargs["user_pool_size"] = max(cur_pool, max(concurrencies) + 20)
+    elif mode == "burst":
+        bursts = [int(b.strip()) for b in str(getattr(args, "bursts", "")).split(",") if b.strip()]
         if bursts:
-            config_kwargs["user_pool_size"] = max(config_kwargs.get("user_pool_size", 100), max(bursts) + 10)
+            config_kwargs["user_pool_size"] = max(cur_pool, max(bursts) + 20)
+    elif mode == "continuous-ramp":
+        peak_rpm = float(getattr(args, "end_rate", 0.0) or 0.0)
+        config_kwargs["user_pool_size"] = max(cur_pool, min(1500, int(peak_rpm * 1.0) + 100))
+    elif mode == "stepped-poisson":
+        rates = [float(r.strip()) for r in str(getattr(args, "rates", "")).split(",") if r.strip()]
+        if rates:
+            config_kwargs["user_pool_size"] = max(cur_pool, min(800, int(max(rates) * 1.5) + 50))
+    elif mode == "adaptive-poisson":
+        max_r = float(getattr(args, "max_rate", 0.0) or 0.0)
+        config_kwargs["user_pool_size"] = max(cur_pool, min(800, max(300, int(max_r * 1.5))))
 
     config = BenchmarkConfig(**config_kwargs)
 

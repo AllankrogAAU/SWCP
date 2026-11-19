@@ -16,6 +16,7 @@ public sealed class SandboxResultConsumer(
     NatsTaskPublisher publisher,
     SubmissionEvents events) : BackgroundService
 {
+    private const ulong MaxDeliveryAttempts = 5;
     private static readonly ActivitySource ActivitySource = new("SWCP.CoreApi");
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -39,10 +40,10 @@ public sealed class SandboxResultConsumer(
                 continue;
             }
 
+            var traceParent = message.Headers?.TryGetLastValue(Messaging.TraceParentHeader, out var parent)
+                == true ? parent : null;
             try
             {
-                var traceParent = message.Headers?.TryGetLastValue(Messaging.TraceParentHeader, out var parent)
-                    == true ? parent : null;
                 await ProcessResultAsync(result, traceParent, stoppingToken);
                 await message.AckAsync(cancellationToken: stoppingToken);
             }
@@ -52,9 +53,49 @@ public sealed class SandboxResultConsumer(
             }
             catch (Exception exception)
             {
-                logger.LogError(exception, "Failed to process sandbox result for submission {SubmissionId}", result.SubmissionId);
-                await message.NakAsync(cancellationToken: stoppingToken);
+                var deliveryCount = message.Metadata?.NumDelivered ?? 1UL;
+                logger.LogError(exception,
+                    "Failed to process sandbox result for submission {SubmissionId} (attempt {Attempt}/{MaxAttempts})",
+                    result.SubmissionId, deliveryCount, MaxDeliveryAttempts);
+                if (deliveryCount >= MaxDeliveryAttempts)
+                {
+                    await MarkSubmissionFailedAsync(result.SubmissionId, exception.Message, traceParent, stoppingToken);
+                    await message.AckAsync(cancellationToken: stoppingToken);
+                }
+                else
+                {
+                    await message.NakAsync(TimeSpan.FromSeconds(2), stoppingToken);
+                }
             }
+        }
+    }
+
+    private async Task MarkSubmissionFailedAsync(
+        Guid submissionId,
+        string reason,
+        string? traceParent,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var database = scope.ServiceProvider.GetRequiredService<CoreDbContext>();
+            var submission = await database.Submissions
+                .SingleOrDefaultAsync(item => item.Id == submissionId, cancellationToken);
+            if (submission is null || submission.Status is SubmissionStatus.COMPLETED or SubmissionStatus.FAILED)
+            {
+                return;
+            }
+
+            submission.Status = SubmissionStatus.FAILED;
+            submission.ErrorMessage = $"Failed to enqueue AI feedback after sandbox evaluation: {reason}";
+            submission.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await database.SaveChangesAsync(cancellationToken);
+            await events.PublishAsync(submission, "failed", submission.ErrorMessage, 100, cancellationToken, traceParent);
+        }
+        catch (Exception markException)
+        {
+            logger.LogError(markException, "Could not mark submission {SubmissionId} as failed after exhausting sandbox result retries", submissionId);
         }
     }
 
@@ -114,13 +155,19 @@ public sealed class SandboxResultConsumer(
             return;
         }
 
-        submission.Status = SubmissionStatus.LLM_QUEUED;
-        await database.SaveChangesAsync(cancellationToken);
-        await events.PublishAsync(submission, "stage", "Queued for LLM feedback", 60, cancellationToken, traceParent);
+        if (submission.Status is SubmissionStatus.COMPLETED or SubmissionStatus.FAILED)
+        {
+            logger.LogInformation("Ignoring sandbox result for terminal submission {SubmissionId} ({Status})", submission.Id, submission.Status);
+            return;
+        }
 
         var assignment = submission.Assignment
             ?? throw new InvalidOperationException($"Assignment {submission.AssignmentId} was not found.");
         var prompt = SubmissionPromptBuilder.Build(assignment, submission, result);
+
+        submission.Status = SubmissionStatus.LLM_QUEUED;
+        await database.SaveChangesAsync(cancellationToken);
+
         var queueTimer = System.Diagnostics.Stopwatch.StartNew();
         await publisher.PublishLlmTaskAsync(
             new LlmTask(submission.Id, submission.LlmBackend, prompt.SystemPrompt, prompt.UserPrompt,

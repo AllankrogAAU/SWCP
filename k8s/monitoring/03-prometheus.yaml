@@ -55,6 +55,9 @@ data:
         relabel_configs:
           - action: labelmap
             regex: __meta_kubernetes_node_label_(.+)
+          - source_labels: [__meta_kubernetes_node_name]
+            action: replace
+            target_label: node
 
       - job_name: "kubernetes-cadvisor"
         scheme: https
@@ -68,6 +71,9 @@ data:
         relabel_configs:
           - action: labelmap
             regex: __meta_kubernetes_node_label_(.+)
+          - source_labels: [__meta_kubernetes_node_name]
+            action: replace
+            target_label: node
 
       - job_name: "kubernetes-pods"
         kubernetes_sd_configs:
@@ -93,6 +99,9 @@ data:
           - source_labels: [__meta_kubernetes_pod_name]
             action: replace
             target_label: pod
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            action: replace
+            target_label: node
 ---
 apiVersion: v1
 kind: Service
@@ -128,6 +137,8 @@ spec:
       labels:
         app: prometheus
     spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       serviceAccountName: prometheus
       securityContext:
         runAsUser: 65534
@@ -149,20 +160,24 @@ spec:
               cpu: 100m
               memory: 256Mi
             limits:
-              cpu: "1"
-              memory: 1Gi
+              cpu: "2"
+              memory: 2Gi
           readinessProbe:
             httpGet:
               path: /-/healthy
               port: 9090
-            initialDelaySeconds: 10
-            periodSeconds: 5
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /-/healthy
               port: 9090
-            initialDelaySeconds: 15
-            periodSeconds: 10
+            initialDelaySeconds: 45
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
           volumeMounts:
             - name: config
               mountPath: /etc/prometheus

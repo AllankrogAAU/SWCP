@@ -47,7 +47,7 @@ public sealed class SubmissionPromptBuilderTests
         Assert.Equal("submit", prompt.EvaluationMode);
         Assert.False(prompt.SandboxFailed);
         Assert.Contains("Focus on recursive stack efficiency", prompt.SystemPrompt);
-        Assert.Contains("Review the code for significant non-crashing quality issues first", prompt.SystemPrompt);
+        Assert.Contains("Review the submission in priority order: compilation", prompt.SystemPrompt);
         Assert.Contains("int main()", prompt.UserPrompt);
         Assert.Contains("Fibonacci", prompt.UserPrompt);
     }
@@ -62,7 +62,7 @@ public sealed class SubmissionPromptBuilderTests
         var prompt = SubmissionPromptBuilder.Build(assignment, submission, sandboxResult);
 
         Assert.Equal("hint", prompt.EvaluationMode);
-        Assert.Contains("The student requested a hint. Give one concise next step", prompt.SystemPrompt);
+        Assert.Contains("The student requested a hint. Use the assignment, source", prompt.SystemPrompt);
     }
 
     [Fact]
@@ -115,6 +115,31 @@ public sealed class SubmissionPromptBuilderTests
         Assert.Contains("maxMemoryConsumedMegabytes", prompt.UserPrompt);
         Assert.Contains("182", prompt.UserPrompt);
         Assert.Contains("maxDurationMilliseconds", prompt.UserPrompt);
+    }
+
+    [Fact]
+    public void Build_NullMemoryAndEmptyTests_DoesNotThrow()
+    {
+        var assignment = CreateAssignment();
+        var submission = CreateSubmission("hint");
+        var nullMemoryResult = new SandboxResult(
+            Guid.NewGuid(),
+            new CompilationResult(true, "", "", 0, 15),
+            [],
+            [new SandboxTestResult(false, "1", "", 1, 15, null)]);
+
+        var prompt = SubmissionPromptBuilder.Build(assignment, submission, nullMemoryResult);
+        Assert.Equal("hint", prompt.EvaluationMode);
+        Assert.DoesNotContain("maxMemoryConsumedMegabytes\":182", prompt.UserPrompt);
+
+        var emptyTestsResult = new SandboxResult(
+            Guid.NewGuid(),
+            new CompilationResult(true, "", "", 0, 15),
+            [],
+            []);
+
+        var emptyPrompt = SubmissionPromptBuilder.Build(assignment, submission, emptyTestsResult);
+        Assert.Equal("hint", emptyPrompt.EvaluationMode);
     }
 }
 

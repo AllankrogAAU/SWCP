@@ -36,14 +36,14 @@ if [ "$IS_K3S" -eq 1 ] && [ ! -s "$CONTAINERD_GENERATED_CONFIG" ]; then
 fi
 
 runtimes_prefix=""
-if command -v containerd >/dev/null 2>&1; then
-  runtimes_prefix="$(containerd config dump 2>/dev/null \
-    | grep -oE "\[plugins\.['\"][^'\"]*['\"]\.containerd\.runtimes\.runc\]" \
+if [ -s "$CONTAINERD_GENERATED_CONFIG" ]; then
+  runtimes_prefix="$(grep -oE "\[plugins\.['\"][^'\"]*['\"]\.containerd\.runtimes\.runc\]" "$CONTAINERD_GENERATED_CONFIG" \
     | sed -E 's/\.runc\]$//' \
     | head -n1 || true)"
 fi
-if [ -z "$runtimes_prefix" ]; then
-  runtimes_prefix="$(grep -oE "\[plugins\.['\"][^'\"]*['\"]\.containerd\.runtimes\.runc\]" "$CONTAINERD_GENERATED_CONFIG" \
+if [ -z "$runtimes_prefix" ] && command -v containerd >/dev/null 2>&1; then
+  runtimes_prefix="$(containerd config dump 2>/dev/null \
+    | grep -oE "\[plugins\.['\"][^'\"]*['\"]\.containerd\.runtimes\.runc\]" \
     | sed -E 's/\.runc\]$//' \
     | head -n1 || true)"
 fi
@@ -58,6 +58,11 @@ if [ "$IS_K3S" -eq 1 ]; then
     mkdir -p "$(dirname "$CONTAINERD_TEMPLATE_CONFIG")"
     echo '{{ template "base" . }}' > "$CONTAINERD_TEMPLATE_CONFIG"
   fi
+  if grep -qE "^\[plugins\.['\"][^'\"]*['\"]\.containerd\.runtimes\.${RUNTIME_HANDLER}\]" "$CONTAINERD_TEMPLATE_CONFIG" && \
+     ! grep -qF "${runtimes_prefix}.${RUNTIME_HANDLER}]" "$CONTAINERD_TEMPLATE_CONFIG"; then
+    cp "$CONTAINERD_TEMPLATE_CONFIG" "${CONTAINERD_TEMPLATE_CONFIG}.bak.$(date +%s)"
+    sed -i -E "/^\[plugins\.['\"][^'\"]*['\"]\.containerd\.runtimes\.${RUNTIME_HANDLER}\]/,/^[[:space:]]*$/d" "$CONTAINERD_TEMPLATE_CONFIG"
+  fi
   if ! grep -qF "${runtimes_prefix}.${RUNTIME_HANDLER}]" "$CONTAINERD_TEMPLATE_CONFIG"; then
     cp "$CONTAINERD_TEMPLATE_CONFIG" "${CONTAINERD_TEMPLATE_CONFIG}.bak.$(date +%s)"
     {
@@ -66,7 +71,11 @@ if [ "$IS_K3S" -eq 1 ]; then
       echo "  runtime_type = \"io.containerd.runsc.v1\""
     } >> "$CONTAINERD_TEMPLATE_CONFIG"
   fi
-  systemctl restart k3s
+  if systemctl list-unit-files k3s-agent.service 2>/dev/null | grep -q k3s-agent.service && ! systemctl is-active --quiet k3s 2>/dev/null; then
+    systemctl restart k3s-agent
+  else
+    systemctl restart k3s
+  fi
 else
   if ! grep -qF "${runtimes_prefix}.${RUNTIME_HANDLER}]" "$CONTAINERD_GENERATED_CONFIG"; then
     cp "$CONTAINERD_GENERATED_CONFIG" "${CONTAINERD_GENERATED_CONFIG}.bak.$(date +%s)"
@@ -79,11 +88,11 @@ else
   systemctl restart containerd
 fi
 
-if ! command -v kubectl >/dev/null 2>&1; then
-  echo "gVisor binaries installed and containerd configured, but kubectl was not found." >&2
-  echo "From a machine with cluster access, run:" >&2
+if ! command -v kubectl >/dev/null 2>&1 || ! kubectl get nodes >/dev/null 2>&1; then
+  echo "gVisor binaries installed and containerd configured, but kubectl cannot reach the cluster from this node." >&2
+  echo "From the control-plane node, run:" >&2
   echo "  kubectl label node ${NODE_NAME} swcp.io/gvisor=true --overwrite" >&2
-  echo "then re-run this script's verification separately; do not assume gVisor works until it is checked." >&2
+  echo "and verify gVisor scheduling before relying on it." >&2
   exit 0
 fi
 

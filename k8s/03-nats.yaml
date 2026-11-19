@@ -38,6 +38,8 @@ spec:
         app.kubernetes.io/name: nats
         app.kubernetes.io/part-of: swcp
     spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       terminationGracePeriodSeconds: 60
       containers:
         - name: nats
@@ -53,11 +55,11 @@ spec:
               containerPort: 8222
           resources:
             requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              cpu: 500m
+              cpu: 250m
               memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
           startupProbe:
             httpGet:
               path: /healthz

@@ -331,6 +331,12 @@ def test_pod_manifest_is_hardened_and_gvisor() -> None:
     assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
     assert spec["volumes"][0]["emptyDir"]["medium"] == "Memory"
     assert spec["imagePullSecrets"] == [{"name": "ghcr-pull-secret"}]
+    preferred = spec["affinity"]["nodeAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]
+    assert preferred[0]["weight"] == 100
+    assert preferred[0]["preference"]["matchExpressions"][0] == {
+        "key": "node-role.kubernetes.io/control-plane",
+        "operator": "Exists",
+    }
 
 
 def test_pod_manifest_without_image_pull_secret() -> None:
@@ -493,3 +499,192 @@ def test_wait_running_failed_phase_surfaces_container_wait_reason() -> None:
     message = str(excinfo.value)
     assert "pod entered phase Failed" in message
     assert "ImagePullBackOff" in message
+
+
+def test_pod_manifest_prefers_owning_worker_node_when_set() -> None:
+    spec = build_pod_manifest(PodConfig(node_name="worker-node"), "sbx-1")["spec"]
+    preferred = spec["affinity"]["nodeAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]
+    assert preferred[0]["weight"] == 100
+    assert preferred[0]["preference"]["matchExpressions"] == [
+        {
+            "key": "kubernetes.io/hostname",
+            "operator": "In",
+            "values": ["worker-node"],
+        }
+    ]
+
+
+def test_parallel_warm_pool_fill_respects_pool_size_and_cleans_up(monkeypatch) -> None:
+    import threading
+    import time
+
+    created = []
+    destroyed = []
+    max_in_flight = 0
+    in_flight = 0
+    lock = threading.Lock()
+
+    class FakeWarmSandbox:
+        def __init__(self, idx: int) -> None:
+            self.idx = idx
+            self.created_at = time.monotonic()
+
+        def destroy(self) -> None:
+            with lock:
+                destroyed.append(self.idx)
+
+    def fake_create(self):
+        nonlocal in_flight, max_in_flight
+        with lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        time.sleep(0.05)
+        with lock:
+            in_flight -= 1
+            idx = len(created)
+            sbx = FakeWarmSandbox(idx)
+            created.append(sbx)
+        return sbx
+
+    monkeypatch.setattr("sandbox.k8s_pod.load_kube_config", lambda: None)
+    monkeypatch.setattr("sandbox.k8s_pod._core_api", lambda: object())
+    monkeypatch.setattr(KubeSandboxProvider, "cleanup_stale", lambda self, max_age_s=1800: None)
+    monkeypatch.setattr(KubeSandboxProvider, "_create", fake_create)
+
+    provider = KubeSandboxProvider(PodConfig(), pool_size=4, pool_workers=3)
+    try:
+        deadline = time.monotonic() + 2.0
+        while provider._ready.qsize() < 4 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        time.sleep(0.1)
+        assert provider._ready.qsize() == 4
+        assert len(created) == 4
+        assert max_in_flight >= 2
+    finally:
+        provider.close()
+    assert len(destroyed) == 4
+
+
+def test_pod_manifest_overflow_prefers_non_control_plane_nodes() -> None:
+    spec = build_pod_manifest(
+        PodConfig(node_name="control-node"), "sbx-1", overflow_to_worker=True
+    )["spec"]
+    preferred = spec["affinity"]["nodeAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]
+    assert preferred[0]["weight"] == 100
+    assert preferred[0]["preference"]["matchExpressions"] == [
+        {
+            "key": "node-role.kubernetes.io/control-plane",
+            "operator": "DoesNotExist",
+        }
+    ]
+
+
+def test_headroom_soft_cap_triggers_spillover_only_above_threshold() -> None:
+    import threading
+
+    class FakeSpec:
+        def __init__(self, node_name: str | None) -> None:
+            self.node_name = node_name
+
+    class FakeNamespacePod:
+        def __init__(self, node_name: str | None, phase: str) -> None:
+            self.spec = FakeSpec(node_name)
+            self.status = FakePodStatus(phase)
+
+    class FakePodList:
+        def __init__(self, items) -> None:
+            self.items = items
+
+    class HeadroomApi:
+        def __init__(self, items) -> None:
+            self._items = items
+
+        def list_namespaced_pod(self, namespace: str) -> FakePodList:
+            return FakePodList(self._items)
+
+    def make_headroom_provider(node_name: str, items: list[FakeNamespacePod]):
+        provider = object.__new__(KubeSandboxProvider)
+        provider._cfg = PodConfig(
+            node_name=node_name,
+            headroom_node="control-node",
+            node_soft_max_pods=2,
+        )
+        provider._api = HeadroomApi(items)
+        provider._headroom_lock = threading.Lock()
+        provider._headroom_checked_at = 0.0
+        provider._headroom_spill = False
+        return provider
+
+    under = make_headroom_provider(
+        "control-node",
+        [
+            FakeNamespacePod("control-node", "Running"),
+            FakeNamespacePod("control-node", "Succeeded"),
+            FakeNamespacePod("worker-node", "Running"),
+        ],
+    )
+    assert under._should_spill_from_headroom_node() is False
+
+    at_cap = make_headroom_provider(
+        "control-node",
+        [
+            FakeNamespacePod("control-node", "Running"),
+            FakeNamespacePod("control-node", "Pending"),
+        ],
+    )
+    assert at_cap._should_spill_from_headroom_node() is True
+
+    non_headroom = make_headroom_provider(
+        "worker-node",
+        [
+            FakeNamespacePod("control-node", "Running"),
+            FakeNamespacePod("control-node", "Running"),
+        ],
+    )
+    assert non_headroom._should_spill_from_headroom_node() is False
+
+
+def test_runsc_oci_spec_is_hardened_and_readonly() -> None:
+    cfg = RunscConfig(rootfs_path="/opt/sandbox-rootfs", memory_limit_mb=512)
+    spec = build_oci_spec(cfg, ["/usr/local/bin/run-submission", "10"], "/tmp/sbx-1/work")
+    assert spec["root"] == {"path": "/opt/sandbox-rootfs", "readonly": True}
+    assert spec["process"]["user"] == {"uid": 10001, "gid": 10001}
+    assert spec["process"]["noNewPrivileges"] is True
+    assert spec["process"]["capabilities"]["effective"] == []
+    tmp_mount = next(m for m in spec["mounts"] if m["destination"] == "/tmp")
+    assert tmp_mount["source"] == "/tmp/sbx-1/work"
+    assert "rw" in tmp_mount["options"] and "nosuid" in tmp_mount["options"]
+
+
+def test_runsc_sandbox_pipes_stdin_and_cleans_up(monkeypatch, tmp_path) -> None:
+    import subprocess
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        if "run" in cmd:
+            captured["cmd"] = cmd
+            captured["input"] = kwargs.get("input", b"")
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=b"compile_rc=0\ncompile_ms=5\nrun_rc=0\nrun_ms=2\n", stderr=b""
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("sandbox.runsc_oci.subprocess.run", fake_run)
+    cfg = RunscConfig(
+        work_base_dir=str(tmp_path),
+        state_dir=str(tmp_path / "state"),
+        rootless=False,
+    )
+    sbx = RunscSandbox(cfg)
+    try:
+        report = sbx.run("int main(void) { return 0; }", Limits(), run_stdin="hello")
+        assert report.compile is not None and report.compile.rc == 0
+        assert captured["input"].endswith(b"hello")
+        assert "--network=none" in captured["cmd"]
+        assert "--overlay2=none" in captured["cmd"]
+        assert sbx._bundle_dir is not None and sbx._bundle_dir.exists()
+    finally:
+        sbx.destroy()
+    assert sbx._bundle_dir is not None and not sbx._bundle_dir.exists()
+
