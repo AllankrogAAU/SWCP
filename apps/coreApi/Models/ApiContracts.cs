@@ -45,6 +45,7 @@ public sealed record SubmissionResponse(
     JsonElement? SandboxOutput,
     string? LlmFeedback,
     bool? TaskSolved,
+    double? ConfidenceScorePercent,
     string? ErrorMessage,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);

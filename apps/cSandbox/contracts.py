@@ -84,6 +84,7 @@ class LlmResult(StrictContract):
     feedbackMarkdown: str | None = None
     tokenUsage: LlmTokenUsage | None = None
     error: str | None = None
+    confidenceScorePercent: float | None = Field(default=None, ge=0, le=100)
 
 
 class SubmissionNotification(StrictContract):

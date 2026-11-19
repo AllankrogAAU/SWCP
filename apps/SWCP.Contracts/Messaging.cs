@@ -109,7 +109,8 @@ public sealed record LlmResult(
     [property: JsonPropertyName("feedbackMarkdown")] string? FeedbackMarkdown,
     [property: JsonPropertyName("tokenUsage")] LlmTokenUsage? TokenUsage,
     [property: JsonPropertyName("error")] string? Error,
-    [property: JsonPropertyName("taskSolved")] bool? TaskSolved = null);
+    [property: JsonPropertyName("taskSolved")] bool? TaskSolved = null,
+    [property: JsonPropertyName("confidenceScorePercent")] double? ConfidenceScorePercent = null);
 
 public sealed record LlmTokenUsage(
     [property: JsonPropertyName("promptTokens")] int PromptTokens,

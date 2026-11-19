@@ -53,6 +53,7 @@ public sealed class Submission
     public string? SandboxOutputJson { get; set; }
     public string? LlmFeedback { get; set; }
     public bool? TaskSolved { get; set; }
+    public double? ConfidenceScorePercent { get; set; }
     public string? ErrorMessage { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }
