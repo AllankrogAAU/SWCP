@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/name: c-sandbox
     app.kubernetes.io/part-of: swcp
 spec:
-  replicas: 3
+  replicas: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -22,17 +22,19 @@ spec:
         app.kubernetes.io/name: c-sandbox
         app.kubernetes.io/part-of: swcp
     spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
       serviceAccountName: c-sandbox-worker
       automountServiceAccountToken: true
       terminationGracePeriodSeconds: 60
       imagePullSecrets:
         - name: ghcr-pull-secret
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 10001
-        runAsGroup: 10001
-        seccompProfile:
-          type: RuntimeDefault
       initContainers:
         - name: ensure-streams
           image: natsio/nats-box:0.14.5
@@ -68,18 +70,19 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
+            privileged: true
           resources:
             requests:
-              cpu: 250m
-              memory: 256Mi
-            limits:
-              cpu: "1"
+              cpu: 1250m
               memory: 512Mi
+            limits:
+              cpu: "6"
+              memory: 2Gi
           startupProbe:
             exec:
               command: ["sh", "-c", "test -f /tmp/healthy"]
@@ -112,4 +115,5 @@ spec:
       volumes:
         - name: tmp
           emptyDir:
-            sizeLimit: 64Mi
+            medium: Memory
+            sizeLimit: 512Mi

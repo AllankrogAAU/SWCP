@@ -103,16 +103,16 @@ services:
     build:
       context: ./apps/cSandbox
       dockerfile: Dockerfile.worker
+    privileged: true
     environment:
       NATS_URL: nats://nats:4222
-      DOCKER_HOST: unix:///var/run/docker.sock
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      SANDBOX_BACKEND: runsc
+      SANDBOX_ROOTFS_PATH: /opt/sandbox-rootfs
+    tmpfs:
+      - /tmp:rw,exec,size=512m
     depends_on:
       nats:
         condition: service_healthy
-      sandbox-runtime-image:
-        condition: service_completed_successfully
     restart: unless-stopped
 
   db:

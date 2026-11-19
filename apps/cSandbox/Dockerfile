@@ -2,6 +2,7 @@ FROM debian:trixie-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc libc6-dev cppcheck coreutils \
+    && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 10001 sandbox \
     && useradd -u 10001 -g 10001 -M -s /usr/sbin/nologin sandbox

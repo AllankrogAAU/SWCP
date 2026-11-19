@@ -109,6 +109,8 @@ spec:
       labels:
         app: grafana
     spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       securityContext:
         runAsUser: 472
         runAsGroup: 472

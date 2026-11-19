@@ -6,6 +6,7 @@ import pytest
 from evaluation.evaluator import evaluate
 from evaluation.result import EvaluationResult, Status
 from sandbox.k8s_pod import KubeSandboxProvider, PodConfig
+from sandbox.runsc_oci import RunscConfig, RunscSandboxProvider
 
 pytestmark = pytest.mark.skipif(
     os.getenv("SANDBOX_INTEGRATION") != "1", reason="set SANDBOX_INTEGRATION=1 to run"
@@ -16,7 +17,10 @@ FIXTURES = Path(__file__).parent / "fixtures" / "source_code"
 
 @pytest.fixture(scope="module")
 def provider():
-    p = KubeSandboxProvider(PodConfig.from_env(), pool_size=0)
+    if os.getenv("SANDBOX_BACKEND", "runsc").lower() == "k8s":
+        p = KubeSandboxProvider(PodConfig.from_env(), pool_size=0)
+    else:
+        p = RunscSandboxProvider(RunscConfig.from_env())
     yield p
     p.close()
 

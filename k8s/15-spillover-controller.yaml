@@ -1,0 +1,127 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spillover-controller
+  namespace: swcp
+  labels:
+    app.kubernetes.io/name: spillover-controller
+    app.kubernetes.io/part-of: swcp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spillover-controller
+  namespace: swcp
+  labels:
+    app.kubernetes.io/name: spillover-controller
+    app.kubernetes.io/part-of: swcp
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spillover-controller
+  namespace: swcp
+  labels:
+    app.kubernetes.io/name: spillover-controller
+    app.kubernetes.io/part-of: swcp
+subjects:
+  - kind: ServiceAccount
+    name: spillover-controller
+    namespace: swcp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: spillover-controller
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spillover-controller
+  namespace: swcp
+  labels:
+    app.kubernetes.io/name: spillover-controller
+    app.kubernetes.io/part-of: swcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spillover-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spillover-controller
+        app.kubernetes.io/part-of: swcp
+    spec:
+      serviceAccountName: spillover-controller
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: controller
+          image: alpine/k8s:1.31.2
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          command:
+            - sh
+            - -ec
+            - |
+              echo "Starting SWCP Spillover & Scale-Down Controller..."
+              while true; do
+                # 1. Annotate compute pods with pod-deletion-cost based on their active node.
+                # Pods on worker-node get -1000 (deleted FIRST by ReplicaSet on scale-down).
+                # Pods on control-node get 1000 (kept on control plane).
+                kubectl get pods -n swcp -l "app.kubernetes.io/name in (c-sandbox,llm-worker,core-api,api-gateway)" --no-headers \
+                  -o custom-columns="NAME:.metadata.name,NODE:.spec.nodeName,APP:.metadata.labels.app\.kubernetes\.io/name,COST:.metadata.annotations.controller\.kubernetes\.io/pod-deletion-cost" 2>/dev/null | \
+                while read -r pname pnode papp pcost; do
+                  [ -z "$pname" ] && continue
+                  if [ "$pnode" = "control-node" ]; then
+                    if [ "$pcost" != "1000" ]; then
+                      kubectl annotate pod "$pname" -n swcp controller.kubernetes.io/pod-deletion-cost="1000" --overwrite >/dev/null 2>&1 || true
+                    fi
+                  elif [ -n "$pnode" ]; then
+                    if [ "$pcost" != "-1000" ]; then
+                      kubectl annotate pod "$pname" -n swcp controller.kubernetes.io/pod-deletion-cost="-1000" --overwrite >/dev/null 2>&1 || true
+                    fi
+                  fi
+                done
+
+                # 2. Automated Rebalance for Baseline Pods:
+                # If a deployment is at or below baseline (<= 2 replicas) but has a pod stranded on a worker node,
+                # evict it so kube-scheduler re-places it on control-node according to nodeAffinity.
+                for app in c-sandbox llm-worker core-api api-gateway; do
+                  cur_reps=$(kubectl get deployment "$app" -n swcp -o jsonpath="{.spec.replicas}" 2>/dev/null || echo 0)
+                  base_max=2
+                  if [ "$app" = "core-api" ] || [ "$app" = "api-gateway" ]; then
+                    base_max=3
+                  fi
+                  if [ "$cur_reps" -gt 0 ] && [ "$cur_reps" -le "$base_max" ]; then
+                    worker_pods=$(kubectl get pods -n swcp -l "app.kubernetes.io/name=$app" --no-headers \
+                      -o custom-columns="NAME:.metadata.name,NODE:.spec.nodeName" 2>/dev/null | \
+                      awk '$2 != "control-node" && $2 != "<none>" && $2 != "" {print $1}')
+                    for wp in $worker_pods; do
+                      echo "Rebalancing baseline $app pod $wp off worker node to control-node..."
+                      kubectl delete pod "$wp" -n swcp --now --wait=false >/dev/null 2>&1 || true
+                    done
+                  fi
+                done
+
+                sleep 10
+              done

@@ -1,4 +1,44 @@
+# Stage 1: Build the isolated C compilation & execution rootfs
+FROM debian:trixie-slim AS sandbox-rootfs
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev cppcheck coreutils bash \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -g 10001 sandbox \
+    && useradd -u 10001 -g 10001 -M -s /usr/sbin/nologin sandbox
+
+COPY runner/run-submission.sh /usr/local/bin/run-submission
+RUN chmod 0755 /usr/local/bin/run-submission
+
+# Assemble a clean OCI rootfs tree without special virtual filesystems (/proc, /sys, /dev devices)
+RUN mkdir -p /rootfs/tmp /rootfs/proc /rootfs/sys /rootfs/dev /rootfs/etc /rootfs/var /rootfs/run \
+    && chmod 1777 /rootfs/tmp \
+    && cp -a /usr /rootfs/usr \
+    && ln -s usr/bin /rootfs/bin \
+    && ln -s usr/sbin /rootfs/sbin \
+    && ln -s usr/lib /rootfs/lib \
+    && if [ -e /lib64 ]; then ln -s usr/lib64 /rootfs/lib64; fi \
+    && cp -a /etc/passwd /etc/group /etc/ld.so.cache /etc/ld.so.conf* /etc/alternatives /rootfs/etc/ 2>/dev/null || true
+
+# Stage 2: Build the Python NATS worker with standalone gVisor (runsc)
 FROM python:3.12-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates bzip2 \
+    && ARCH="$(uname -m)" \
+    && URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}" \
+    && cd /tmp \
+    && curl -fsSLO "${URL}/gvisor.tar.bz2" -O "${URL}/gvisor.tar.bz2.sha512" \
+    && sha512sum -c gvisor.tar.bz2.sha512 \
+    && tar -xjf gvisor.tar.bz2 -C /usr/local/bin \
+    && chmod -R a+rx /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1 /usr/local/bin/gvisor-bin \
+    && rm -f /tmp/gvisor.tar.bz2 /tmp/gvisor.tar.bz2.sha512 \
+    && apt-get purge -y --auto-remove curl bzip2 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=sandbox-rootfs /rootfs /opt/sandbox-rootfs
+
 WORKDIR /app
 
 COPY requirements.txt ./
@@ -8,6 +48,9 @@ COPY contracts.py worker.py ./
 COPY evaluation ./evaluation
 COPY sandbox ./sandbox
 
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
-USER 10001:10001
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    SANDBOX_BACKEND=runsc \
+    SANDBOX_ROOTFS_PATH=/opt/sandbox-rootfs
+
 CMD ["python", "worker.py"]

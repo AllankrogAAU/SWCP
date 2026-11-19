@@ -3,10 +3,12 @@ defineProps<{
   feedback: string
   loading: boolean
   error: string
+  canceling?: boolean
 }>()
 
 defineEmits<{
   retry: []
+  cancel: []
 }>()
 </script>
 
@@ -16,9 +18,20 @@ defineEmits<{
 
     <v-card-text>
       <!-- Loading -->
-      <div v-if="loading" class="d-flex align-center ga-3">
-        <v-progress-circular indeterminate size="24" />
-        <span>Reviewing your code...</span>
+      <div v-if="loading" class="d-flex align-center justify-space-between ga-3">
+        <div class="d-flex align-center ga-3">
+          <v-progress-circular indeterminate size="24" />
+          <span>Reviewing your code...</span>
+        </div>
+        <v-btn
+          size="small"
+          variant="text"
+          color="error"
+          :loading="canceling"
+          @click="$emit('cancel')"
+        >
+          Cancel
+        </v-btn>
       </div>
 
       <!-- Error -->

@@ -4,13 +4,34 @@ import { flushPromises } from '@vue/test-utils'
 import App from '../App.vue'
 
 const api = vi.hoisted(() => ({
+  ApiError: class ApiError extends Error {
+    status: number
+    activeSubmissionId?: string
+    submissionStatus?: string
+
+    constructor(
+      message: string,
+      status: number,
+      activeSubmissionId?: string,
+      submissionStatus?: string,
+    ) {
+      super(message)
+      this.name = 'ApiError'
+      this.status = status
+      this.activeSubmissionId = activeSubmissionId
+      this.submissionStatus = submissionStatus
+    }
+  },
+  cancelSubmission: vi.fn<(...args: unknown[]) => unknown>(),
   clearAccessToken: vi.fn<(...args: unknown[]) => unknown>(),
   getAccessToken: vi.fn<(...args: unknown[]) => unknown>(),
   getAssignments: vi.fn<(...args: unknown[]) => unknown>(),
+  getAssignmentState: vi.fn<(...args: unknown[]) => unknown>(),
+  saveAssignmentState: vi.fn<(...args: unknown[]) => unknown>(),
   getSubmissionHistory: vi.fn<(...args: unknown[]) => unknown>(),
   getSubmission: vi.fn<(...args: unknown[]) => unknown>(),
   login: vi.fn<(...args: unknown[]) => unknown>(),
-  openSubmissionSocket: vi.fn<(...args: unknown[]) => unknown>(),
+  streamSubmissionEvents: vi.fn<(...args: unknown[]) => unknown>(),
   register: vi.fn<(...args: unknown[]) => unknown>(),
   setAccessToken: vi.fn<(...args: unknown[]) => unknown>(),
   submitSource: vi.fn<(...args: unknown[]) => unknown>(),
@@ -25,7 +46,16 @@ vi.mock('../Components/CodeEditorBox.vue', () => ({
     props: ['busyAction', 'terminalOutput', 'modelValue', 'standardInput'],
     emits: ['submit', 'hint', 'run', 'update:standardInput'],
     template:
-      '<div><textarea data-test="stdin" :value="standardInput" @input="$emit(\'update:standardInput\', $event.target.value)" /><button data-test="submit" :disabled="busyAction !== null" @click="$emit(\'submit\')">Submit</button><button data-test="hint" :disabled="busyAction !== null" @click="$emit(\'hint\')">Hint</button><button data-test="run" :disabled="busyAction !== null" @click="$emit(\'run\')">Run</button><pre>{{ terminalOutput }}</pre></div>',
+      '<div><textarea data-test="code" :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" /><textarea data-test="stdin" :value="standardInput" @input="$emit(\'update:standardInput\', $event.target.value)" /><button data-test="submit" :disabled="busyAction !== null" @click="$emit(\'submit\')">Submit</button><button data-test="hint" :disabled="busyAction !== null" @click="$emit(\'hint\')">Hint</button><button data-test="run" :disabled="busyAction !== null" @click="$emit(\'run\')">Run</button><pre>{{ terminalOutput }}</pre></div>',
+  },
+}))
+
+vi.mock('../Components/AssignmentList.vue', () => ({
+  default: {
+    props: ['assignments', 'selectedId'],
+    emits: ['select'],
+    template:
+      '<div><button v-for="assignment in assignments" :key="assignment.id" :data-test="`assignment-${assignment.id}`" @click="$emit(\'select\', assignment.id)">{{ assignment.title }}</button></div>',
   },
 }))
 
@@ -38,10 +68,25 @@ describe('App', () => {
     api.getAssignments.mockResolvedValue([
       { id: 'assignment-id', title: 'Hello C', description: 'Print a greeting.' },
     ])
+    api.getAssignmentState.mockResolvedValue({
+      currentCode: 'initial code',
+      updatedAtUtc: '2026-11-10T00:00:00Z',
+    })
+    api.saveAssignmentState.mockResolvedValue(undefined)
     api.getSubmissionHistory.mockResolvedValue([])
     api.submitSource.mockResolvedValue({ submissionId: 'submission-id', status: 'SANDBOX_QUEUED' })
     api.requestHint.mockResolvedValue({ submissionId: 'hint-id', status: 'SANDBOX_QUEUED' })
     api.runSource.mockResolvedValue({ submissionId: 'run-id', status: 'SANDBOX_QUEUED' })
+    api.cancelSubmission.mockResolvedValue({
+      submissionId: 'submission-id',
+      assignmentId: 'assignment-id',
+      action: 'submit',
+      status: 'FAILED',
+      errorMessage: 'Canceled by user.',
+      sandboxOutput: null,
+      taskSolved: false,
+      llmFeedback: null,
+    })
     api.getSubmission.mockResolvedValue({
       submissionId: 'submission-id',
       assignmentId: 'assignment-id',
@@ -52,10 +97,7 @@ describe('App', () => {
       taskSolved: true,
       errorMessage: null,
     })
-    api.openSubmissionSocket.mockReturnValue({
-      close: vi.fn<(...args: unknown[]) => unknown>(),
-      addEventListener: vi.fn<(...args: unknown[]) => unknown>(),
-    })
+    api.streamSubmissionEvents.mockReturnValue(vi.fn())
   })
 
   it('shows the login and registration entry point when unauthenticated', () => {
@@ -79,7 +121,7 @@ describe('App', () => {
     await flushPromises()
 
     expect(api.submitSource).toHaveBeenCalledWith('assignment-id', expect.any(String), 'azure')
-    expect(api.openSubmissionSocket).toHaveBeenCalledWith(
+    expect(api.streamSubmissionEvents).toHaveBeenCalledWith(
       'submission-id',
       expect.any(Function),
       expect.any(Function),
@@ -153,6 +195,50 @@ describe('App', () => {
     expect(wrapper.html()).toContain('Task judged not solved')
   })
 
+  it('cancels a pending autosave when switching assignments', async () => {
+    vi.useFakeTimers()
+    let resolveSecondState!: (value: { currentCode: string; updatedAtUtc: string }) => void
+    api.getAssignments.mockResolvedValue([
+      { id: 'first', title: 'First', description: 'First assignment.' },
+      { id: 'second', title: 'Second', description: 'Second assignment.' },
+    ])
+    api.getAssignmentState.mockImplementation((id) => {
+      if (id === 'first') {
+        return Promise.resolve({
+          currentCode: 'first assignment code',
+          updatedAtUtc: '2026-11-10T00:00:00Z',
+        })
+      }
+      return new Promise((resolve) => {
+        resolveSecondState = resolve
+      })
+    })
+
+    const wrapper = mount(App)
+    await wrapper.find('v-form').trigger('submit')
+    await flushPromises()
+    await wrapper.get('[data-test="code"]').setValue('unsaved first assignment code')
+    await wrapper.get('[data-test="assignment-second"]').trigger('click')
+
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(api.saveAssignmentState).not.toHaveBeenCalled()
+
+    resolveSecondState({
+      currentCode: 'second assignment code',
+      updatedAtUtc: '2026-11-10T00:00:00Z',
+    })
+    await flushPromises()
+    await wrapper.get('[data-test="code"]').setValue('edited second assignment code')
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(api.saveAssignmentState).toHaveBeenCalledExactlyOnceWith(
+      'second',
+      'edited second assignment code',
+    )
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
   it('disables all code actions while a submission request is pending', async () => {
     const wrapper = mount(App)
     await wrapper.find('v-form').trigger('submit')
@@ -214,6 +300,49 @@ describe('App', () => {
 
     expect(wrapper.text()).toContain('Execution timed out in sandbox.')
     expect((wrapper.get('[data-test="submit"]').element as HTMLButtonElement).disabled).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('resumes tracking and allows canceling an active submission on 409 conflict', async () => {
+    const wrapper = mount(App)
+    await wrapper.find('v-form').trigger('submit')
+    await flushPromises()
+
+    api.requestHint.mockRejectedValueOnce(
+      new api.ApiError(
+        'Wait for your current code action to finish before starting another.',
+        409,
+        'stuck-hint-id',
+        'LLM_QUEUED',
+      ),
+    )
+    api.getSubmission.mockResolvedValueOnce({
+      submissionId: 'stuck-hint-id',
+      assignmentId: 'assignment-id',
+      action: 'hint',
+      status: 'LLM_QUEUED',
+      errorMessage: null,
+      sandboxOutput: null,
+      taskSolved: null,
+      llmFeedback: null,
+    })
+
+    await wrapper.get('[data-test="hint"]').trigger('click')
+    await flushPromises()
+
+    expect(api.getSubmission).toHaveBeenCalledWith('stuck-hint-id')
+    expect((wrapper.get('[data-test="hint"]').element as HTMLButtonElement).disabled).toBe(true)
+
+    const cancelButtons = wrapper
+      .findAll('button, v-btn')
+      .filter((btn) => btn.text().includes('Cancel'))
+    expect(cancelButtons.length).toBeGreaterThan(0)
+    await cancelButtons[0]!.trigger('click')
+    await flushPromises()
+
+    expect(api.cancelSubmission).toHaveBeenCalledWith('stuck-hint-id')
+    expect(wrapper.text()).toContain('Canceled by user.')
+    expect((wrapper.get('[data-test="hint"]').element as HTMLButtonElement).disabled).toBe(false)
     wrapper.unmount()
   })
 })

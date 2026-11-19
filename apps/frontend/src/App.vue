@@ -1,25 +1,29 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import CodeEditorBox from './Components/CodeEditorBox.vue'
 import AiFeedbackpanel from './Components/AiFeedbackpanel.vue'
 import AssignmentList from './Components/AssignmentList.vue'
 import {
+  ApiError,
+  cancelSubmission,
   clearAccessToken,
   getAccessToken,
   getAssignments,
+  getAssignmentState,
+  saveAssignmentState,
   getSubmissionHistory,
   getSubmission,
   login,
-  openSubmissionSocket,
   requestHint,
   register,
   runSource,
   setAccessToken,
+  streamSubmissionEvents,
   submitSource,
   type Assignment,
   type LlmBackend,
   type SubmissionAction,
-  type SubmissionNotification,
+  type SubmissionResponse,
   type SubmissionStatus,
 } from './services/api'
 
@@ -30,12 +34,12 @@ const selected = computed(() =>
   assignments.value.find((assignment) => assignment.id === selectedId.value),
 )
 const code = ref('#include <stdio.h>\n\nint main(void) {\n    return 0;\n}')
+const lastSavedAt = ref('')
 const standardInput = ref('')
 const feedback = ref('')
 const busyAction = ref<'hint' | 'run' | 'submit' | null>(null)
 const error = ref('')
 const terminalOutput = ref('')
-const progress = ref('')
 const status = ref<SubmissionStatus | ''>('')
 const backend = ref<LlmBackend>('azure')
 const username = ref('')
@@ -45,17 +49,47 @@ const authenticated = ref(Boolean(getAccessToken()))
 const authLoading = ref(false)
 const authError = ref('')
 const submissionId = ref('')
+const canceling = ref(false)
 const loading = computed(() => busyAction.value === 'submit' || busyAction.value === 'hint')
+const loadingAssignment = ref(false)
 const waitingForAction = computed(() => busyAction.value !== null)
-let socket: WebSocket | undefined
-let reconnectTimer: number | undefined
-let reconnectAttempts = 0
+let stopStream: (() => void) | undefined
 let pollGeneration = 0
+let assignmentLoadGeneration = 0
+let autosaveTimer: number | undefined
 
-function selectAssignment(id: string) {
+async function selectAssignment(id: string) {
+  const generation = ++assignmentLoadGeneration
+
+  window.clearTimeout(autosaveTimer)
+  autosaveTimer = undefined
   selectedId.value = id
-  code.value = '#include <stdio.h>\n\nint main(void) {\n    return 0;\n}'
+  lastSavedAt.value = ''
   standardInput.value = ''
+  loadingAssignment.value = true
+
+  try {
+    const state = await getAssignmentState(id)
+
+    if (generation !== assignmentLoadGeneration) {
+      return
+    }
+
+    code.value = state.currentCode
+    lastSavedAt.value = state.updatedAtUtc
+  } catch (error) {
+    console.error('FAILED TO LOAD STATE', error)
+    if (generation !== assignmentLoadGeneration) {
+      return
+    }
+
+    code.value = '#include <stdio.h>\n\nint main(void) {\n    return 0;\n}'
+  } finally {
+    if (generation === assignmentLoadGeneration) {
+      loadingAssignment.value = false
+    }
+  }
+
   feedback.value = ''
   error.value = ''
   terminalOutput.value = ''
@@ -74,8 +108,23 @@ async function loadAssignments() {
     }
   }
   solvedByAssignmentId.value = latestSubmitByAssignment
-  if (!assignments.value.some((assignment) => assignment.id === selectedId.value)) {
-    selectedId.value = assignments.value[0]?.id ?? ''
+
+  const firstId = assignments.value[0]?.id
+
+  if (firstId) {
+    console.log('CALLING SELECT ASSIGNMENT')
+    await selectAssignment(firstId)
+  }
+
+  const activeSubmission = submissions.find(
+    (submission) => submission.status !== 'COMPLETED' && submission.status !== 'FAILED',
+  )
+  if (activeSubmission && busyAction.value === null) {
+    busyAction.value = activeSubmission.action
+    trackSubmission(
+      { submissionId: activeSubmission.submissionId, status: activeSubmission.status },
+      activeSubmission.action,
+    )
   }
 }
 
@@ -96,67 +145,67 @@ async function authenticate() {
 }
 
 function logout() {
+  window.clearTimeout(autosaveTimer)
+  autosaveTimer = undefined
+
   clearAccessToken()
   authenticated.value = false
   assignments.value = []
   submissionId.value = ''
   busyAction.value = null
   pollGeneration++
-  window.clearTimeout(reconnectTimer)
-  socket?.close()
+  stopStream?.()
+  stopStream = undefined
 }
 
-function onProgress(notification: SubmissionNotification) {
-  progress.value = notification.message
-  if (notification.stage) status.value = notification.stage as SubmissionStatus
-}
-
-function connectSocket(id: string, generation: number) {
-  socket = openSubmissionSocket(id, onProgress, () => {
-    if (generation !== pollGeneration || !waitingForAction.value || reconnectAttempts >= 5) return
-    const delay = Math.min(1000 * 2 ** reconnectAttempts, 10000)
-    reconnectAttempts++
-    progress.value = 'Reconnecting to live updates; status polling remains active'
-    reconnectTimer = window.setTimeout(() => connectSocket(id, generation), delay)
-  })
-  socket.addEventListener('open', () => {
-    reconnectAttempts = 0
-  })
+function applyCompletion(result: SubmissionResponse) {
+  status.value = result.status
+  if (result.status === 'COMPLETED') {
+    if (result.action === 'submit') {
+      solvedByAssignmentId.value[result.assignmentId] = result.taskSolved
+    }
+    error.value = ''
+    feedback.value =
+      result.action === 'run'
+        ? ''
+        : (result.llmFeedback ?? JSON.stringify(result.sandboxOutput, null, 2))
+    terminalOutput.value = formatTerminalOutput(result.sandboxOutput)
+    busyAction.value = null
+    stopStream?.()
+    stopStream = undefined
+    pollGeneration++
+    return
+  }
+  if (result.status === 'FAILED') {
+    error.value = result.errorMessage ?? 'The submission failed.'
+    terminalOutput.value = error.value
+    if (result.action === 'submit') {
+      solvedByAssignmentId.value[result.assignmentId] = result.taskSolved
+    }
+    busyAction.value = null
+    stopStream?.()
+    stopStream = undefined
+    pollGeneration++
+    return
+  }
 }
 
 async function pollSubmission(id: string, generation: number) {
-  while (generation === pollGeneration) {
+  while (generation === pollGeneration && busyAction.value !== null) {
     try {
       const result = await getSubmission(id)
+      if (generation !== pollGeneration) return
+      if (result.status === 'COMPLETED' || result.status === 'FAILED') {
+        applyCompletion(result)
+        return
+      }
       status.value = result.status
-      if (result.status === 'COMPLETED') {
-        if (result.action === 'submit') {
-          solvedByAssignmentId.value[result.assignmentId] = result.taskSolved
-        }
-        feedback.value =
-          result.action === 'run'
-            ? ''
-            : (result.llmFeedback ?? JSON.stringify(result.sandboxOutput, null, 2))
-        terminalOutput.value = formatTerminalOutput(result.sandboxOutput)
-        progress.value = 'Completed'
-        busyAction.value = null
-        socket?.close()
-        return
-      }
-      if (result.status === 'FAILED') {
-        error.value = result.errorMessage ?? 'The submission failed.'
-        terminalOutput.value = error.value
-        if (result.action === 'submit') {
-          solvedByAssignmentId.value[result.assignmentId] = result.taskSolved
-        }
-        progress.value = 'Failed'
-        busyAction.value = null
-        socket?.close()
-        return
-      }
     } catch (cause) {
+      if (generation !== pollGeneration) return
       error.value = cause instanceof Error ? cause.message : 'Could not retrieve submission status.'
       busyAction.value = null
+      stopStream?.()
+      stopStream = undefined
       return
     }
 
@@ -166,21 +215,56 @@ async function pollSubmission(id: string, generation: number) {
 
 function trackSubmission(
   accepted: { submissionId: string; status: SubmissionStatus },
-  action: SubmissionAction,
+  _action: SubmissionAction,
 ) {
   submissionId.value = accepted.submissionId
   status.value = accepted.status
-  progress.value =
-    action === 'run'
-      ? 'Queued for sandbox run'
-      : action === 'hint'
-        ? 'Queued for a hint'
-        : 'Queued for sandbox evaluation'
-  reconnectAttempts = 0
   const generation = ++pollGeneration
-  socket?.close()
-  connectSocket(accepted.submissionId, generation)
+  stopStream?.()
+  stopStream = streamSubmissionEvents(
+    accepted.submissionId,
+    (result) => {
+      if (generation !== pollGeneration) return
+      applyCompletion(result)
+    },
+    () => {
+      // SSE connection error: fallback polling continues
+    },
+  )
   void pollSubmission(accepted.submissionId, generation)
+}
+
+function resumeIfConflict(cause: unknown, action: SubmissionAction): boolean {
+  if (cause instanceof ApiError && cause.status === 409 && cause.activeSubmissionId) {
+    error.value = cause.message
+    trackSubmission(
+      {
+        submissionId: cause.activeSubmissionId,
+        status: cause.submissionStatus ?? 'PENDING',
+      },
+      action,
+    )
+    return true
+  }
+  return false
+}
+
+async function cancelActiveSubmission() {
+  if (!submissionId.value || canceling.value) return
+  canceling.value = true
+  try {
+    await cancelSubmission(submissionId.value)
+    pollGeneration++
+    stopStream?.()
+    stopStream = undefined
+    busyAction.value = null
+    status.value = 'FAILED'
+    error.value = 'Canceled by user.'
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Could not cancel submission.'
+  } finally {
+    canceling.value = false
+  }
 }
 
 async function requestFeedback() {
@@ -189,15 +273,16 @@ async function requestFeedback() {
   error.value = ''
   feedback.value = ''
   solvedByAssignmentId.value[selected.value.id] = null
-  progress.value = 'Submitting code'
   terminalOutput.value = ''
   status.value = 'PENDING'
   try {
     const accepted = await submitSource(selected.value.id, code.value, backend.value)
     trackSubmission(accepted, 'submit')
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : 'Could not submit code.'
-    busyAction.value = null
+    if (!resumeIfConflict(cause, 'submit')) {
+      error.value = cause instanceof Error ? cause.message : 'Could not submit code.'
+      busyAction.value = null
+    }
   }
 }
 
@@ -210,8 +295,10 @@ async function requestCodeHint() {
     const accepted = await requestHint(selected.value.id, code.value, backend.value)
     trackSubmission(accepted, 'hint')
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : 'Could not request a hint.'
-    busyAction.value = null
+    if (!resumeIfConflict(cause, 'hint')) {
+      error.value = cause instanceof Error ? cause.message : 'Could not request a hint.'
+      busyAction.value = null
+    }
   }
 }
 
@@ -230,8 +317,10 @@ async function runCode() {
     )
     trackSubmission(accepted, 'run')
   } catch (cause) {
-    terminalOutput.value = cause instanceof Error ? cause.message : 'Run is not available yet.'
-    busyAction.value = null
+    if (!resumeIfConflict(cause, 'run')) {
+      terminalOutput.value = cause instanceof Error ? cause.message : 'Run is not available yet.'
+      busyAction.value = null
+    }
   }
 }
 
@@ -277,6 +366,29 @@ function formatTerminalOutput(output: unknown): string {
   return lines.join('\n') || JSON.stringify(output, null, 2)
 }
 
+watch(code, () => {
+  if (loadingAssignment.value) {
+    return
+  }
+
+  const assignmentId = selectedId.value
+  if (!assignmentId) return
+  const codeToSave = code.value
+
+  window.clearTimeout(autosaveTimer)
+
+  autosaveTimer = window.setTimeout(async () => {
+    try {
+      await saveAssignmentState(assignmentId, codeToSave)
+      if (selectedId.value === assignmentId) {
+        lastSavedAt.value = new Date().toISOString()
+      }
+    } catch (error) {
+      console.error('AUTOSAVE FAILED', error)
+    }
+  }, 1000)
+})
+
 onMounted(async () => {
   if (authenticated.value) {
     try {
@@ -289,6 +401,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   pollGeneration++
+  window.clearTimeout(autosaveTimer)
   window.clearTimeout(reconnectTimer)
   socket?.close()
 })
@@ -366,13 +479,14 @@ onBeforeUnmount(() => {
                 item-value="value"
                 class="backend-select"
               />
-              <v-alert v-if="progress" type="info" variant="tonal" class="mb-2">
-                {{ status }} · {{ progress }}
-                <span v-if="submissionId" class="ml-2">{{ submissionId }}</span>
-              </v-alert>
 
               <v-row class="mt-2">
                 <v-col cols="12" md="7">
+                  <div v-if="lastSavedAt" class="text-caption text-grey mb-2">
+                    Last saved:
+                    {{ new Date(lastSavedAt).toLocaleString() }}
+                  </div>
+
                   <CodeEditorBox
                     v-model="code"
                     v-model:standard-input="standardInput"
@@ -388,7 +502,9 @@ onBeforeUnmount(() => {
                     :feedback="feedback"
                     :loading="loading"
                     :error="error"
+                    :canceling="canceling"
                     @retry="requestFeedback"
+                    @cancel="cancelActiveSubmission"
                   />
                 </v-col>
               </v-row>

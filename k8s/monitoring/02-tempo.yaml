@@ -72,6 +72,8 @@ spec:
       labels:
         app: tempo
     spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       securityContext:
         runAsUser: 10001
         runAsGroup: 10001

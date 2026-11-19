@@ -25,16 +25,19 @@ from pydantic import ValidationError
 
 from contracts import CompilationResult, SandboxResult, SandboxTask, SandboxTestResult
 from evaluation.evaluator import evaluate
-from sandbox.interface import Limits
+from sandbox.interface import Limits, PermanentSandboxError
 from sandbox.k8s_pod import KubeSandboxProvider, PodConfig
+from sandbox.runsc_oci import RunscConfig, RunscSandboxProvider
 
 NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
 TASK_STREAM = "SANDBOX_TASKS"
 TASK_SUBJECT = "sandbox.tasks"
 TASK_DURABLE = "c-sandbox-workers"
 RESULT_SUBJECT = "sandbox.results"
+SANDBOX_BACKEND = os.getenv("SANDBOX_BACKEND", "runsc").strip().lower()
 MAX_CONCURRENT = int(os.getenv("SANDBOX_MAX_CONCURRENT", "8"))
 POOL_SIZE = int(os.getenv("SANDBOX_POOL_SIZE", "4"))
+POOL_WORKERS = max(1, int(os.getenv("SANDBOX_POOL_WORKERS", "3")))
 MAX_ACK_PENDING = int(os.getenv("SANDBOX_MAX_ACK_PENDING", "512"))
 HEALTH_FILE = os.getenv("SANDBOX_HEALTH_FILE", "/tmp/healthy")
 
@@ -94,6 +97,33 @@ else:
     trace.set_tracer_provider(tracer_provider)
 
 tracer = trace.get_tracer("c-sandbox-worker")
+
+
+async def _fail_message(message, jetstream, task, error_text: str) -> None:
+    await jetstream.publish(
+        "sandbox.tasks.dlq",
+        message.data,
+        headers={"Nats-Msg-Id": f"{task.submissionId}-sandbox-dlq"},
+    )
+    failed_result = SandboxResult(
+        submissionId=task.submissionId,
+        compilation=CompilationResult(
+            success=False,
+            stdout="",
+            stderr=error_text,
+            exitCode=None,
+            durationMilliseconds=None,
+        ),
+        staticAnalysis=[],
+        testResults=[],
+        errorClassification=f"worker-error:{error_text}",
+    )
+    await jetstream.publish(
+        RESULT_SUBJECT,
+        failed_result.model_dump_json().encode("utf-8"),
+        headers={"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"},
+    )
+    await message.ack()
 
 
 def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
@@ -169,7 +199,7 @@ def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
                     exitCode=None if compiled else 1,
                     durationMilliseconds=result.compile_ms,
                 ),
-                staticAnalysis=[],
+                staticAnalysis=list(result.static_analysis),
                 testResults=test_results,
                 errorClassification=";".join([status, *limitations]),
             )
@@ -258,6 +288,23 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
                     "outcome": result.errorClassification,
                 },
             )
+    except PermanentSandboxError as exception:
+        error_text = str(exception)
+        logger.exception(
+            "Sandbox evaluation failed permanently",
+            extra={
+                "event_name": "pipeline.stage.failed",
+                "stage": "sandbox",
+                "submission_id": str(task.submissionId),
+                "traceparent": trace_parent,
+                "duration_ms": round((time.perf_counter() - stage_started) * 1000),
+                "attempt": attempt,
+                "status": "failed",
+                "error_type": type(exception).__name__,
+            },
+        )
+        await _fail_message(message, jetstream, task, error_text)
+        return
     except Exception:
         delivered = getattr(getattr(message, "metadata", None), "num_delivered", 1)
         if delivered >= 3:
@@ -275,30 +322,7 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
                     "error_type": "RetriesExhausted",
                 },
             )
-            await jetstream.publish(
-                "sandbox.tasks.dlq",
-                message.data,
-                headers={"Nats-Msg-Id": f"{task.submissionId}-sandbox-dlq"},
-            )
-            failed_result = SandboxResult(
-                submissionId=task.submissionId,
-                compilation=CompilationResult(
-                    success=False,
-                    stdout="",
-                    stderr=error_text,
-                    exitCode=None,
-                    durationMilliseconds=None,
-                ),
-                staticAnalysis=[],
-                testResults=[],
-                errorClassification=f"worker-error:{error_text}",
-            )
-            await jetstream.publish(
-                RESULT_SUBJECT,
-                failed_result.model_dump_json().encode("utf-8"),
-                headers={"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"},
-            )
-            await message.ack()
+            await _fail_message(message, jetstream, task, error_text)
             logger.error(
                 "Sandbox retries exhausted for submission %s; sent to DLQ",
                 task.submissionId,
@@ -321,8 +345,6 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
         )
         await asyncio.sleep(delay)
         await message.nak()
-    finally:
-        tracer_provider.force_flush()
 
 
 async def run_worker() -> None:
@@ -344,17 +366,25 @@ async def run_worker() -> None:
         )
     consumer = await jetstream.pull_subscribe_bind(TASK_DURABLE, stream=TASK_STREAM)
 
-    provider = KubeSandboxProvider(PodConfig.from_env(), pool_size=POOL_SIZE)
+    if SANDBOX_BACKEND == "k8s":
+        provider = KubeSandboxProvider(
+            PodConfig.from_env(), pool_size=POOL_SIZE, pool_workers=POOL_WORKERS
+        )
+    else:
+        provider = RunscSandboxProvider(RunscConfig.from_env())
+
     executor = ThreadPoolExecutor(
         max_workers=MAX_CONCURRENT, thread_name_prefix="sandbox"
     )
     slots = asyncio.Semaphore(MAX_CONCURRENT)
     running: set[asyncio.Task] = set()
     logger.info(
-        "Consuming %s (max_concurrent=%d, pool_size=%d)",
+        "Consuming %s (backend=%s, max_concurrent=%d, pool_size=%d, pool_workers=%d)",
         TASK_SUBJECT,
+        SANDBOX_BACKEND,
         MAX_CONCURRENT,
         POOL_SIZE,
+        POOL_WORKERS,
     )
 
     async def process(message) -> None:
@@ -407,6 +437,7 @@ async def run_worker() -> None:
         if running:
             await asyncio.wait(running, timeout=30)
         executor.shutdown(wait=False, cancel_futures=True)
+        tracer_provider.force_flush()
         provider.close()
         await connection.drain()
         await connection.close()

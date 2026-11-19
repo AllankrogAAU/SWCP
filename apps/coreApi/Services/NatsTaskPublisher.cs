@@ -9,6 +9,10 @@ namespace coreApi.Services;
 public class NatsTaskPublisher
 {
     private readonly INatsJSContext? _jetStream;
+    private readonly SemaphoreSlim _sandboxInitLock = new(1, 1);
+    private bool _sandboxStreamsInitialized;
+    private readonly SemaphoreSlim _llmInitLock = new(1, 1);
+    private bool _llmStreamInitialized;
 
     public NatsTaskPublisher()
     {
@@ -19,24 +23,62 @@ public class NatsTaskPublisher
         _jetStream = jetStream;
     }
 
+    private async ValueTask EnsureSandboxStreamsAsync(CancellationToken cancellationToken)
+    {
+        if (_sandboxStreamsInitialized || _jetStream is null) return;
+        await _sandboxInitLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_sandboxStreamsInitialized) return;
+            await _jetStream.CreateOrUpdateStreamAsync(
+                new StreamConfig(Messaging.SandboxTasksStream, [Messaging.SandboxTaskSubject])
+                {
+                    Retention = StreamConfigRetention.Workqueue,
+                    DuplicateWindow = TimeSpan.FromMinutes(10)
+                }, cancellationToken);
+            await _jetStream.CreateOrUpdateStreamAsync(
+                new StreamConfig(Messaging.SandboxTasksDlqStream, [Messaging.SandboxTasksDlqSubject])
+                {
+                    Retention = StreamConfigRetention.Limits,
+                    MaxAge = TimeSpan.FromDays(7)
+                }, cancellationToken);
+            _sandboxStreamsInitialized = true;
+        }
+        finally
+        {
+            _sandboxInitLock.Release();
+        }
+    }
+
+    private async ValueTask EnsureLlmStreamAsync(CancellationToken cancellationToken)
+    {
+        if (_llmStreamInitialized || _jetStream is null) return;
+        await _llmInitLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_llmStreamInitialized) return;
+            await _jetStream.CreateOrUpdateStreamAsync(
+                new StreamConfig(Messaging.LlmTasksStream,
+                    [Messaging.LlmAzureTaskSubject, Messaging.LlmLocalTaskSubject])
+                {
+                    Retention = StreamConfigRetention.Workqueue,
+                    DuplicateWindow = TimeSpan.FromMinutes(10)
+                }, cancellationToken);
+            _llmStreamInitialized = true;
+        }
+        finally
+        {
+            _llmInitLock.Release();
+        }
+    }
+
     public virtual async Task PublishSandboxTaskAsync(
         SandboxTask task,
         CancellationToken cancellationToken,
         int attempt = 0)
     {
         if (_jetStream is null) return;
-        await _jetStream.CreateOrUpdateStreamAsync(
-            new StreamConfig(Messaging.SandboxTasksStream, [Messaging.SandboxTaskSubject])
-            {
-                Retention = StreamConfigRetention.Workqueue,
-                DuplicateWindow = TimeSpan.FromMinutes(10)
-            }, cancellationToken);
-        await _jetStream.CreateOrUpdateStreamAsync(
-            new StreamConfig(Messaging.SandboxTasksDlqStream, [Messaging.SandboxTasksDlqSubject])
-            {
-                Retention = StreamConfigRetention.Limits,
-                MaxAge = TimeSpan.FromDays(7)
-            }, cancellationToken);
+        await EnsureSandboxStreamsAsync(cancellationToken);
 
         var headers = new NatsHeaders
         {
@@ -53,13 +95,7 @@ public class NatsTaskPublisher
     public virtual async Task PublishLlmTaskAsync(LlmTask task, CancellationToken cancellationToken)
     {
         if (_jetStream is null) return;
-        await _jetStream.CreateOrUpdateStreamAsync(
-            new StreamConfig(Messaging.LlmTasksStream,
-                [Messaging.LlmAzureTaskSubject, Messaging.LlmLocalTaskSubject])
-            {
-                Retention = StreamConfigRetention.Workqueue,
-                DuplicateWindow = TimeSpan.FromMinutes(10)
-            }, cancellationToken);
+        await EnsureLlmStreamAsync(cancellationToken);
 
         var subject = task.Backend == "local"
             ? Messaging.LlmLocalTaskSubject

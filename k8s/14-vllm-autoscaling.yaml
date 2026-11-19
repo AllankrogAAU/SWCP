@@ -47,7 +47,7 @@ spec:
     kind: Deployment
     name: llm-worker
   minReplicaCount: 2
-  maxReplicaCount: 12
+  maxReplicaCount: 6
   cooldownPeriod: 300
   pollingInterval: 15
   advanced:

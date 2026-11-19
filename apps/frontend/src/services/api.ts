@@ -15,6 +15,11 @@ export interface Assignment {
   description: string
 }
 
+export interface AssignmentState {
+  currentCode: string
+  updatedAtUtc: string
+}
+
 export interface LoginResponse {
   accessToken: string
   tokenType: string
@@ -50,19 +55,31 @@ export interface SubmissionResponse {
   updatedAtUtc: string
 }
 
-export interface SubmissionNotification {
-  submissionId: string
-  eventType: string
-  stage: string
-  message: string
-  percentComplete: number
-  timestampUtc: string
-}
-
 interface ApiProblem {
   title?: string
   detail?: string
   error?: string
+  activeSubmissionId?: string
+  status?: SubmissionStatus
+}
+
+export class ApiError extends Error {
+  readonly status: number
+  readonly activeSubmissionId?: string
+  readonly submissionStatus?: SubmissionStatus
+
+  constructor(
+    message: string,
+    status: number,
+    activeSubmissionId?: string,
+    submissionStatus?: SubmissionStatus,
+  ) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.activeSubmissionId = activeSubmissionId
+    this.submissionStatus = submissionStatus
+  }
 }
 
 const tokenKey = 'swcp.accessToken'
@@ -98,7 +115,12 @@ async function request<T>(path: string, init: RequestInit = {}, authenticated = 
       // Preserve non-JSON error bodies as-is.
     }
     const message = [problem?.title ?? problem?.error, problem?.detail].filter(Boolean).join(': ')
-    throw new Error(message || body || `Request failed (${response.status})`)
+    throw new ApiError(
+      message || body || `Request failed (${response.status})`,
+      response.status,
+      problem?.activeSubmissionId,
+      problem?.status,
+    )
   }
 
   if (response.status === 204) return undefined as T
@@ -123,6 +145,19 @@ export function login(username: string, password: string) {
 
 export function getAssignments() {
   return request<Assignment[]>('/api/assignments/')
+}
+
+export function getAssignmentState(assignmentId: string) {
+  return request<AssignmentState>(`/api/assignments/${assignmentId}/state`)
+}
+
+export function saveAssignmentState(assignmentId: string, currentCode: string) {
+  return request<void>(`/api/assignments/${assignmentId}/state`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      currentCode,
+    }),
+  })
 }
 
 export function getSubmissionHistory() {
@@ -159,25 +194,74 @@ export function getSubmission(submissionId: string) {
   return request<SubmissionResponse>(`/api/submissions/${submissionId}`)
 }
 
-export function openSubmissionSocket(
-  submissionId: string,
-  onNotification: (notification: SubmissionNotification) => void,
-  onClose: () => void,
-): WebSocket {
-  const token = getAccessToken()
-  const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const url = new URL(`/ws/submissions/${submissionId}`, `${scheme}//${window.location.host}`)
-
-  const protocols = token ? ['swcp', `bearer.${token}`] : ['swcp']
-  const socket = new WebSocket(url, protocols)
-  socket.addEventListener('message', (event) => {
-    try {
-      onNotification(JSON.parse(String(event.data)) as SubmissionNotification)
-    } catch {
-      onClose()
-    }
+export function cancelSubmission(submissionId: string) {
+  return request<SubmissionResponse>(`/api/submissions/${submissionId}/cancel`, {
+    method: 'POST',
   })
-  socket.addEventListener('close', onClose)
-  socket.addEventListener('error', onClose)
-  return socket
+}
+
+export function streamSubmissionEvents(
+  submissionId: string,
+  onCompleted: (result: SubmissionResponse) => void,
+  onError: () => void,
+): () => void {
+  const token = getAccessToken()
+  const controller = new AbortController()
+
+  const headers: Record<string, string> = {
+    Accept: 'text/event-stream',
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
+  fetch(`/api/submissions/${submissionId}/events`, {
+    headers,
+    signal: controller.signal,
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('No body')
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() ?? ''
+
+        for (const block of parts) {
+          if (!block.trim() || block.startsWith(':')) continue
+          let eventType = 'message'
+          let dataStr = ''
+          for (const line of block.split('\n')) {
+            if (line.startsWith('event: ')) {
+              eventType = line.slice(7).trim()
+            } else if (line.startsWith('data: ')) {
+              dataStr += line.slice(6)
+            }
+          }
+          if (dataStr && eventType === 'completed') {
+            try {
+              const parsed = JSON.parse(dataStr)
+              onCompleted(parsed as SubmissionResponse)
+            } catch {
+              // Ignore invalid JSON
+            }
+          }
+        }
+      }
+    })
+    .catch(() => {
+      if (!controller.signal.aborted) {
+        onError()
+      }
+    })
+
+  return () => controller.abort()
 }
