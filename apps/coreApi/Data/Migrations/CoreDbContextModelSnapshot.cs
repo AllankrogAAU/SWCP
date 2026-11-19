@@ -84,6 +84,9 @@ namespace coreApi.Data.Migrations
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<double?>("ConfidenceScorePercent")
+                        .HasColumnType("double precision");
+
                     b.Property<string>("ErrorMessage")
                         .HasColumnType("text");
 

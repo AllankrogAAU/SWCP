@@ -50,6 +50,7 @@ export interface SubmissionResponse {
   sandboxOutput: unknown | null
   llmFeedback: string | null
   taskSolved: boolean | null
+  confidenceScorePercent: number | null
   errorMessage: string | null
   createdAtUtc: string
   updatedAtUtc: string

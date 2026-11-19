@@ -400,6 +400,7 @@ public static class SubmissionEndpoints
         item.GetSandboxOutput(),
         item.LlmFeedback,
         item.TaskSolved,
+        item.ConfidenceScorePercent,
         item.ErrorMessage,
         item.CreatedAtUtc,
         item.UpdatedAtUtc);
