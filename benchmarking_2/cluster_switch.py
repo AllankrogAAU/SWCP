@@ -25,11 +25,20 @@ def discover_local_models(models_dir: Path) -> list[str]:
 
 def _served_name(directory_name: str) -> str:
     special_names = {
-        "DeepSeek-R1-Distill-Qwen-7B-AWQ": "deepseek-r1-distill-qwen-7b-awq",
-        "Mistral-Nemo-Instruct-2407-12B-AWQ": "mistral-nemo-instruct-2407-awq",
+        "deepseek-r1-distill-qwen-7b-awq": "deepseek-r1-distill-qwen-7b-awq",
+        "deepseek-r1-distill-llama-8b-awq": "deepseek-r1-distill-llama-8b-awq",
+        "gemma-2-9b-it-awq-int4": "gemma-2-9b-it-awq-int4",
+        "mistral-nemo-instruct-2407-12b-awq": "mistral-nemo-instruct-2407-awq",
+        "mistral-nemo-instruct-2407-awq": "mistral-nemo-instruct-2407-awq",
+        "qwen2.5-coder-3b-instruct-awq": "qwen2.5-coder-3b-instruct-awq",
+        "qwen2.5-coder-7b-instruct-awq": "qwen2.5-coder-7b-instruct-awq",
+        "qwen2.5-coder-14b-instruct-awq": "qwen2.5-coder-14b-instruct-awq",
+        "qwen3-14b-awq": "qwen3-14b-awq",
+        "qwen3.5-9b-awq-4bit": "qwen35-9b-awq-4bit",
     }
-    if directory_name in special_names:
-        return special_names[directory_name]
+    lower_name = directory_name.strip().lower()
+    if lower_name in special_names:
+        return special_names[lower_name]
     name = directory_name.strip()
     name = re.sub(r"[_ ]+", "-", name)
     name = re.sub(r"-+", "-", name)

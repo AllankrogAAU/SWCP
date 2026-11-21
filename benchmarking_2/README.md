@@ -44,6 +44,22 @@ judge configuration.
 The same deterministic sample is used for every model. Two ordinary pipeline submissions are
 sent after each model switch and stored as warm-up records, excluded from measured results.
 
+The automatic local-model list is discovered from `apps/localLLM/models/`. The current
+directories are:
+
+```text
+deepseek-r1-distill-llama-8b-awq
+deepseek-r1-distill-qwen-7b-awq
+gemma-2-9b-it-awq-int4
+meta-llama-3.1-8b-instruct-awq-int4
+mistral-nemo-instruct-2407-awq
+qwen2.5-coder-3b-instruct-awq
+qwen2.5-coder-7b-instruct-awq
+qwen2.5-coder-14b-instruct-awq
+qwen3-14b-awq
+qwen35-9b-awq-4bit
+```
+
 Set `TARGET_URL`, `BENCHMARK_MODELS`, `JUDGE_URL` and `JUDGE_API_KEY`, or pass the corresponding
 CLI options. For Azure Foundry, set `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`,
 `AZURE_OPENAI_API_KEY`, and optionally `AZURE_OPENAI_API_VERSION`.
