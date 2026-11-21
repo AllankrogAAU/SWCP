@@ -3,10 +3,20 @@
 This benchmark compares model feedback through the real SWCP submission API. It does not use
 the deterministic solution-leak detector, TTFT, token throughput, or cost metrics.
 
-Install the benchmark-only dependencies with:
+Install the benchmark-only dependencies in a virtual environment:
 
 ```bash
+python3 -m venv .venv-benchmarking2
+. .venv-benchmarking2/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -r benchmarking_2/requirements.txt
+```
+
+Activate the environment again before every benchmark command in a new shell:
+
+```bash
+cd /home/test/SWCP
+. .venv-benchmarking2/bin/activate
 ```
 
 ## Commands
