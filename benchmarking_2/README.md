@@ -32,9 +32,9 @@ with `category_folders`, `assignments`, and `submissions` tables. The benchmark 
 or refreshes this database automatically when it runs.
 
 ```bash
-python -m benchmarking_2 latency --models local:qwen,azure:GPT-6-sol
-python -m benchmarking_2 complete --models local:qwen,azure:GPT-6-sol
-python -m benchmarking_2 test-test --models local:qwen
+python -m benchmarking_2 latency --models local:qwen2.5-coder-14b-instruct-awq,azure:GPT-6-sol
+python -m benchmarking_2 complete --models local:qwen2.5-coder-14b-instruct-awq,azure:GPT-6-sol
+python -m benchmarking_2 test-test --models local:qwen2.5-coder-14b-instruct-awq
 ```
 
 `complete` and `latency` use 100 records from every category. `test-test` uses 50 records from

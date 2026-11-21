@@ -19,6 +19,7 @@ from .judge import CloudJudge
 from .pipeline import PipelineClient, Result
 from .storage import Store
 from .cluster_switch import switch_local_model
+from .cluster_switch import resolve_model_path
 
 
 def arguments() -> argparse.Namespace:
@@ -66,6 +67,19 @@ def switch_model(config: Config, command: str | None, model: ModelSpec) -> None:
         return
     logging.getLogger(__name__).info("Switching vLLM to local model %s.", model.name)
     switch_local_model(model.name, config.models_dir)
+
+
+def validate_model_arguments(models: list[ModelSpec], models_dir: Path) -> None:
+    if not models:
+        raise ValueError("At least one model is required.")
+    for model in models:
+        if model.backend == "local":
+            if "your" in model.name.lower() or "placeholder" in model.name.lower():
+                raise ValueError(
+                    f"Invalid placeholder local model '{model.name}'. "
+                    "Use one of the model names printed by --help discovery or a real directory name."
+                )
+            resolve_model_path(model.name, models_dir)
 
 
 def print_status(results_dir: Path) -> int:
@@ -176,6 +190,7 @@ async def run(args: argparse.Namespace) -> Path:
     if args.mode == "test-test":
         if len(config.models) != 1 or config.models[0].backend != "local":
             raise ValueError("test-test requires exactly one local model, e.g. --models local:qwen.")
+    validate_model_arguments(config.models, config.models_dir)
     source_records = load_submissions(config.data_path)
     source_hash = dataset_hash(source_records)
     dataset_store.rebuild(config.data_path)

@@ -43,7 +43,7 @@ def resolve_model_path(directory_name: str, models_dir: Path) -> tuple[str, str]
 
     exact = models_dir / directory_name
     if exact.is_dir() and (exact / "config.json").is_file():
-        return exact.name, exact.name
+        return exact.name, _served_name(exact.name)
 
     wanted = _normalize(directory_name)
     candidates = [
