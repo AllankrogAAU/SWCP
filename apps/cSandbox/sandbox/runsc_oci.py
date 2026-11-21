@@ -145,6 +145,7 @@ class RunscSandbox:
         self._cfg = cfg
         self.name = f"sbx-{uuid.uuid4().hex[:12]}"
         self._bundle_dir: Path | None = None
+        self.from_pool = False
 
     def _build_runsc_cmd(self, bundle_dir: Path) -> list[str]:
         cmd = [

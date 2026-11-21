@@ -65,7 +65,13 @@ public sealed record SandboxResult(
     [property: JsonPropertyName("compilation")] CompilationResult Compilation,
     [property: JsonPropertyName("staticAnalysis")] IReadOnlyList<StaticAnalysisWarning> StaticAnalysis,
     [property: JsonPropertyName("testResults")] IReadOnlyList<SandboxTestResult> TestResults,
-    [property: JsonPropertyName("errorClassification")] string? ErrorClassification = null);
+    [property: JsonPropertyName("errorClassification")] string? ErrorClassification = null,
+    [property: JsonPropertyName("sandboxBackend")] string? SandboxBackend = null,
+    [property: JsonPropertyName("sandboxRuntime")] string? SandboxRuntime = null,
+    [property: JsonPropertyName("sandboxAcquireMs")] int? SandboxAcquireMs = null,
+    [property: JsonPropertyName("sandboxAcquireSource")] string? SandboxAcquireSource = null,
+    [property: JsonPropertyName("sandboxCompileMs")] int? SandboxCompileMs = null,
+    [property: JsonPropertyName("sandboxRunMs")] int? SandboxRunMs = null);
 
 public sealed record CompilationResult(
     [property: JsonPropertyName("success")] bool Success,

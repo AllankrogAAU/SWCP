@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS submissions (
   http_accepted_ms REAL, pipeline_total_ms REAL, sandbox_queue_ms REAL,
   sandbox_exec_ms REAL, llm_queue_ms REAL, llm_exec_ms REAL,
   orchestration_ms REAL, delivery_ms REAL, confidence_json TEXT,
+  sandbox_acquire_ms REAL, sandbox_acquire_source TEXT,
+  sandbox_compile_ms REAL, sandbox_run_ms REAL,
+  sandbox_backend TEXT, sandbox_runtime TEXT,
+  sandbox_worker_node TEXT, sandbox_worker_pod TEXT,
   warmup INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (run_id, model_name, record_id)
 );
@@ -37,6 +41,26 @@ class Store:
         self.path = path
         with sqlite3.connect(path) as connection:
             connection.executescript(SCHEMA)
+            existing = {
+                row[1]: row[2]
+                for row in connection.execute("PRAGMA table_info(submissions)").fetchall()
+            }
+            new_columns = {
+                "sandbox_acquire_ms": "REAL",
+                "sandbox_acquire_source": "TEXT",
+                "sandbox_compile_ms": "REAL",
+                "sandbox_run_ms": "REAL",
+                "sandbox_backend": "TEXT",
+                "sandbox_runtime": "TEXT",
+                "sandbox_worker_node": "TEXT",
+                "sandbox_worker_pod": "TEXT",
+            }
+            for column, column_type in new_columns.items():
+                if column not in existing:
+                    connection.execute(
+                        f"ALTER TABLE submissions ADD COLUMN {column} {column_type}"
+                    )
+            connection.commit()
 
     def start_run(self, run_id: str, mode: str, dataset_hash: str, sample: int, judge: bool, config: dict[str, Any]) -> None:
         with sqlite3.connect(self.path) as connection:
@@ -54,7 +78,9 @@ class Store:
             "run_id,model_name,backend,record_id,assignment_title,category,normalized_category,"
             "submission_id,status,feedback,sandbox_output,error,client_e2e_ms,http_accepted_ms,"
             "pipeline_total_ms,sandbox_queue_ms,sandbox_exec_ms,llm_queue_ms,llm_exec_ms,"
-            "orchestration_ms,delivery_ms,confidence_json,warmup"
+            "orchestration_ms,delivery_ms,confidence_json,"
+            "sandbox_acquire_ms,sandbox_acquire_source,sandbox_compile_ms,sandbox_run_ms,"
+            "sandbox_backend,sandbox_runtime,sandbox_worker_node,sandbox_worker_pod,warmup"
         )
         values = (
             run_id, model, backend, item["record_id"], item["assignment_title"], item["category"],
@@ -63,6 +89,10 @@ class Store:
             item.get("http_accepted_ms"), item.get("pipeline_total_ms"), item.get("sandbox_queue_ms"),
             item.get("sandbox_exec_ms"), item.get("llm_queue_ms"), item.get("llm_exec_ms"),
             item.get("orchestration_ms"), item.get("delivery_ms"), item.get("confidence_json"),
+            item.get("sandbox_acquire_ms"), item.get("sandbox_acquire_source"),
+            item.get("sandbox_compile_ms"), item.get("sandbox_run_ms"),
+            item.get("sandbox_backend"), item.get("sandbox_runtime"),
+            item.get("sandbox_worker_node"), item.get("sandbox_worker_pod"),
             int(item.get("warmup", False)),
         )
         with sqlite3.connect(self.path) as connection:

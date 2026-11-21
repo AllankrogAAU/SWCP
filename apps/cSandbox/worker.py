@@ -70,6 +70,12 @@ class JsonLogFormatter(logging.Formatter):
             "status": getattr(record, "status", None),
             "outcome": getattr(record, "outcome", None),
             "error_type": getattr(record, "error_type", None),
+            "sandbox_backend": getattr(record, "sandbox_backend", None),
+            "sandbox_runtime": getattr(record, "sandbox_runtime", None),
+            "sandbox_acquire_ms": getattr(record, "sandbox_acquire_ms", None),
+            "sandbox_acquire_source": getattr(record, "sandbox_acquire_source", None),
+            "sandbox_compile_ms": getattr(record, "sandbox_compile_ms", None),
+            "sandbox_run_ms": getattr(record, "sandbox_run_ms", None),
             "message": record.getMessage(),
         }
         if record.exc_info:
@@ -202,6 +208,16 @@ def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
                 staticAnalysis=list(result.static_analysis),
                 testResults=test_results,
                 errorClassification=";".join([status, *limitations]),
+                sandboxBackend=SANDBOX_BACKEND,
+                sandboxRuntime=(
+                    f"runsc:{os.getenv('SANDBOX_RUNSC_PLATFORM', 'systrap')}"
+                    if SANDBOX_BACKEND == "runsc"
+                    else f"k8s:{os.getenv('SANDBOX_RUNTIME_CLASS', 'gvisor')}"
+                ),
+                sandboxAcquireMs=result.sandbox_acquire_ms,
+                sandboxAcquireSource=result.sandbox_acquire_source,
+                sandboxCompileMs=result.compile_ms,
+                sandboxRunMs=result.run_ms,
             )
     finally:
         if token:
@@ -243,6 +259,12 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
                     "traceparent": trace_parent,
                     "attempt": attempt,
                     "status": "processing",
+                    "sandbox_backend": SANDBOX_BACKEND,
+                    "sandbox_runtime": (
+                        f"runsc:{os.getenv('SANDBOX_RUNSC_PLATFORM', 'systrap')}"
+                        if SANDBOX_BACKEND == "runsc"
+                        else f"k8s:{os.getenv('SANDBOX_RUNTIME_CLASS', 'gvisor')}"
+                    ),
                 },
             )
             start_headers = {"traceparent": trace_parent} if trace_parent else None
@@ -286,6 +308,16 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
                     "attempt": attempt,
                     "status": "completed",
                     "outcome": result.errorClassification,
+                    "sandbox_backend": SANDBOX_BACKEND,
+                    "sandbox_runtime": (
+                        f"runsc:{os.getenv('SANDBOX_RUNSC_PLATFORM', 'systrap')}"
+                        if SANDBOX_BACKEND == "runsc"
+                        else f"k8s:{os.getenv('SANDBOX_RUNTIME_CLASS', 'gvisor')}"
+                    ),
+                    "sandbox_acquire_ms": result.sandboxAcquireMs,
+                    "sandbox_acquire_source": result.sandboxAcquireSource,
+                    "sandbox_compile_ms": result.sandboxCompileMs,
+                    "sandbox_run_ms": result.sandboxRunMs,
                 },
             )
     except PermanentSandboxError as exception:

@@ -183,6 +183,7 @@ class KubePodSandbox:
         self.name = name
         self._api = api
         self.created_at = time.monotonic()
+        self.from_pool = False
 
     def run(
         self,
@@ -417,6 +418,7 @@ class KubeSandboxProvider:
         while True:
             try:
                 sandbox = self._ready.get_nowait()
+                sandbox.from_pool = True
             except queue.Empty:
                 return self._create()
             if time.monotonic() - sandbox.created_at < self._max_idle_s:

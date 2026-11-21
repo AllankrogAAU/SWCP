@@ -56,6 +56,12 @@ class SandboxResult(StrictContract):
     staticAnalysis: list[StaticAnalysisWarning]
     testResults: list[SandboxTestResult]
     errorClassification: str | None = None
+    sandboxBackend: str | None = None
+    sandboxRuntime: str | None = None
+    sandboxAcquireMs: int | None = Field(default=None, ge=0)
+    sandboxAcquireSource: str | None = None
+    sandboxCompileMs: int | None = Field(default=None, ge=0)
+    sandboxRunMs: int | None = Field(default=None, ge=0)
 
 
 class LlmInferenceParameters(StrictContract):

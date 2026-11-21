@@ -44,3 +44,5 @@ class EvaluationResult:
     stderr: str | None = None
     run_ms: int | None = None
     test_runs: tuple[PhaseResult, ...] = ()
+    sandbox_acquire_ms: int | None = None
+    sandbox_acquire_source: str = "unknown"

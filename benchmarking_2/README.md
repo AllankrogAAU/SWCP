@@ -48,3 +48,18 @@ python -m benchmarking_2.cli complete \
 
 Results are SQLite files under `benchmarking_2/results/`. Loki stage timings are collected when
 `LOKI_URL` is configured; client timing remains available without monitoring access.
+
+The sandbox telemetry is backend-aware. When Loki is configured, each submission stores:
+
+- Sandbox backend: `runsc` or `k8s`
+- Sandbox runtime: `runsc:<platform>` or `k8s:<runtime-class>`
+- Acquisition time and whether Kubernetes acquisition came from the warm pool
+- GCC compile time and C binary/test execution time
+- c-sandbox worker node and pod
+
+Queue waits are derived from Loki pipeline timestamps when no worker-emitted
+`queue_wait_ms` field is available.
+
+The cluster currently defaults to `SANDBOX_BACKEND=runsc`. Kubernetes sandbox-pod mode can be
+enabled with `SANDBOX_BACKEND=k8s`; the benchmark reads the backend and runtime from sandbox
+completion telemetry rather than assuming that every submission used a Kubernetes pod.

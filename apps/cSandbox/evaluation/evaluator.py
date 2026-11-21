@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -106,7 +107,9 @@ def evaluate(
     limits = limits or Limits()
     last_error: SandboxError | None = None
     for attempt in (1, 2):
+        acquire_started = time.perf_counter()
         sandbox = provider.acquire()
+        acquire_ms = round((time.perf_counter() - acquire_started) * 1000)
         try:
             report = sandbox.run(source, limits, test_cases, harness_source, run_stdin)
             if (
@@ -120,7 +123,16 @@ def evaluate(
                     f"sandbox returned {len(report.test_runs)} test results "
                     f"for {len(test_cases)} test cases"
                 )
-            return to_result(report)
+            result = to_result(report)
+            return EvaluationResult(
+                **{
+                    **result.__dict__,
+                    "sandbox_acquire_ms": acquire_ms,
+                    "sandbox_acquire_source": (
+                        "warm_pool" if getattr(sandbox, "from_pool", False) else "direct"
+                    ),
+                }
+            )
         except PermanentSandboxError:
             raise
         except SandboxError as exception:
