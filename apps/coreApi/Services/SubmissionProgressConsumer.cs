@@ -9,8 +9,7 @@ namespace coreApi.Services;
 public sealed class SubmissionProgressConsumer(
     ILogger<SubmissionProgressConsumer> logger,
     NatsConnection nats,
-    IServiceScopeFactory scopeFactory,
-    SubmissionEvents events) : BackgroundService
+    IServiceScopeFactory scopeFactory) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -80,7 +79,6 @@ public sealed class SubmissionProgressConsumer(
                     "pipeline.stage.started", started.Stage, started.Worker, submission.Id,
                     traceParent?.Split('-') is { Length: 4 } traceParts ? traceParts[1] : null,
                     (long)queueWaitMs, submission.Status.ToString());
-                await events.PublishAsync(submission, "stage", $"{started.Worker} started", percent, stoppingToken, traceParent);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

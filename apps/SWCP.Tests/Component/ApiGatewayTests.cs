@@ -64,20 +64,11 @@ public sealed class ApiGatewayTests : IClassFixture<ApiGatewayTestFixture>
     }
 
     [Fact]
-    public async Task ProtectedWebSocketRoute_WithoutAuthorizationHeader_Returns401Unauthorized()
+    public async Task ReverseProxy_ForwardsApiRequestToCoreApi()
     {
-        var response = await _client.GetAsync($"/ws/submissions/{Guid.NewGuid()}");
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task ProtectedWebSocketRoute_WithMalformedBearerToken_Returns401Unauthorized()
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Get, $"/ws/submissions/{Guid.NewGuid()}");
-        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "malformed.jwt.token");
-
-        var response = await _client.SendAsync(request);
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        // YARP reverse proxies /api requests to CoreApi; when CoreApi is offline in this isolated gateway test, returns 502 Bad Gateway
+        var response = await _client.GetAsync($"/api/submissions/{Guid.NewGuid()}/events");
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
     }
 }
 

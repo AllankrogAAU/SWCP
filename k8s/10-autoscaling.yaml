@@ -10,7 +10,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: core-api
-  minReplicas: 2
+  minReplicas: 3
   maxReplicas: 8
   metrics:
     - type: Resource
@@ -18,7 +18,7 @@ spec:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 70
+          averageUtilization: 40
     - type: Resource
       resource:
         name: memory
@@ -27,11 +27,11 @@ spec:
           averageUtilization: 80
   behavior:
     scaleUp:
-      stabilizationWindowSeconds: 15
+      stabilizationWindowSeconds: 0
       policies:
         - type: Pods
-          value: 1
-          periodSeconds: 30
+          value: 2
+          periodSeconds: 15
     scaleDown:
       stabilizationWindowSeconds: 300
       policies:
@@ -51,7 +51,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: api-gateway
-  minReplicas: 2
+  minReplicas: 3
   maxReplicas: 8
   metrics:
     - type: Resource
@@ -59,7 +59,7 @@ spec:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 70
+          averageUtilization: 40
     - type: Resource
       resource:
         name: memory
@@ -68,11 +68,11 @@ spec:
           averageUtilization: 80
   behavior:
     scaleUp:
-      stabilizationWindowSeconds: 30
+      stabilizationWindowSeconds: 0
       policies:
         - type: Pods
           value: 2
-          periodSeconds: 60
+          periodSeconds: 15
     scaleDown:
       stabilizationWindowSeconds: 600
       policies:
@@ -93,10 +93,10 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: c-sandbox
-  minReplicaCount: 3
-  maxReplicaCount: 7
+  minReplicaCount: 2
+  maxReplicaCount: 20
   cooldownPeriod: 120
-  pollingInterval: 10
+  pollingInterval: 5
   advanced:
     restoreToOriginalReplicaCount: true
     horizontalPodAutoscalerConfig:
@@ -105,7 +105,7 @@ spec:
           stabilizationWindowSeconds: 0
           policies:
             - type: Pods
-              value: 2
+              value: 4
               periodSeconds: 15
         scaleDown:
           stabilizationWindowSeconds: 180
@@ -122,6 +122,6 @@ spec:
         account: "$G"
         stream: "SANDBOX_TASKS"
         consumer: "c-sandbox-workers"
-        lagThreshold: "6"
+        lagThreshold: "4"
         activationLagThreshold: "1"
         useHttps: "false"

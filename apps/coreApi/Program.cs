@@ -101,6 +101,7 @@ builder.Services.AddAuthorization(options =>
 
 var app = builder.Build();
 
+
 await using (var scope = app.Services.CreateAsyncScope())
 {
     var database = scope.ServiceProvider.GetRequiredService<CoreDbContext>();

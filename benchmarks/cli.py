@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import datetime
+import json
 import logging
 import re
 import sqlite3
@@ -41,6 +43,8 @@ def setup_logging(verbose: bool = False) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 async def _run_warmup(config: BenchmarkConfig, count: int = 3) -> int:
@@ -59,6 +63,20 @@ async def _run_warmup(config: BenchmarkConfig, count: int = 3) -> int:
     return 0
 
 
+def _extract_user_id(token: str) -> str:
+    try:
+        parts = token.split(".")
+        if len(parts) >= 2:
+            padded = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+            data = json.loads(base64.urlsafe_b64decode(padded.encode()))
+            uname = data.get("preferred_username") or data.get("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name")
+            if uname:
+                return str(uname)
+    except Exception:
+        pass
+    return token[:12]
+
+
 def _store_submission_and_step_metrics(
     storage: BenchmarkStorage,
     telemetry: TelemetryCollector,
@@ -69,12 +87,14 @@ def _store_submission_and_step_metrics(
     end_epoch: float,
     step_meta: dict[str, dict[str, Any]] | None = None,
 ) -> None:
-    sub_ids = [r.submission_id for r in results]
+    sub_ids = [r.submission_id for r in results if r.submission_id and not r.submission_id.startswith("failed_")]
     stages_by_sub = telemetry.collect_batch_submission_stages(sub_ids, start_epoch, end_epoch)
 
     # For tiny tests (<= 5 submissions), if batch missed any stage details, fallback to individual query
     if len(results) <= 5:
         for r in results:
+            if r.submission_id.startswith("failed_"):
+                continue
             st = stages_by_sub.get(r.submission_id)
             if not st or (st.sandbox_exec_ms == 0.0 and st.llm_exec_ms == 0.0):
                 stages_by_sub[r.submission_id] = telemetry.collect_submission_stages(
@@ -91,7 +111,7 @@ def _store_submission_and_step_metrics(
             else 0.0
         )
         delivery_overhead_ms = (
-            max(0.0, r.client_e2e_ms - stages.pipeline_total_ms)
+            max(0.0, r.client_e2e_ms - submit_edge_ms - stages.pipeline_total_ms)
             if stages.pipeline_total_ms > 0
             else 0.0
         )
@@ -111,7 +131,7 @@ def _store_submission_and_step_metrics(
             "submission_id": r.submission_id,
             "run_id": run_id,
             "step_label": r.step_label,
-            "user_id": r.token[:12],
+            "user_id": _extract_user_id(r.token),
             "fixture_type": r.fixture_type,
             "client_e2e_ms": r.client_e2e_ms,
             "client_submit_ms": r.http_accepted_ms,
@@ -129,7 +149,7 @@ def _store_submission_and_step_metrics(
             "tokens_per_sec": stages.tokens_per_sec,
             "final_status": r.final_status,
             "terminal_via": r.terminal_via,
-            "outcome": stages.outcome or r.terminal_via,
+            "outcome": stages.outcome or r.error_message or r.terminal_via,
             "llm_target": stages.llm_target,
             "sandbox_node": stages.sandbox_node,
             "llm_worker_node": stages.llm_worker_node,
@@ -211,7 +231,7 @@ def _store_submission_and_step_metrics(
             "p95_llm_exec_overflow_ms": float(np.percentile(overflow_exec_vals, 95)) if overflow_exec_vals else 0.0,
             "p95_orchestration_overhead_ms": float(np.percentile([rec["orchestration_overhead_ms"] for rec in step_recs], 95)) if step_recs else 0.0,
             "p95_delivery_overhead_ms": float(np.percentile([rec["delivery_overhead_ms"] for rec in step_recs], 95)) if step_recs else 0.0,
-            "ws_completion_rate": (sum(1 for s in step_subs if s.terminal_via == "websocket") / n_subs) if n_subs else 1.0,
+            "ws_completion_rate": (sum(1 for s in step_subs if s.terminal_via in ("websocket", "sse")) / n_subs) if n_subs else 1.0,
             "peak_kv_cache_pct": prom_snap.peak_kv_cache_pct,
             "primary_kv_cache_pct": prom_snap.primary_kv_cache_pct,
             "overflow_kv_cache_pct": prom_snap.overflow_kv_cache_pct,
@@ -750,7 +770,7 @@ def main() -> None:
             config_kwargs["user_pool_size"] = max(cur_pool, max(bursts) + 20)
     elif mode == "continuous-ramp":
         peak_rpm = float(getattr(args, "end_rate", 0.0) or 0.0)
-        config_kwargs["user_pool_size"] = max(cur_pool, min(1000, int(peak_rpm * 1.0) + 100))
+        config_kwargs["user_pool_size"] = max(cur_pool, min(1500, int(peak_rpm * 1.0) + 100))
     elif mode == "stepped-poisson":
         rates = [float(r.strip()) for r in str(getattr(args, "rates", "")).split(",") if r.strip()]
         if rates:

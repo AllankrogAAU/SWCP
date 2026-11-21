@@ -216,6 +216,8 @@ wait_for_worker_baseline() {
     local spilled=0
     local pod_lines
     pod_lines=$(run_kubectl get pods -n swcp -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeName}{" "}{.metadata.labels.app\.kubernetes\.io/name}{"\n"}{end}' 2>/dev/null || true)
+    
+    local stranded_pods=()
     while IFS=' ' read -r _pname pnode papp; do
       [ -z "$pnode" ] && continue
       case "$papp" in
@@ -226,6 +228,15 @@ wait_for_worker_baseline() {
           done
           if [ "$is_ctrl" -eq 0 ]; then
             spilled=$((spilled + 1))
+            # Tag worker-node pod with lowest deletion cost so any active scale-down deletes it first
+            run_kubectl annotate pod "$_pname" -n swcp controller.kubernetes.io/pod-deletion-cost="-1000" --overwrite 2>/dev/null || true
+
+            # Check if this deployment is already at or below its baseline minimum (2 replicas)
+            local cur_reps
+            cur_reps=$(run_kubectl get deployment "$papp" -n swcp -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)
+            if [ "$cur_reps" -le 2 ]; then
+              stranded_pods+=("$_pname $papp $pnode $cur_reps")
+            fi
           fi
           ;;
       esac
@@ -234,6 +245,18 @@ wait_for_worker_baseline() {
     if [ "$spilled" -eq 0 ]; then
       echo "✓ Worker node baseline clean (0 spilled compute pods outside control-plane)."
       break
+    fi
+
+    # If any spilled pod belongs to a deployment already at baseline replicas (<=2),
+    # Kubernetes node-balancing scale-down left it stranded. Evict it to rebalance to control-plane.
+    if [ "${#stranded_pods[@]}" -gt 0 ]; then
+      for item in "${stranded_pods[@]}"; do
+        read -r s_pod s_app s_node s_reps <<< "$item"
+        echo "  [Rebalance] $s_app is at baseline ($s_reps replicas) but pod $s_pod is stranded on $s_node; evicting to rebalance to control plane..."
+        run_kubectl delete pod "$s_pod" -n swcp --now --wait=false 2>/dev/null || true
+      done
+      sleep 3
+      continue
     fi
 
     local now elapsed
