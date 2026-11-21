@@ -6,6 +6,8 @@ import json
 import logging
 import subprocess
 import uuid
+import glob
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -16,11 +18,12 @@ from .dataset import DatasetStore, Submission, dataset_hash, load_submissions, s
 from .judge import CloudJudge
 from .pipeline import PipelineClient, Result
 from .storage import Store
+from .cluster_switch import switch_local_model
 
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SWCP second-generation benchmark")
-    parser.add_argument("mode", choices=("prepare", "complete", "latency", "test-test"))
+    parser.add_argument("mode", choices=("prepare", "complete", "latency", "test-test", "status"))
     parser.add_argument("--data", type=Path, default=Path("benchmarks/submissions_data_11000.jsonl"))
     parser.add_argument("--results", type=Path, default=Path("benchmarking_2/results"))
     parser.add_argument("--target-url", default=None)
@@ -52,17 +55,113 @@ async def authenticate(config: Config) -> tuple[list[str], dict[str, dict]]:
     return tokens, assignment_details
 
 
-def switch_model(command: str | None, model: ModelSpec) -> None:
-    if not command:
+def switch_model(config: Config, command: str | None, model: ModelSpec) -> None:
+    if model.backend == "azure":
+        logging.getLogger(__name__).info("Azure model %s requires no vLLM model switch.", model.name)
         return
-    rendered = command.format(model=model.name, backend=model.backend)
-    logging.getLogger(__name__).info("Switching model with configured command: %s", rendered)
-    subprocess.run(rendered, shell=True, check=True)
+    if command:
+        rendered = command.format(model=model.name, backend=model.backend)
+        logging.getLogger(__name__).info("Switching model with configured command: %s", rendered)
+        subprocess.run(rendered, shell=True, check=True)
+        return
+    logging.getLogger(__name__).info("Switching vLLM to local model %s.", model.name)
+    switch_local_model(model.name, config.models_dir)
+
+
+def print_status(results_dir: Path) -> int:
+    databases = sorted(glob.glob(str(results_dir / "*.sqlite")))
+    if not databases:
+        print("No benchmark run database found.")
+        return 1
+    database = databases[-1]
+    connection = __import__("sqlite3").connect(database)
+    run = connection.execute(
+        "SELECT run_id, mode, started_at, ended_at FROM runs ORDER BY started_at DESC LIMIT 1"
+    ).fetchone()
+    if not run:
+        print("No benchmark run found.")
+        return 1
+    run_id, mode, started_at, ended_at = run
+    print(f"Database: {database}")
+    print(f"Run: {run_id}")
+    print(f"Mode: {mode}")
+    print(f"Started: {started_at}")
+    print(f"Finished: {ended_at or 'running'}")
+    try:
+        active = subprocess.run(
+            ["kubectl", "get", "configmap", "vllm-config", "-n", "swcp",
+             "-o", "jsonpath={.data.LLM_MODEL_NAME}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        print(f"Active vLLM model: {active or 'unknown'}")
+    except (OSError, subprocess.CalledProcessError):
+        print("Active vLLM model: unavailable")
+    print("\nProgress by model:")
+    for row in connection.execute(
+        """
+        SELECT model_name, backend,
+               SUM(warmup=0) AS measured,
+               SUM(warmup=0 AND status='COMPLETED') AS completed,
+               SUM(warmup=0 AND status='FAILED') AS failed,
+               SUM(warmup=0 AND feedback IS NOT NULL) AS feedback_given,
+               SUM(warmup=1) AS warmups
+        FROM submissions
+        WHERE run_id=?
+        GROUP BY model_name, backend
+        """,
+        (run_id,),
+    ):
+        print(
+            f"  {row[0]} [{row[1]}]: measured={row[2] or 0}, "
+            f"completed={row[3] or 0}, failed={row[4] or 0}, "
+            f"feedback={row[5] or 0}, warmups={row[6] or 0}"
+        )
+    print("\nCloud judge progress:")
+    for row in connection.execute(
+        "SELECT model_name, COUNT(*) FROM judge_results WHERE run_id=? "
+        "GROUP BY model_name ORDER BY model_name",
+        (run_id,),
+    ):
+        print(f"  {row[0]}: {row[1]} judgements")
+    measured = connection.execute(
+        "SELECT COUNT(*) FROM submissions WHERE run_id=? AND warmup=0",
+        (run_id,),
+    ).fetchone()[0]
+    average_ms = connection.execute(
+        "SELECT AVG(client_e2e_ms) FROM submissions "
+        "WHERE run_id=? AND warmup=0 AND client_e2e_ms IS NOT NULL",
+        (run_id,),
+    ).fetchone()[0] or 0
+    sample = connection.execute(
+        "SELECT sample_per_category FROM runs WHERE run_id=?", (run_id,)
+    ).fetchone()[0]
+    category_count = connection.execute(
+        "SELECT COUNT(DISTINCT category) FROM submissions WHERE run_id=?",
+        (run_id,),
+    ).fetchone()[0]
+    model_count = connection.execute(
+        "SELECT COUNT(DISTINCT model_name) FROM submissions WHERE run_id=?",
+        (run_id,),
+    ).fetchone()[0]
+    expected = sample * category_count * model_count
+    remaining = max(0, expected - measured)
+    eta_s = remaining * float(average_ms) / 1000 if average_ms else 0
+    print(f"Measured submissions: {measured}/{expected}")
+    print(f"Remaining submissions: {remaining}")
+    print(f"Average E2E: {float(average_ms):.1f} ms")
+    print(f"Estimated remaining E2E time: {time.strftime('%Hh %Mm %Ss', time.gmtime(eta_s))}")
+    print("")
+    return 0
 
 
 async def run(args: argparse.Namespace) -> Path:
     config = Config.default()
     config.data_path, config.results_dir = args.data, args.results
+    if args.mode == "status":
+        print_status(config.results_dir)
+        return config.results_dir
     dataset_store = DatasetStore(config.dataset_db_path)
     if args.mode == "prepare":
         source_hash = dataset_store.rebuild(config.data_path)
@@ -89,7 +188,7 @@ async def run(args: argparse.Namespace) -> Path:
         tokens, assignments = await authenticate(config)
         dataset_store.sync_api_assignments(assignments)
         for model in config.models:
-            switch_model(config.switch_command, model)
+            switch_model(config, config.switch_command, model)
             client = PipelineClient(config, model, tokens, assignments)
             warmup_item = records[0]
             for warmup_index in range(config.warmup_count):

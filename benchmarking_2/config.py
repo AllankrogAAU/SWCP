@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,6 +17,7 @@ class Config:
     target_url: str = field(default_factory=lambda: os.getenv("TARGET_URL", "http://localhost"))
     data_path: Path = Path("benchmarks/submissions_data_11000.jsonl")
     dataset_db_path: Path = Path("benchmarking_2/submissions.sqlite")
+    models_dir: Path = Path("apps/localLLM/models")
     results_dir: Path = Path("benchmarking_2/results")
     user_count: int = 20
     user_prefix: str = "bench2_user_"
@@ -47,8 +49,13 @@ class Config:
 
     @classmethod
     def default(cls) -> "Config":
-        models = os.getenv("BENCHMARK_MODELS", "local:qwen,azure:GPT-6-sol")
-        return cls(models=parse_models(models))
+        if os.getenv("BENCHMARK_MODELS"):
+            return cls(models=parse_models(os.environ["BENCHMARK_MODELS"]))
+        from .cluster_switch import discover_local_models
+        local_names = discover_local_models(cls().models_dir)
+        models = [ModelSpec(name=name, backend="local") for name in local_names]
+        models.append(ModelSpec(name="GPT-6-sol", backend="azure"))
+        return cls(models=models)
 
     def judge_endpoint(self) -> str:
         if self.judge_url:

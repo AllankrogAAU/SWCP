@@ -46,6 +46,18 @@ python -m benchmarking_2.cli complete \
   --switch-command "ssh cluster 'switch-vllm --model {model}'"
 ```
 
+By default, local models are discovered automatically from
+`apps/localLLM/models/` and switched automatically through the Kubernetes vLLM
+deployments. `--switch-command` is optional and only replaces the automatic
+switcher for custom cluster setups.
+
+Check a run without reconnecting to the benchmark log:
+
+```bash
+python3 -m benchmarking_2 status
+watch -n 15 python3 -m benchmarking_2 status
+```
+
 Results are SQLite files under `benchmarking_2/results/`. Loki stage timings are collected when
 `LOKI_URL` is configured; client timing remains available without monitoring access.
 
