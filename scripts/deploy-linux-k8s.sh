@@ -257,14 +257,23 @@ if [ -f "$ROOT/.env" ]; then
 
   # 2. Azure AI Foundry keys for llm-worker
   LLM_PATCH=""
+  LLM_ENDPOINT_PATCH=""
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
     if [[ "$line" =~ ^[[:space:]]*AzureAIFoundry_*Models_*([A-Za-z0-9]+)_*ApiKey[[:space:]]*=[[:space:]]*(.+)$ ]]; then
       LLM_PATCH+="\"AzureAIFoundry__Models__${BASH_REMATCH[1]}__ApiKey\":\"${BASH_REMATCH[2]}\","
+    elif [[ "$line" =~ ^[[:space:]]*AzureAIFoundry_*Models_*([A-Za-z0-9]+)_*Endpoint[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+      AZURE_ENDPOINT="${BASH_REMATCH[2]}"
+      AZURE_ENDPOINT="${AZURE_ENDPOINT%/openai/v1}"
+      AZURE_ENDPOINT="${AZURE_ENDPOINT%/}"
+      LLM_ENDPOINT_PATCH+="\"AzureAIFoundry__Models__${BASH_REMATCH[1]}__Endpoint\":\"$AZURE_ENDPOINT\","
     fi
   done < "$ROOT/.env"
   if [ -n "$LLM_PATCH" ]; then
     kubectl patch secret llm-worker-secrets -n swcp --type=merge -p "{\"stringData\":{${LLM_PATCH%,}}}" || true
+  fi
+  if [ -n "$LLM_ENDPOINT_PATCH" ]; then
+    kubectl patch configmap llm-worker-config -n swcp --type=merge -p "{\"data\":{${LLM_ENDPOINT_PATCH%,}}}" || true
   fi
 
   # 3. Seed development users for core-api
