@@ -3,7 +3,34 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
-from pathlib import Path
+
+
+def load_benchmark_env(path: Path = Path(".env")) -> None:
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_benchmark_env()
+
+if not os.getenv("AZURE_OPENAI_ENDPOINT"):
+    os.environ["AZURE_OPENAI_ENDPOINT"] = os.getenv(
+        "AzureAIFoundry__Models__Gpt6Sol__Endpoint", ""
+    )
+if not os.getenv("AZURE_OPENAI_API_KEY"):
+    os.environ["AZURE_OPENAI_API_KEY"] = os.getenv(
+        "AzureAIFoundry__Models__Gpt6Sol__ApiKey", ""
+    )
+if not os.getenv("AZURE_OPENAI_DEPLOYMENT"):
+    os.environ["AZURE_OPENAI_DEPLOYMENT"] = "gpt-6-sol"
 
 
 @dataclass(frozen=True)
@@ -35,7 +62,12 @@ class Config:
     judge_api_key: str | None = field(
         default_factory=lambda: os.getenv("JUDGE_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY")
     )
-    judge_model: str = field(default_factory=lambda: os.getenv("JUDGE_MODEL", "GPT-6-sol"))
+    judge_model: str = field(
+        default_factory=lambda: os.getenv(
+            "JUDGE_MODEL",
+            os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-6-sol"),
+        )
+    )
     judge_api_version: str = field(default_factory=lambda: os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"))
 
     def __post_init__(self) -> None:
@@ -61,7 +93,9 @@ class Config:
         if self.judge_url:
             return self.judge_url.rstrip("/")
         endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-        deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", self.judge_model)
+        deployment = self.judge_model
+        if deployment.lower().replace("-", "").replace("_", "") in {"gpt6sol"}:
+            deployment = "gpt-6-sol"
         if not endpoint:
             raise RuntimeError("Set JUDGE_URL or AZURE_OPENAI_ENDPOINT for cloud judging.")
         return (

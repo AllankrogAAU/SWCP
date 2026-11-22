@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -37,9 +38,11 @@ class PipelineClient:
         self.config, self.model, self.tokens, self.assignments = config, model, tokens, assignments
         self.telemetry = LokiTelemetry(config.loki_url)
         self.index = 0
+        self.current_token_slot = 0
 
     def _token(self) -> str:
-        token = self.tokens[self.index % len(self.tokens)]
+        self.current_token_slot = self.index % len(self.tokens)
+        token = self.tokens[self.current_token_slot]
         self.index += 1
         return token
 
@@ -69,6 +72,15 @@ class PipelineClient:
         try:
             async with httpx.AsyncClient(base_url=self.config.target_url, timeout=30) as client:
                 response = await client.post("/api/submissions", json=payload, headers={"Authorization": f"Bearer {token}"})
+                if response.status_code == 401:
+                    refreshed = await self._refresh_token(token, client)
+                    if refreshed:
+                        token = refreshed
+                        response = await client.post(
+                            "/api/submissions",
+                            json=payload,
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
                 result.http_accepted_ms = (time.perf_counter() - started) * 1000
                 response.raise_for_status()
                 body = response.json()
@@ -91,6 +103,37 @@ class PipelineClient:
             result.client_e2e_ms = (time.perf_counter() - started) * 1000
             logger.error("Submission %s failed: %s", item.record_id, exc)
         return result
+
+    async def _refresh_token(self, token: str, client: httpx.AsyncClient) -> str | None:
+        try:
+            parts = token.split(".")
+            padded = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(padded.encode()))
+            username = (
+                claims.get("preferred_username")
+                or claims.get("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name")
+                or claims.get("unique_name")
+            )
+            if not username:
+                return None
+            response = await client.post(
+                "/api/auth/login",
+                json={"username": username, "password": self.config.password},
+            )
+            if not response.is_success:
+                return None
+            refreshed = str(
+                response.json().get("accessToken")
+                or response.json().get("token")
+                or ""
+            )
+            if refreshed:
+                logger.warning("Token expired during run for user %s. Refreshed it.", username)
+                self.tokens[self.current_token_slot] = refreshed
+                return refreshed
+        except Exception as exc:
+            logger.warning("Could not refresh expired benchmark token: %s", exc)
+        return None
 
     async def _wait(self, submission_id: str, token: str, client: httpx.AsyncClient) -> str:
         async def websocket_wait() -> str | None:

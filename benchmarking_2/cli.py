@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sqlite3
 import logging
 import subprocess
+import sys
 import uuid
 import glob
 import time
@@ -20,11 +22,12 @@ from .pipeline import PipelineClient, Result
 from .storage import Store
 from .cluster_switch import switch_local_model
 from .cluster_switch import resolve_model_path
+from .reports import generate_reports
 
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SWCP second-generation benchmark")
-    parser.add_argument("mode", choices=("prepare", "complete", "latency", "test-test", "status"))
+    parser.add_argument("mode", choices=("prepare", "complete", "latency", "test-test", "status", "judge"))
     parser.add_argument("--data", type=Path, default=Path("benchmarks/submissions_data_11000.jsonl"))
     parser.add_argument("--results", type=Path, default=Path("benchmarking_2/results"))
     parser.add_argument("--target-url", default=None)
@@ -35,6 +38,19 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--seed", type=int, default=20261118)
     parser.add_argument("--switch-command", default=None, help="Command template containing {model}.")
+    parser.add_argument("--run-id", default=None, help="Existing result run ID for judge or report commands.")
+    parser.add_argument("--resume", default=None, help="Resume an existing run ID, reusing successful submissions.")
+    daemon = parser.add_mutually_exclusive_group()
+    daemon.add_argument(
+        "--detach",
+        action="store_true",
+        help="Run in a separate session and keep it running when the terminal or VS Code closes.",
+    )
+    daemon.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Keep the benchmark attached to this terminal instead of detaching it.",
+    )
     return parser.parse_args()
 
 
@@ -87,15 +103,31 @@ def print_status(results_dir: Path) -> int:
     if not databases:
         print("No benchmark run database found.")
         return 1
-    database = databases[-1]
-    connection = __import__("sqlite3").connect(database)
-    run = connection.execute(
-        "SELECT run_id, mode, started_at, ended_at FROM runs ORDER BY started_at DESC LIMIT 1"
-    ).fetchone()
-    if not run:
+    latest: tuple[str, str, str, str | None] | None = None
+    latest_database: str | None = None
+    sqlite3 = __import__("sqlite3")
+    for database in databases:
+        connection = sqlite3.connect(database)
+        try:
+            run = connection.execute(
+                "SELECT run_id, mode, started_at, ended_at "
+                "FROM runs ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            run = None
+        finally:
+            connection.close()
+        if run is not None and (
+            latest is None or str(run[2]) > latest[2]
+        ):
+            latest = (str(run[0]), str(run[1]), str(run[2]), run[3])
+            latest_database = database
+    if latest is None or latest_database is None:
         print("No benchmark run found.")
         return 1
-    run_id, mode, started_at, ended_at = run
+    database = latest_database
+    connection = sqlite3.connect(database)
+    run_id, mode, started_at, ended_at = latest
     print(f"Database: {database}")
     print(f"Run: {run_id}")
     print(f"Mode: {mode}")
@@ -176,6 +208,68 @@ async def run(args: argparse.Namespace) -> Path:
     if args.mode == "status":
         print_status(config.results_dir)
         return config.results_dir
+    if args.mode == "judge":
+        databases = sorted(glob.glob(str(config.results_dir / "*.sqlite")))
+        if not databases:
+            raise RuntimeError("No benchmark result database found.")
+        selected_database = None
+        run_id = args.run_id
+        latest: tuple[str, str] | None = None
+        for database in databases:
+            connection = sqlite3.connect(database)
+            try:
+                if run_id:
+                    row = connection.execute(
+                        "SELECT run_id, started_at FROM runs WHERE run_id=?",
+                        (run_id,),
+                    ).fetchone()
+                else:
+                    row = connection.execute(
+                        "SELECT run_id, started_at FROM runs ORDER BY started_at DESC LIMIT 1"
+                    ).fetchone()
+            except sqlite3.DatabaseError:
+                row = None
+            finally:
+                connection.close()
+            if row and (latest is None or str(row[1]) > latest[1]):
+                latest = (str(row[0]), str(row[1]))
+                selected_database = database
+        if latest is not None:
+            run_id = latest[0]
+        if selected_database is None or run_id is None:
+            raise RuntimeError(f"Benchmark run not found: {args.run_id or 'latest'}")
+        connection = sqlite3.connect(selected_database)
+        connection.row_factory = sqlite3.Row
+        rows = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM submissions WHERE run_id=? AND warmup=0",
+                (run_id,),
+            ).fetchall()
+        ]
+        connection.close()
+        source_by_record = {
+            item.record_id: item
+            for item in load_submissions(config.data_path)
+        }
+        for row in rows:
+            source = source_by_record.get(int(row["record_id"]))
+            if source is not None:
+                row["student_code"] = source.source_code
+                row["standard_input"] = source.standard_input
+        scores = await CloudJudge(config).judge_rows(rows)
+        store = Store(Path(selected_database))
+        for row, score in zip(rows, scores):
+            store.judge(
+                run_id,
+                str(row["model_name"]),
+                int(row["record_id"]),
+                score,
+            )
+        export_dir = store.export(run_id)
+        generate_reports(store.path, run_id, export_dir)
+        logging.info("Judged %d submissions and wrote reports to %s", len(scores), export_dir)
+        return export_dir
     dataset_store = DatasetStore(config.dataset_db_path)
     if args.mode == "prepare":
         source_hash = dataset_store.rebuild(config.data_path)
@@ -190,14 +284,66 @@ async def run(args: argparse.Namespace) -> Path:
     if args.mode == "test-test":
         if len(config.models) != 1 or config.models[0].backend != "local":
             raise ValueError("test-test requires exactly one local model, e.g. --models local:qwen.")
+    if args.resume and not args.models:
+        for candidate in glob.glob(str(config.results_dir / "*.sqlite")):
+            with sqlite3.connect(candidate) as connection:
+                row = connection.execute(
+                    "SELECT config_json FROM runs WHERE run_id=?",
+                    (args.resume,),
+                ).fetchone()
+            if row:
+                resumed_config = json.loads(row[0])
+                resumed_models = resumed_config.get("models")
+                if isinstance(resumed_models, list):
+                    config.models = [
+                        ModelSpec(name=item["name"], backend=item["backend"])
+                        for item in resumed_models
+                        if isinstance(item, dict)
+                    ]
+                if not args.target_url:
+                    config.target_url = resumed_config.get("target_url", config.target_url)
+                break
     validate_model_arguments(config.models, config.models_dir)
     source_records = load_submissions(config.data_path)
     source_hash = dataset_hash(source_records)
     dataset_store.rebuild(config.data_path)
     records = dataset_store.select(config.sample_per_category, config.seed)
     run_id = f"{args.mode}-{uuid.uuid4().hex[:10]}"
-    store = Store(config.results_dir / f"{run_id}.sqlite")
-    store.start_run(run_id, args.mode, source_hash, config.sample_per_category, args.mode != "latency", asdict(config))
+    store_path = config.results_dir / f"{run_id}.sqlite"
+    if args.resume:
+        resume_database = None
+        for candidate in glob.glob(str(config.results_dir / "*.sqlite")):
+            with sqlite3.connect(candidate) as connection:
+                row = connection.execute(
+                    "SELECT config_json FROM runs WHERE run_id=?",
+                    (args.resume,),
+                ).fetchone()
+            if row:
+                resume_database = candidate
+                break
+        if resume_database is None:
+            raise RuntimeError(f"Run to resume was not found: {args.resume}")
+        run_id = args.resume
+        store_path = Path(resume_database)
+        with sqlite3.connect(store_path) as connection:
+            run_row = connection.execute(
+                "SELECT config_json FROM runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+        resumed_config = json.loads(run_row[0]) if run_row else {}
+        resumed_models = resumed_config.get("models")
+        if not args.models and isinstance(resumed_models, list):
+            config.models = [
+                ModelSpec(name=item["name"], backend=item["backend"])
+                for item in resumed_models
+                if isinstance(item, dict)
+            ]
+        if not args.target_url:
+            config.target_url = resumed_config.get("target_url", config.target_url)
+
+    store = Store(store_path)
+    if not args.resume:
+        store.start_run(run_id, args.mode, source_hash, config.sample_per_category, args.mode != "latency", asdict(config))
     logging.info("Run %s: %d submissions/category=%d models", run_id, len(records), len(config.models))
     try:
         tokens, assignments = await authenticate(config)
@@ -206,7 +352,28 @@ async def run(args: argparse.Namespace) -> Path:
             switch_model(config, config.switch_command, model)
             client = PipelineClient(config, model, tokens, assignments)
             warmup_item = records[0]
-            for warmup_index in range(config.warmup_count):
+            existing_warmups = set()
+            existing_completed = set()
+            if args.resume:
+                with sqlite3.connect(store.path) as connection:
+                    existing_warmups = {
+                        row[0]
+                        for row in connection.execute(
+                            "SELECT record_id FROM submissions "
+                            "WHERE run_id=? AND model_name=? AND warmup=1 AND status='COMPLETED'",
+                            (run_id, model.name),
+                        )
+                    }
+                    existing_completed = {
+                        row[0]
+                        for row in connection.execute(
+                            "SELECT record_id FROM submissions "
+                            "WHERE run_id=? AND model_name=? AND warmup=0 AND status='COMPLETED'",
+                            (run_id, model.name),
+                        )
+                    }
+            warmups_needed = max(0, config.warmup_count - len(existing_warmups))
+            for warmup_index in range(warmups_needed):
                 warmup = await client.submit(warmup_item, warmup=True)
                 if warmup.status != "COMPLETED":
                     raise RuntimeError(
@@ -217,16 +384,25 @@ async def run(args: argparse.Namespace) -> Path:
                 store.submission(run_id, model.name, model.backend, warmup_dict)
             measured: list[Result] = []
             for item in records:
+                if args.resume and item.record_id in existing_completed:
+                    continue
                 result = await client.submit(item)
                 measured.append(result)
                 store.submission(run_id, model.name, model.backend, result_dict(result))
             if args.mode != "latency":
-                scores = await CloudJudge(config).judge(measured)
-                for result, score in zip(measured, scores):
-                    store.judge(run_id, model.name, result.item.record_id, score)
+                try:
+                    scores = await CloudJudge(config).judge(measured)
+                    for result, score in zip(measured, scores):
+                        store.judge(run_id, model.name, result.item.record_id, score)
+                except RuntimeError as exc:
+                    logging.warning("Cloud judging unavailable; exporting measured results without judge scores: %s", exc)
     finally:
         store.finish_run(run_id)
     artifact_dir = store.export(run_id)
+    try:
+        generate_reports(store.path, run_id, artifact_dir)
+    except Exception as exc:
+        logging.warning("Result report generation failed: %s", exc)
     logging.info("Artifacts written to %s (database: %s)", artifact_dir, store.path)
     return artifact_dir
 
@@ -259,9 +435,48 @@ def result_dict(result: Result, warmup: bool = False) -> dict:
     }
 
 
+def launch_detached(command: list[str], pid_path: Path, log_path: Path) -> int:
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with log_path.open("ab", buffering=0) as log:
+        process = subprocess.Popen(
+            command,
+            cwd=str(Path(__file__).resolve().parents[1]),
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    pid_path.write_text(f"{process.pid}\n", encoding="utf-8")
+    return process.pid
+
+
+def detach_command(args: argparse.Namespace) -> int:
+    argv = [
+        argument
+        for argument in sys.argv[1:]
+        if argument not in {"--detach", "--foreground"}
+    ]
+    benchmark_dir = Path(__file__).resolve().parent
+    pid_path = benchmark_dir / f"{args.mode}.pid"
+    log_path = benchmark_dir / f"{args.mode}.log"
+    command = [sys.executable, "-m", "benchmarking_2", *argv, "--foreground"]
+    pid = launch_detached(command, pid_path, log_path)
+    print(f"Benchmark started detached (PID {pid}).")
+    print(f"Log: {log_path}")
+    print(f"PID file: {pid_path}")
+    print("Check progress with: python3 -m benchmarking_2 status")
+    return pid
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = arguments()
+    if args.mode in {"complete", "latency", "test-test", "judge"} and not args.foreground:
+        detach_command(args)
+        return
     asyncio.run(run(args))
 
 

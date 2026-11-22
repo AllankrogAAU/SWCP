@@ -63,10 +63,13 @@ class Store:
             connection.commit()
 
     def start_run(self, run_id: str, mode: str, dataset_hash: str, sample: int, judge: bool, config: dict[str, Any]) -> None:
+        safe_config = dict(config)
+        for key in ("judge_api_key", "api_key", "AZURE_OPENAI_API_KEY"):
+            safe_config.pop(key, None)
         with sqlite3.connect(self.path) as connection:
             connection.execute(
                 "INSERT INTO runs VALUES (?, ?, datetime('now'), NULL, ?, ?, ?, ?)",
-                (run_id, mode, dataset_hash, sample, int(judge), json.dumps(config, default=str)),
+                (run_id, mode, dataset_hash, sample, int(judge), json.dumps(safe_config, default=str)),
             )
 
     def finish_run(self, run_id: str) -> None:

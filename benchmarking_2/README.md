@@ -37,6 +37,15 @@ python -m benchmarking_2 complete --models local:qwen2.5-coder-14b-instruct-awq,
 python -m benchmarking_2 test-test --models local:qwen2.5-coder-14b-instruct-awq
 ```
 
+Benchmark runs detach from the terminal by default, so you can close the VS Code window
+without stopping `complete`, `latency`, `test-test`, or `judge`. Their output is written to
+`benchmarking_2/<mode>.log` and the process ID is stored in `benchmarking_2/<mode>.pid`.
+Use `--foreground` to keep a benchmark attached to the current terminal instead:
+
+```bash
+python -m benchmarking_2 test-test --models local:qwen2.5-coder-14b-instruct-awq --foreground
+```
+
 `complete` and `latency` use 100 records from every category. `test-test` uses 50 records from
 every category, judges every response, and is intended to validate the result format and cloud
 judge configuration.

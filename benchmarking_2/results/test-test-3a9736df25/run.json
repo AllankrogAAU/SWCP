@@ -1,0 +1,10 @@
+{
+  "run_id": "test-test-3a9736df25",
+  "mode": "test-test",
+  "started_at": "2026-11-21 18:53:59",
+  "ended_at": "2026-11-21 19:07:52",
+  "dataset_hash": "949d166e0535bf9b2df6f59d93158644170d696b05146dad84439fcce0a8bf13",
+  "sample_per_category": 50,
+  "judge_enabled": 1,
+  "config_json": "{\"target_url\": \"http://localhost\", \"data_path\": \"benchmarks/submissions_data_11000.jsonl\", \"dataset_db_path\": \"benchmarking_2/submissions.sqlite\", \"models_dir\": \"apps/localLLM/models\", \"results_dir\": \"benchmarking_2/results\", \"user_count\": 20, \"user_prefix\": \"bench2_user_\", \"password\": \"BenchPass123!\", \"sample_per_category\": 50, \"judge_batch_size\": 8, \"warmup_count\": 2, \"timeout_s\": 300, \"seed\": 20261118, \"models\": [{\"name\": \"qwen2.5-coder-14b-instruct-awq\", \"backend\": \"local\"}], \"switch_command\": null, \"prometheus_url\": null, \"loki_url\": \"http://loki.monitoring.svc.cluster.local:3100\", \"judge_url\": null, \"judge_api_key\": null, \"judge_model\": \"GPT-6-sol\", \"judge_api_version\": \"2024-10-21\"}"
+}

@@ -49,7 +49,6 @@ class CloudJudge:
                     headers={"api-key": self.config.judge_api_key, "Authorization": f"Bearer {self.config.judge_api_key}"},
                     json={
                         "model": self.config.judge_model,
-                        "temperature": 0,
                         "response_format": {"type": "json_object"},
                         "messages": [
                             {"role": "system", "content": SYSTEM_PROMPT},
@@ -57,6 +56,57 @@ class CloudJudge:
                         ],
                     },
                 )
+                if response.status_code >= 400:
+                    detail = response.text.strip().replace("\n", " ")[:500]
+                    raise RuntimeError(
+                        f"Cloud judge HTTP {response.status_code}: {detail}"
+                    )
+                response.raise_for_status()
+                content = response.json()["choices"][0]["message"]["content"]
+                parsed = json.loads(content)
+                evaluations = parsed.get("evaluations")
+                if not isinstance(evaluations, list) or len(evaluations) != len(batch):
+                    raise ValueError("Cloud judge returned an invalid evaluation count.")
+                output.extend(evaluations)
+        return output
+
+    async def judge_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        output: list[dict[str, Any]] = []
+        async with httpx.AsyncClient(timeout=180) as client:
+            for start in range(0, len(rows), self.config.judge_batch_size):
+                batch = rows[start:start + self.config.judge_batch_size]
+                cases = [
+                    {
+                        "record_id": row["record_id"],
+                        "assignment": row["assignment_title"],
+                        "category": row["category"],
+                        "student_code": row.get("student_code") or "",
+                        "standard_input": row.get("standard_input") or "",
+                        "sandbox_output": row["sandbox_output"],
+                        "feedback": row["feedback"],
+                    }
+                    for row in batch
+                ]
+                response = await client.post(
+                    self.endpoint,
+                    headers={
+                        "api-key": self.config.judge_api_key,
+                        "Authorization": f"Bearer {self.config.judge_api_key}",
+                    },
+                    json={
+                        "model": self.config.judge_model,
+                        "response_format": {"type": "json_object"},
+                        "messages": [
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": json.dumps({"cases": cases})},
+                        ],
+                    },
+                )
+                if response.status_code >= 400:
+                    detail = response.text.strip().replace("\n", " ")[:500]
+                    raise RuntimeError(
+                        f"Cloud judge HTTP {response.status_code}: {detail}"
+                    )
                 response.raise_for_status()
                 content = response.json()["choices"][0]["message"]["content"]
                 parsed = json.loads(content)

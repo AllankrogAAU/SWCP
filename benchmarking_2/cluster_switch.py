@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -101,13 +102,37 @@ def switch_local_model(model_name: str, models_dir: Path) -> None:
     _kubectl("patch", "configmap", "llm-worker-config", "-n", "swcp",
              "--type=merge", "-p", llm_worker_patch)
     _kubectl("rollout", "restart", "deployment/vllm",
-             "deployment/vllm-overflow", "deployment/llm-worker", "-n", "swcp")
+             "deployment/llm-worker", "-n", "swcp")
     _kubectl("rollout", "status", "deployment/vllm",
-             "-n", "swcp", "--timeout=600s")
-    _kubectl("rollout", "status", "deployment/vllm-overflow",
              "-n", "swcp", "--timeout=600s")
     _kubectl("rollout", "status", "deployment/llm-worker",
              "-n", "swcp", "--timeout=180s")
+
+    deadline = time.monotonic() + 120
+    while True:
+        endpoint = subprocess.run(
+            [
+                "kubectl", "get", "endpointslices", "-n", "swcp",
+                "-l", "kubernetes.io/service-name=local-llm-server",
+                "-o", "jsonpath={range .items[*].endpoints[*]}{.addresses[0]}={.conditions.ready}{'\\n'}{end}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        ready_addresses = [
+            line
+            for line in endpoint.stdout.splitlines()
+            if line.endswith("=true")
+        ]
+        if ready_addresses:
+            time.sleep(5)
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "Local vLLM service did not publish a ready endpoint within 120 seconds."
+            )
+        time.sleep(2)
 
     active = subprocess.run(
         ["kubectl", "get", "configmap", "vllm-config", "-n", "swcp",
