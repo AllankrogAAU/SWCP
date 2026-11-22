@@ -87,6 +87,10 @@ namespace coreApi.Data.Migrations
                     b.Property<double?>("ConfidenceScorePercent")
                         .HasColumnType("double precision");
 
+                    b.Property<string>("DiagnosisConfidence")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<string>("ErrorMessage")
                         .HasColumnType("text");
 
@@ -99,6 +103,10 @@ namespace coreApi.Data.Migrations
 
                     b.Property<int>("RetryCount")
                         .HasColumnType("integer");
+
+                    b.Property<string>("RootCauseCategory")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
 
                     b.Property<string>("SandboxOutputJson")
                         .HasColumnType("jsonb");

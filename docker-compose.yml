@@ -55,7 +55,10 @@ services:
       SeedDevelopmentUsers: ${SEED_DEVELOPMENT_USERS:-false}
       DevelopmentUsers__TeacherUsername: ${DEV_TEACHER_USERNAME:-${DEV_TEACHER_EMAIL:-}}
       DevelopmentUsers__TeacherPassword: ${DEV_TEACHER_PASSWORD:-}
+      LocalLlm__RoutingMethod: ${LOCAL_LLM_ROUTING_METHOD:-confidence_score}
       LocalLlm__AzureFallbackThreshold: ${LOCAL_LLM_AZURE_FALLBACK_THRESHOLD:-0}
+      LocalLlm__EscalateDiagnosisConfidence: ${LOCAL_LLM_ESCALATE_DIAGNOSIS_CONFIDENCE:-uncertain,guessing}
+      LocalLlm__EscalateRootCauseCategories: ${LOCAL_LLM_ESCALATE_ROOT_CAUSE_CATEGORIES:-pointer_memory}
     volumes:
       - jwt-private:/private
       - jwt-public:/public

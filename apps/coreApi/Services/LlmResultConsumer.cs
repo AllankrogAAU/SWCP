@@ -79,6 +79,13 @@ public sealed class LlmResultConsumer(
             ActivityKind.Consumer,
             traceParent ?? string.Empty);
 
+        var routingMethod = (configuration["LocalLlm:RoutingMethod"] ?? "confidence_score").Trim().ToLowerInvariant();
+        if (routingMethod is not ("none" or "confidence_score" or "self_evaluation"))
+        {
+            throw new InvalidOperationException(
+                $"LocalLlm:RoutingMethod '{routingMethod}' must be 'none', 'confidence_score', or 'self_evaluation'.");
+        }
+
         var fallbackThreshold = configuration.GetValue<double>("LocalLlm:AzureFallbackThreshold", 0);
         if (fallbackThreshold is < 0 or > 100)
         {
@@ -105,17 +112,26 @@ public sealed class LlmResultConsumer(
             return;
         }
 
-        if (result.Status == "success" &&
-            submission.LlmBackend == "local" &&
-            result.ConfidenceScorePercent is double score &&
-            score < fallbackThreshold &&
+        var escalationReason = GetEscalationReason(routingMethod, fallbackThreshold, result, submission);
+        if (escalationReason is not null &&
             submission.Assignment is not null &&
             !string.IsNullOrWhiteSpace(submission.SandboxOutputJson) &&
             JsonSerializer.Deserialize<SandboxResult>(submission.SandboxOutputJson) is { } sandboxResult)
         {
             var prompt = SubmissionPromptBuilder.Build(submission.Assignment, submission, sandboxResult);
 
-            submission.ConfidenceScorePercent = score;
+            if (result.ConfidenceScorePercent is not null)
+            {
+                submission.ConfidenceScorePercent = result.ConfidenceScorePercent;
+            }
+            if (!string.IsNullOrWhiteSpace(result.DiagnosisConfidence))
+            {
+                submission.DiagnosisConfidence = result.DiagnosisConfidence;
+            }
+            if (!string.IsNullOrWhiteSpace(result.RootCauseCategory))
+            {
+                submission.RootCauseCategory = result.RootCauseCategory;
+            }
             submission.LlmBackend = "azure";
             submission.Status = SubmissionStatus.LLM_QUEUED;
             submission.UpdatedAtUtc = DateTimeOffset.UtcNow;
@@ -134,12 +150,12 @@ public sealed class LlmResultConsumer(
                 cancellationToken);
 
             logger.LogInformation(
-                "Local LLM confidence {ConfidenceScorePercent}% below threshold {Threshold}%; escalating submission {SubmissionId} to azure",
-                score, fallbackThreshold, submission.Id);
+                "Escalating submission {SubmissionId} to azure via {RoutingMethod}: {Reason}",
+                submission.Id, routingMethod, escalationReason);
             await events.PublishAsync(
                 submission,
                 "llm_queued",
-                $"Local confidence ({score:F1}%) below threshold ({fallbackThreshold:F1}%); escalating to cloud LLM",
+                $"{escalationReason}; escalating to cloud LLM",
                 75,
                 cancellationToken,
                 traceParent);
@@ -151,9 +167,17 @@ public sealed class LlmResultConsumer(
             : SubmissionStatus.FAILED;
         submission.LlmFeedback = result.FeedbackMarkdown;
         submission.TaskSolved = result.TaskSolved;
-        if (result.ConfidenceScorePercent is not null)
+        if (result.ConfidenceScorePercent is not null && submission.ConfidenceScorePercent is null)
         {
             submission.ConfidenceScorePercent = result.ConfidenceScorePercent;
+        }
+        if (!string.IsNullOrWhiteSpace(result.DiagnosisConfidence) && submission.DiagnosisConfidence is null)
+        {
+            submission.DiagnosisConfidence = result.DiagnosisConfidence;
+        }
+        if (!string.IsNullOrWhiteSpace(result.RootCauseCategory) && submission.RootCauseCategory is null)
+        {
+            submission.RootCauseCategory = result.RootCauseCategory;
         }
         submission.ErrorMessage = result.Error;
         submission.UpdatedAtUtc = DateTimeOffset.UtcNow;
@@ -169,6 +193,51 @@ public sealed class LlmResultConsumer(
             result.Status == "success" ? "Feedback is ready" : (result.Error ?? "LLM feedback failed"),
             100, cancellationToken, traceParent);
     }
+
+    private string? GetEscalationReason(
+        string routingMethod,
+        double fallbackThreshold,
+        LlmResult result,
+        Submission submission)
+    {
+        if (result.Status != "success" || submission.LlmBackend != "local")
+        {
+            return null;
+        }
+
+        if (routingMethod == "confidence_score")
+        {
+            return result.ConfidenceScorePercent is double score && score < fallbackThreshold
+                ? $"Local confidence ({score:F1}%) below threshold ({fallbackThreshold:F1}%)"
+                : null;
+        }
+
+        if (routingMethod == "self_evaluation")
+        {
+            var escalateConfidences = ParseConfiguredSet(configuration["LocalLlm:EscalateDiagnosisConfidence"] ?? "uncertain,guessing");
+            if (!string.IsNullOrWhiteSpace(result.DiagnosisConfidence) &&
+                escalateConfidences.Contains(result.DiagnosisConfidence.Trim().ToLowerInvariant()))
+            {
+                return $"Local self-evaluation diagnosisConfidence='{result.DiagnosisConfidence}'";
+            }
+
+            var escalateCategories = ParseConfiguredSet(configuration["LocalLlm:EscalateRootCauseCategories"] ?? "pointer_memory");
+            if (!string.IsNullOrWhiteSpace(result.RootCauseCategory) &&
+                escalateCategories.Contains(result.RootCauseCategory.Trim().ToLowerInvariant()))
+            {
+                return $"Local self-evaluation rootCauseCategory='{result.RootCauseCategory}'";
+            }
+        }
+
+        return null;
+    }
+
+    private static HashSet<string> ParseConfiguredSet(string? raw) =>
+        string.IsNullOrWhiteSpace(raw)
+            ? []
+            : raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(value => value.ToLowerInvariant())
+                .ToHashSet(StringComparer.Ordinal);
 
     private async Task MarkSubmissionFailedAsync(
         Guid submissionId,

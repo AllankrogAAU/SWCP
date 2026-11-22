@@ -175,4 +175,100 @@ public sealed class LlmResultConsumerTests
         Assert.Equal("Confident local hint", completed.LlmFeedback);
         Assert.Equal(82.5, completed.ConfidenceScorePercent);
     }
+
+    [Theory]
+    [InlineData("uncertain", "logic_simple", true)]
+    [InlineData("certain", "pointer_memory", true)]
+    [InlineData("likely", "logic_simple", false)]
+    public async Task ProcessResultAsync_SelfEvaluationRouting_EscalatesOnlyOnConfiguredTriggers(
+        string diagnosisConfidence,
+        string rootCauseCategory,
+        bool shouldEscalate)
+    {
+        using var fixture = new CoreApiTestFixture();
+        var user = await fixture.SeedUserAsync($"student-{diagnosisConfidence}-{rootCauseCategory}", "Password123!", UserRole.Student);
+        var assignmentId = Guid.NewGuid();
+        var submissionId = Guid.NewGuid();
+
+        using (var scope = fixture.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CoreDbContext>();
+            db.Assignments.Add(new Assignment
+            {
+                Id = assignmentId,
+                Title = "Memory",
+                Description = "Debug memory",
+                TaskFocus = "pointers",
+                TestCasesJson = "[]",
+                CreatedAtUtc = DateTimeOffset.UtcNow
+            });
+            db.Submissions.Add(new Submission
+            {
+                Id = submissionId,
+                UserId = user.Id,
+                AssignmentId = assignmentId,
+                SourceCode = "int main() { return 0; }",
+                Action = "submit",
+                LlmBackend = "local",
+                Status = SubmissionStatus.LLM_QUEUED,
+                SandboxOutputJson = JsonSerializer.Serialize(CreateSandboxResult(submissionId)),
+                CreatedAtUtc = DateTimeOffset.UtcNow,
+                UpdatedAtUtc = DateTimeOffset.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LocalLlm:RoutingMethod"] = "self_evaluation",
+                ["LocalLlm:EscalateDiagnosisConfidence"] = "uncertain,guessing",
+                ["LocalLlm:EscalateRootCauseCategories"] = "pointer_memory"
+            })
+            .Build();
+
+        var consumer = new LlmResultConsumer(
+            NullLogger<LlmResultConsumer>.Instance,
+            null!,
+            fixture.Services.GetRequiredService<IServiceScopeFactory>(),
+            fixture.Services.GetRequiredService<SubmissionEvents>(),
+            fixture.TaskPublisher,
+            config);
+
+        await consumer.ProcessResultAsync(
+            new LlmResult(
+                submissionId,
+                "success",
+                "Local hint",
+                new LlmTokenUsage(10, 5, 15),
+                null,
+                false,
+                92.0,
+                diagnosisConfidence,
+                rootCauseCategory),
+            null,
+            CancellationToken.None);
+
+        using var verifyScope = fixture.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<CoreDbContext>();
+        var submission = await verifyDb.Submissions.FindAsync(submissionId);
+        Assert.NotNull(submission);
+        Assert.Equal(diagnosisConfidence, submission.DiagnosisConfidence);
+        Assert.Equal(rootCauseCategory, submission.RootCauseCategory);
+        Assert.Equal(92.0, submission.ConfidenceScorePercent);
+
+        if (shouldEscalate)
+        {
+            var published = Assert.Single(fixture.TaskPublisher.PublishedLlmTasks);
+            Assert.Equal("azure", published.Backend);
+            Assert.Equal("azure", submission.LlmBackend);
+            Assert.Equal(SubmissionStatus.LLM_QUEUED, submission.Status);
+        }
+        else
+        {
+            Assert.Empty(fixture.TaskPublisher.PublishedLlmTasks);
+            Assert.Equal("local", submission.LlmBackend);
+            Assert.Equal(SubmissionStatus.COMPLETED, submission.Status);
+        }
+    }
 }

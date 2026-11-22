@@ -51,6 +51,8 @@ export interface SubmissionResponse {
   llmFeedback: string | null
   taskSolved: boolean | null
   confidenceScorePercent: number | null
+  diagnosisConfidence: string | null
+  rootCauseCategory: string | null
   errorMessage: string | null
   createdAtUtc: string
   updatedAtUtc: string

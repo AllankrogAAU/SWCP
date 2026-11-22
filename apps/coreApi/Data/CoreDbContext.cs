@@ -42,6 +42,8 @@ public sealed class CoreDbContext(DbContextOptions<CoreDbContext> options) : DbC
             entity.Property(submission => submission.LlmFeedback).HasColumnType("text");
             entity.Property(submission => submission.TaskSolved);
             entity.Property(submission => submission.ConfidenceScorePercent);
+            entity.Property(submission => submission.DiagnosisConfidence).HasMaxLength(32);
+            entity.Property(submission => submission.RootCauseCategory).HasMaxLength(32);
             entity.Property(submission => submission.ErrorMessage).HasColumnType("text");
             entity.HasOne(submission => submission.User)
                 .WithMany()

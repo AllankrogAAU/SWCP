@@ -11,6 +11,8 @@
     "feedbackMarkdown": { "type": ["string", "null"] },
     "taskSolved": { "type": ["boolean", "null"] },
     "confidenceScorePercent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+    "diagnosisConfidence": { "type": ["string", "null"], "enum": ["certain", "likely", "uncertain", "guessing", null] },
+    "rootCauseCategory": { "type": ["string", "null"], "enum": ["syntax", "logic_simple", "pointer_memory", "algorithm", "none", null] },
     "tokenUsage": {
       "type": ["object", "null"],
       "additionalProperties": false,

@@ -85,6 +85,8 @@ class LlmResult(StrictContract):
     tokenUsage: LlmTokenUsage | None = None
     error: str | None = None
     confidenceScorePercent: float | None = Field(default=None, ge=0, le=100)
+    diagnosisConfidence: str | None = None
+    rootCauseCategory: str | None = None
 
 
 class SubmissionNotification(StrictContract):

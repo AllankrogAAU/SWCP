@@ -21,7 +21,9 @@ public sealed record LlmCompletion(
     string? Target = null,
     JsonElement? LogProbabilities = null,
     double? ConfidenceScorePercent = null,
-    string? BackendUsed = null);
+    string? BackendUsed = null,
+    string? DiagnosisConfidence = null,
+    string? RootCauseCategory = null);
 
 public sealed class RetryableLlmException(TimeSpan retryDelay, Exception innerException)
     : Exception(innerException.Message, innerException)
@@ -37,9 +39,11 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                     "type": "object",
                     "properties": {
                         "feedback": { "type": "string", "maxLength": 1500 },
-                        "taskSolved": { "type": ["boolean", "null"] }
+                        "taskSolved": { "type": ["boolean", "null"] },
+                        "rootCauseCategory": { "type": "string", "enum": ["syntax", "logic_simple", "pointer_memory", "algorithm", "none"] },
+                        "diagnosisConfidence": { "type": "string", "enum": ["certain", "likely", "uncertain", "guessing"] }
                     },
-                    "required": ["feedback", "taskSolved"],
+                    "required": ["feedback", "taskSolved", "rootCauseCategory", "diagnosisConfidence"],
                     "additionalProperties": false
                 }
                 """;
@@ -48,9 +52,11 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
                     "type": "object",
                     "properties": {
                         "feedback": { "type": "string", "maxLength": 300 },
-                        "taskSolved": { "type": ["boolean", "null"] }
+                        "taskSolved": { "type": ["boolean", "null"] },
+                        "rootCauseCategory": { "type": "string", "enum": ["syntax", "logic_simple", "pointer_memory", "algorithm", "none"] },
+                        "diagnosisConfidence": { "type": "string", "enum": ["certain", "likely", "uncertain", "guessing"] }
                     },
-                    "required": ["feedback", "taskSolved"],
+                    "required": ["feedback", "taskSolved", "rootCauseCategory", "diagnosisConfidence"],
                     "additionalProperties": false
                 }
                 """;
@@ -249,13 +255,24 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             taskSolved = null;
         }
 
+        var diagnosisConfidence = root.TryGetProperty("diagnosisConfidence", out var confidenceElement) &&
+            confidenceElement.ValueKind == JsonValueKind.String
+                ? confidenceElement.GetString()
+                : null;
+        var rootCauseCategory = root.TryGetProperty("rootCauseCategory", out var categoryElement) &&
+            categoryElement.ValueKind == JsonValueKind.String
+                ? categoryElement.GetString()
+                : null;
+
         return new LlmCompletion(
             feedbackElement.GetString()!,
             usage,
             taskSolved,
             target,
             logProbabilities,
-            CalculateConfidenceScorePercent(logProbabilities));
+            CalculateConfidenceScorePercent(logProbabilities),
+            DiagnosisConfidence: diagnosisConfidence,
+            RootCauseCategory: rootCauseCategory);
     }
 
     private static double? CalculateConfidenceScorePercent(JsonElement? logProbabilities)

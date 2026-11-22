@@ -401,6 +401,8 @@ public static class SubmissionEndpoints
         item.LlmFeedback,
         item.TaskSolved,
         item.ConfidenceScorePercent,
+        item.DiagnosisConfidence,
+        item.RootCauseCategory,
         item.ErrorMessage,
         item.CreatedAtUtc,
         item.UpdatedAtUtc);

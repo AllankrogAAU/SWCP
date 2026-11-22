@@ -46,6 +46,8 @@ public sealed record SubmissionResponse(
     string? LlmFeedback,
     bool? TaskSolved,
     double? ConfidenceScorePercent,
+    string? DiagnosisConfidence,
+    string? RootCauseCategory,
     string? ErrorMessage,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);

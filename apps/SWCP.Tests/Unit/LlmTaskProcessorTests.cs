@@ -57,7 +57,7 @@ public sealed class LlmTaskProcessorTests
             {
               "choices": [{
                 "finish_reason": "stop",
-                "message": { "content": "{\"feedback\":\"ok\",\"taskSolved\":null}" },
+                "message": { "content": "{\"feedback\":\"ok\",\"taskSolved\":null,\"rootCauseCategory\":\"syntax\",\"diagnosisConfidence\":\"certain\"}" },
                 "logprobs": { "content": [{ "token": "ok", "logprob": -0.6931471805599453 }] }
               }],
               "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
@@ -82,6 +82,8 @@ public sealed class LlmTaskProcessorTests
         Assert.NotNull(completion.ConfidenceScorePercent);
         Assert.Equal(50, completion.ConfidenceScorePercent.Value, precision: 4);
         Assert.Equal("local", completion.BackendUsed);
+        Assert.Equal("syntax", completion.RootCauseCategory);
+        Assert.Equal("certain", completion.DiagnosisConfidence);
     }
 
     [Fact]

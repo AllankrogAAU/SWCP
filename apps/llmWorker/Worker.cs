@@ -196,10 +196,10 @@ public sealed class Worker(
                 ? Math.Round((double)completionTokens.Value / (stageTimer.ElapsedMilliseconds / 1000.0), 1)
                 : 0.0;
             logger.LogInformation(
-                "Pipeline stage completed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {backend} {llm_target} {attempt} {status} {prompt_tokens} {completion_tokens} {total_tokens} {tokens_per_second} {confidence_score_percent}",
+                "Pipeline stage completed {event_name} {stage} {submission_id} {trace_id} {duration_ms} {backend} {llm_target} {attempt} {status} {prompt_tokens} {completion_tokens} {total_tokens} {tokens_per_second} {confidence_score_percent} {diagnosis_confidence} {root_cause_category}",
                 "pipeline.stage.completed", "llm", task.SubmissionId, traceId, stageTimer.ElapsedMilliseconds,
                 completion.BackendUsed ?? task.Backend, completion.Target ?? task.Backend, attempt, "completed", promptTokens, completionTokens, totalTokens,
-                tokensPerSec, completion.ConfidenceScorePercent);
+                tokensPerSec, completion.ConfidenceScorePercent, completion.DiagnosisConfidence, completion.RootCauseCategory);
             await PublishResultAsync(new LlmResult(
                 task.SubmissionId,
                 "success",
@@ -207,7 +207,9 @@ public sealed class Worker(
                 completion.TokenUsage,
                 null,
                 completion.TaskSolved,
-                completion.ConfidenceScorePercent), stoppingToken, task.TraceParent);
+                completion.ConfidenceScorePercent,
+                completion.DiagnosisConfidence,
+                completion.RootCauseCategory), stoppingToken, task.TraceParent);
             await message.AckAsync(cancellationToken: stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

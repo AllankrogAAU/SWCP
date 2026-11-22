@@ -54,6 +54,8 @@ public sealed class Submission
     public string? LlmFeedback { get; set; }
     public bool? TaskSolved { get; set; }
     public double? ConfidenceScorePercent { get; set; }
+    public string? DiagnosisConfidence { get; set; }
+    public string? RootCauseCategory { get; set; }
     public string? ErrorMessage { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }
