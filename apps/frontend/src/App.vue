@@ -22,7 +22,6 @@ import {
   submitSource,
   type Assignment,
   type LlmBackend,
-  type SubmissionAction,
   type SubmissionResponse,
   type SubmissionStatus,
 } from './services/api'
@@ -52,7 +51,6 @@ const submissionId = ref('')
 const canceling = ref(false)
 const loading = computed(() => busyAction.value === 'submit' || busyAction.value === 'hint')
 const loadingAssignment = ref(false)
-const waitingForAction = computed(() => busyAction.value !== null)
 let stopStream: (() => void) | undefined
 let pollGeneration = 0
 let assignmentLoadGeneration = 0
@@ -121,10 +119,10 @@ async function loadAssignments() {
   )
   if (activeSubmission && busyAction.value === null) {
     busyAction.value = activeSubmission.action
-    trackSubmission(
-      { submissionId: activeSubmission.submissionId, status: activeSubmission.status },
-      activeSubmission.action,
-    )
+    trackSubmission({
+      submissionId: activeSubmission.submissionId,
+      status: activeSubmission.status,
+    })
   }
 }
 
@@ -213,10 +211,7 @@ async function pollSubmission(id: string, generation: number) {
   }
 }
 
-function trackSubmission(
-  accepted: { submissionId: string; status: SubmissionStatus },
-  _action: SubmissionAction,
-) {
+function trackSubmission(accepted: { submissionId: string; status: SubmissionStatus }) {
   submissionId.value = accepted.submissionId
   status.value = accepted.status
   const generation = ++pollGeneration
@@ -234,16 +229,13 @@ function trackSubmission(
   void pollSubmission(accepted.submissionId, generation)
 }
 
-function resumeIfConflict(cause: unknown, action: SubmissionAction): boolean {
+function resumeIfConflict(cause: unknown): boolean {
   if (cause instanceof ApiError && cause.status === 409 && cause.activeSubmissionId) {
     error.value = cause.message
-    trackSubmission(
-      {
-        submissionId: cause.activeSubmissionId,
-        status: cause.submissionStatus ?? 'PENDING',
-      },
-      action,
-    )
+    trackSubmission({
+      submissionId: cause.activeSubmissionId,
+      status: cause.submissionStatus ?? 'PENDING',
+    })
     return true
   }
   return false
@@ -277,9 +269,9 @@ async function requestFeedback() {
   status.value = 'PENDING'
   try {
     const accepted = await submitSource(selected.value.id, code.value, backend.value)
-    trackSubmission(accepted, 'submit')
+    trackSubmission(accepted)
   } catch (cause) {
-    if (!resumeIfConflict(cause, 'submit')) {
+    if (!resumeIfConflict(cause)) {
       error.value = cause instanceof Error ? cause.message : 'Could not submit code.'
       busyAction.value = null
     }
@@ -293,9 +285,9 @@ async function requestCodeHint() {
   feedback.value = ''
   try {
     const accepted = await requestHint(selected.value.id, code.value, backend.value)
-    trackSubmission(accepted, 'hint')
+    trackSubmission(accepted)
   } catch (cause) {
-    if (!resumeIfConflict(cause, 'hint')) {
+    if (!resumeIfConflict(cause)) {
       error.value = cause instanceof Error ? cause.message : 'Could not request a hint.'
       busyAction.value = null
     }
@@ -315,9 +307,9 @@ async function runCode() {
       backend.value,
       standardInput.value,
     )
-    trackSubmission(accepted, 'run')
+    trackSubmission(accepted)
   } catch (cause) {
-    if (!resumeIfConflict(cause, 'run')) {
+    if (!resumeIfConflict(cause)) {
       terminalOutput.value = cause instanceof Error ? cause.message : 'Run is not available yet.'
       busyAction.value = null
     }
@@ -402,8 +394,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   pollGeneration++
   window.clearTimeout(autosaveTimer)
-  window.clearTimeout(reconnectTimer)
-  socket?.close()
+  stopStream?.()
+  stopStream = undefined
 })
 </script>
 

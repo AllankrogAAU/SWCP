@@ -23,6 +23,7 @@ from sandbox.k8s_pod import (
     build_pod_manifest,
 )
 from sandbox.report import parse_report
+from sandbox.runsc_oci import RunscConfig, RunscSandbox, build_oci_spec
 from worker import evaluate_task, handle_message
 
 
