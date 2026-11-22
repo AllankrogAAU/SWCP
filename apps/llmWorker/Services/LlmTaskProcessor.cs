@@ -63,38 +63,13 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
     private int _cachedPrimaryLoad;
     private int _primaryActiveCount;
 
-    public async Task<LlmCompletion> CompleteAsync(LlmTask task, CancellationToken cancellationToken)
-    {
-        if (task.Backend == "azure")
+    public async Task<LlmCompletion> CompleteAsync(LlmTask task, CancellationToken cancellationToken) =>
+        task.Backend switch
         {
-            return (await CompleteAzureAsync(task, cancellationToken)) with { BackendUsed = "azure" };
-        }
-
-        if (task.Backend != "local")
-        {
-            throw new InvalidOperationException($"Unsupported LLM backend '{task.Backend}'.");
-        }
-
-        var fallbackThreshold = configuration.GetValue<double>("LocalLlm:AzureFallbackThreshold", 0);
-        if (fallbackThreshold is < 0 or > 100)
-        {
-            throw new InvalidOperationException("LocalLlm:AzureFallbackThreshold must be between 0 and 100.");
-        }
-
-        var localCompletion = await CompleteLocalAsync(task, cancellationToken);
-        if (localCompletion.ConfidenceScorePercent is double score && score < fallbackThreshold)
-        {
-            var azureCompletion = await CompleteAzureAsync(task, cancellationToken);
-            return azureCompletion with
-            {
-                LogProbabilities = localCompletion.LogProbabilities,
-                ConfidenceScorePercent = score,
-                BackendUsed = "azure"
-            };
-        }
-
-        return localCompletion with { BackendUsed = "local" };
-    }
+            "azure" => (await CompleteAzureAsync(task, cancellationToken)) with { BackendUsed = "azure" },
+            "local" => (await CompleteLocalAsync(task, cancellationToken)) with { BackendUsed = "local" },
+            _ => throw new InvalidOperationException($"Unsupported LLM backend '{task.Backend}'.")
+        };
 
     private async Task<LlmCompletion> CompleteAzureAsync(LlmTask task, CancellationToken cancellationToken)
     {
@@ -188,7 +163,6 @@ public sealed class LlmTaskProcessor(IConfiguration configuration, IHttpClientFa
             max_tokens = task.Parameters.MaxTokens,
             top_p = task.Parameters.TopP,
             logprobs = true,
-            top_logprobs = 5,
             presence_penalty = 0.3,
             frequency_penalty = 0.3,
             response_format = new

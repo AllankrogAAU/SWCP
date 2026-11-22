@@ -102,7 +102,7 @@ public class NatsTaskPublisher
             : Messaging.LlmAzureTaskSubject;
         var headers = new NatsHeaders
         {
-            { "Nats-Msg-Id", Messaging.LlmMessageId(task.SubmissionId) },
+            { "Nats-Msg-Id", Messaging.LlmMessageId(task.SubmissionId, task.Backend) },
             { Messaging.TraceParentHeader, task.TraceParent ?? Messaging.CurrentOrNewTraceParent() }
         };
         await _jetStream.PublishAsync(subject, task, headers: headers, cancellationToken: cancellationToken);

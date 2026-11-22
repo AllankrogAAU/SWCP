@@ -55,6 +55,7 @@ services:
       SeedDevelopmentUsers: ${SEED_DEVELOPMENT_USERS:-false}
       DevelopmentUsers__TeacherUsername: ${DEV_TEACHER_USERNAME:-${DEV_TEACHER_EMAIL:-}}
       DevelopmentUsers__TeacherPassword: ${DEV_TEACHER_PASSWORD:-}
+      LocalLlm__AzureFallbackThreshold: ${LOCAL_LLM_AZURE_FALLBACK_THRESHOLD:-0}
     volumes:
       - jwt-private:/private
       - jwt-public:/public

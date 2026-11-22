@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Text;
 using llmWorker.Services;
 using Microsoft.Extensions.Configuration;
@@ -65,8 +66,7 @@ public sealed class LlmTaskProcessorTests
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["LocalLlm:ModelName"] = "test-model",
-                ["LocalLlm:AzureFallbackThreshold"] = "0"
+                ["LocalLlm:ModelName"] = "test-model"
             })
             .Build();
         var processor = new LlmTaskProcessor(config, new ResponseHttpClientFactory(responseBody));
@@ -79,7 +79,8 @@ public sealed class LlmTaskProcessorTests
 
         var completion = await processor.CompleteAsync(task, CancellationToken.None);
 
-        Assert.Equal(50, completion.ConfidenceScorePercent, precision: 4);
+        Assert.NotNull(completion.ConfidenceScorePercent);
+        Assert.Equal(50, completion.ConfidenceScorePercent.Value, precision: 4);
         Assert.Equal("local", completion.BackendUsed);
     }
 

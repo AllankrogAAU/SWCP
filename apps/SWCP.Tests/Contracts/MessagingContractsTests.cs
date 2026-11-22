@@ -23,6 +23,7 @@ public sealed partial class MessagingContractsTests
         var submissionId = Guid.Parse("11111111-2222-3333-4444-555555555555");
         Assert.Equal("11111111-2222-3333-4444-555555555555-sandbox-0", Messaging.SandboxMessageId(submissionId, 0));
         Assert.Equal("11111111-2222-3333-4444-555555555555-llm", Messaging.LlmMessageId(submissionId));
+        Assert.Equal("11111111-2222-3333-4444-555555555555-llm-azure", Messaging.LlmMessageId(submissionId, "azure"));
         Assert.Equal("notifications.11111111-2222-3333-4444-555555555555", Messaging.NotificationSubject(submissionId));
     }
 

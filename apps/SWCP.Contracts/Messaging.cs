@@ -29,6 +29,7 @@ public static class Messaging
 
     public static string SandboxMessageId(Guid submissionId, int attempt = 0) => $"{submissionId:D}-sandbox-{attempt}";
     public static string LlmMessageId(Guid submissionId) => $"{submissionId:D}-llm";
+    public static string LlmMessageId(Guid submissionId, string backend) => $"{submissionId:D}-llm-{backend}";
     public static string NotificationSubject(Guid submissionId) => $"notifications.{submissionId:D}";
 
     public static string CurrentOrNewTraceParent()
