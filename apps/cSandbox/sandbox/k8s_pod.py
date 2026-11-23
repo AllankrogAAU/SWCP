@@ -78,6 +78,7 @@ def build_pod_manifest(
     # Prefer the owning worker's node so normal load stays on control-node while spilled
     # workers keep sandboxes local; overflow_to_worker shifts excess pods onto worker nodes
     # before the headroom node approaches its pod limit.
+    affinity_expr: dict[str, str | list[str]]
     if overflow_to_worker:
         affinity_expr = {
             "key": "node-role.kubernetes.io/control-plane",

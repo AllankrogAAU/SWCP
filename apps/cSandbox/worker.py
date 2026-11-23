@@ -411,6 +411,7 @@ async def run_worker() -> None:
         )
     consumer = await jetstream.pull_subscribe_bind(TASK_DURABLE, stream=TASK_STREAM)
 
+    provider: KubeSandboxProvider | RunscSandboxProvider
     try:
         if SANDBOX_BACKEND == "k8s":
             provider = KubeSandboxProvider(
