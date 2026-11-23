@@ -80,7 +80,8 @@ public sealed class LlmTaskProcessorTests
 
         var completion = await processor.CompleteAsync(task, CancellationToken.None);
 
-        Assert.Equal(50, completion.ConfidenceScorePercent, precision: 4);
+        Assert.NotNull(completion.ConfidenceScorePercent);
+        Assert.Equal(50d, completion.ConfidenceScorePercent.Value, precision: 4);
         Assert.Equal("local", completion.BackendUsed);
     }
 

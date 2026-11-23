@@ -100,6 +100,7 @@ spec:
             - --max-model-len=$(VLLM_MAX_MODEL_LEN)
             - --gpu-memory-utilization=$(VLLM_GPU_MEMORY_UTILIZATION)
             - --max-num-seqs=$(VLLM_MAX_NUM_SEQS)
+            - --max-logprobs=5
             - --host=0.0.0.0
             - --port=$(VLLM_PORT)
           ports:
@@ -200,6 +201,7 @@ spec:
             - --max-model-len=$(VLLM_MAX_MODEL_LEN)
             - --gpu-memory-utilization=$(VLLM_GPU_MEMORY_UTILIZATION)
             - --max-num-seqs=$(VLLM_MAX_NUM_SEQS)
+            - --max-logprobs=5
             - --host=0.0.0.0
             - --port=$(VLLM_PORT)
           ports:

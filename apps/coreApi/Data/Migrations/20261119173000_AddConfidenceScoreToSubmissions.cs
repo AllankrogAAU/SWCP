@@ -5,6 +5,7 @@
 namespace coreApi.Data.Migrations
 {
     /// <inheritdoc />
+    [Migration("20261119173000_AddConfidenceScoreToSubmissions")]
     public partial class AddConfidenceScoreToSubmissions : Migration
     {
         /// <inheritdoc />

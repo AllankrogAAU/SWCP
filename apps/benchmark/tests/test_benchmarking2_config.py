@@ -61,7 +61,7 @@ def test_pipeline_refreshes_expired_benchmark_token(monkeypatch):
                 )
             ),
         ) as http_client:
-            return await client._refresh_token(token, http_client)
+            return await client._refresh_token(0, token, http_client)
 
     refreshed = asyncio.run(refresh())
 

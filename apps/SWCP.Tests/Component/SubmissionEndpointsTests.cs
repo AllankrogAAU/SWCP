@@ -2,7 +2,10 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using coreApi.Data;
 using coreApi.Models;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace SWCP.Tests.Component;
@@ -122,6 +125,40 @@ public sealed class SubmissionEndpointsTests : IClassFixture<CoreApiTestFixture>
 
         var accessResp = await _client.SendAsync(accessReq);
         Assert.Equal(HttpStatusCode.Forbidden, accessResp.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetSubmission_ReturnsStoredConfidenceScore()
+    {
+        var student = await _fixture.SeedUserAsync("student_confidence", "pass123", UserRole.Student);
+        var assignment = await _fixture.SeedAssignmentAsync("Confidence Score Assignment");
+        var token = _fixture.GenerateJwt(student);
+
+        using var submitRequest = new HttpRequestMessage(HttpMethod.Post, "/api/submissions");
+        submitRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        submitRequest.Content = JsonContent.Create(new CreateSubmissionRequest(
+            assignment.Id, "int main() { return 0; }", "local", "submit"));
+
+        var submitResponse = await _client.SendAsync(submitRequest);
+        Assert.Equal(HttpStatusCode.Accepted, submitResponse.StatusCode);
+        var submitJson = await submitResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var submissionId = submitJson.GetProperty("submissionId").GetGuid();
+
+        await using (var scope = _fixture.Services.CreateAsyncScope())
+        {
+            var database = scope.ServiceProvider.GetRequiredService<CoreDbContext>();
+            var submission = await database.Submissions.SingleAsync(item => item.Id == submissionId);
+            submission.ConfidenceScorePercent = 87.5;
+            await database.SaveChangesAsync();
+        }
+
+        using var getRequest = new HttpRequestMessage(HttpMethod.Get, $"/api/submissions/{submissionId}");
+        getRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var getResponse = await _client.SendAsync(getRequest);
+
+        Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
+        var getJson = await getResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(87.5, getJson.GetProperty("confidenceScorePercent").GetDouble());
     }
 
     [Fact]
