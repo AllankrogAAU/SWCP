@@ -11,7 +11,12 @@ from pathlib import Path
 
 from contracts import SandboxTestCase
 from evaluation.result import SandboxReport
-from sandbox.interface import Limits, SandboxError
+from sandbox.interface import (
+    Limits,
+    PermanentSandboxError,
+    SandboxConfigurationError,
+    SandboxError,
+)
 from sandbox.report import parse_report
 
 logger = logging.getLogger("c-sandbox-worker")
@@ -169,34 +174,39 @@ class RunscSandbox:
         harness_source: str | None = None,
         run_stdin: str = "",
     ) -> SandboxReport:
-        source_data = source.encode("utf-8")
-        harness_data = (harness_source or "").encode("utf-8")
-        run_input_data = run_stdin.encode("utf-8")
-        input_data = bytearray(source_data)
-        input_data.extend(harness_data)
-        input_data.extend(run_input_data)
+        try:
+            source_data = source.encode("utf-8")
+            harness_data = (harness_source or "").encode("utf-8")
+            run_input_data = run_stdin.encode("utf-8")
+            input_data = bytearray(source_data)
+            input_data.extend(harness_data)
+            input_data.extend(run_input_data)
 
-        command = [
-            "/usr/local/bin/run-submission",
-            str(len(source_data)),
-            str(limits.compile_timeout_s),
-            str(limits.lint_timeout_s),
-            str(limits.run_timeout_s),
-            str(limits.output_cap_bytes),
-            str(len(test_cases)),
-            str(len(harness_data)),
-            str(len(run_input_data)),
-        ]
-        for test_case in test_cases:
-            case_input = test_case.stdin.encode("utf-8")
-            input_data.extend(case_input)
-            command.extend(
-                [
-                    str(len(case_input)),
-                    str(test_case.timeoutMilliseconds),
-                    str(test_case.memoryLimitMegabytes),
-                ]
-            )
+            command = [
+                "/usr/local/bin/run-submission",
+                str(len(source_data)),
+                str(limits.compile_timeout_s),
+                str(limits.lint_timeout_s),
+                str(limits.run_timeout_s),
+                str(limits.output_cap_bytes),
+                str(len(test_cases)),
+                str(len(harness_data)),
+                str(len(run_input_data)),
+            ]
+            for test_case in test_cases:
+                case_input = test_case.stdin.encode("utf-8")
+                input_data.extend(case_input)
+                command.extend(
+                    [
+                        str(len(case_input)),
+                        str(test_case.timeoutMilliseconds),
+                        str(test_case.memoryLimitMegabytes),
+                    ]
+                )
+        except UnicodeEncodeError as exception:
+            raise PermanentSandboxError(
+                "sandbox task text must be valid UTF-8"
+            ) from exception
 
         deadline_s = (
             limits.compile_timeout_s
@@ -206,18 +216,23 @@ class RunscSandbox:
             + 15
         )
 
-        os.makedirs(self._cfg.state_dir, exist_ok=True)
-        os.makedirs(self._cfg.work_base_dir, exist_ok=True)
-        self._bundle_dir = Path(
-            tempfile.mkdtemp(prefix=f"{self.name}-", dir=self._cfg.work_base_dir)
-        )
-        work_dir = self._bundle_dir / "work"
-        work_dir.mkdir(mode=0o777, parents=True, exist_ok=True)
-        os.chmod(work_dir, 0o777)
+        try:
+            self._bundle_dir = Path(
+                tempfile.mkdtemp(prefix=f"{self.name}-", dir=self._cfg.work_base_dir)
+            )
+            work_dir = self._bundle_dir / "work"
+            work_dir.mkdir(mode=0o777, parents=True, exist_ok=True)
+            os.chmod(work_dir, 0o777)
 
-        spec = build_oci_spec(self._cfg, command, str(work_dir))
-        config_path = self._bundle_dir / "config.json"
-        config_path.write_text(json.dumps(spec), encoding="utf-8")
+            spec = build_oci_spec(self._cfg, command, str(work_dir))
+            config_path = self._bundle_dir / "config.json"
+            config_path.write_text(json.dumps(spec), encoding="utf-8")
+        except (PermissionError, FileNotFoundError, NotADirectoryError) as exception:
+            raise SandboxConfigurationError(
+                f"could not prepare runsc bundle: {exception}"
+            ) from exception
+        except OSError as exception:
+            raise SandboxError(f"could not prepare runsc bundle: {exception}") from exception
 
         runsc_cmd = self._build_runsc_cmd(self._bundle_dir)
         try:
@@ -230,7 +245,11 @@ class RunscSandbox:
             )
         except subprocess.TimeoutExpired as exception:
             raise SandboxError("sandbox exec exceeded its deadline") from exception
-        except Exception as exception:
+        except (FileNotFoundError, PermissionError) as exception:
+            raise SandboxConfigurationError(
+                f"runsc executable cannot be started: {exception}"
+            ) from exception
+        except OSError as exception:
             raise SandboxError(f"runsc execution failed: {exception}") from exception
 
         stdout_text = proc.stdout.decode("utf-8", errors="replace")
@@ -265,7 +284,47 @@ class RunscSandbox:
 class RunscSandboxProvider:
     def __init__(self, cfg: RunscConfig | None = None) -> None:
         self._cfg = cfg or RunscConfig.from_env()
-        os.makedirs(self._cfg.state_dir, exist_ok=True)
+        self._validate_config()
+
+    def _validate_config(self) -> None:
+        if self._cfg.platform not in {"ptrace", "systrap", "kvm"}:
+            raise SandboxConfigurationError(
+                f"Unsupported runsc platform: {self._cfg.platform}"
+            )
+        if min(
+            self._cfg.memory_limit_mb,
+            self._cfg.fsize_limit_bytes,
+            self._cfg.nproc_limit,
+            self._cfg.nofile_limit,
+        ) <= 0:
+            raise SandboxConfigurationError("runsc resource limits must be positive")
+
+        executable = shutil.which(self._cfg.runsc_bin)
+        if executable is None:
+            raise SandboxConfigurationError(
+                f"runsc executable was not found: {self._cfg.runsc_bin}"
+            )
+
+        rootfs = Path(self._cfg.rootfs_path)
+        if not rootfs.is_dir() or not os.access(rootfs, os.R_OK | os.X_OK):
+            raise SandboxConfigurationError(
+                f"runsc root filesystem is missing or unreadable: {rootfs}"
+            )
+        runner = rootfs / "usr" / "local" / "bin" / "run-submission"
+        if not runner.is_file() or not os.access(runner, os.R_OK | os.X_OK):
+            raise SandboxConfigurationError(
+                f"run-submission is missing or not executable in rootfs: {runner}"
+            )
+
+        for directory in (self._cfg.state_dir, self._cfg.work_base_dir):
+            try:
+                os.makedirs(directory, exist_ok=True)
+                with tempfile.TemporaryFile(dir=directory):
+                    pass
+            except OSError as exception:
+                raise SandboxConfigurationError(
+                    f"runsc directory is not writable: {directory}: {exception}"
+                ) from exception
 
     def acquire(self) -> RunscSandbox:
         return RunscSandbox(self._cfg)

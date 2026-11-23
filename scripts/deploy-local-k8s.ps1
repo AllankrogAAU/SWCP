@@ -79,6 +79,11 @@ $manifests = @(
     'k8s/04-core-api.yaml',
     'k8s/'
 )
+$existingVllmRole = kubectl get deployment vllm -n swcp -o jsonpath='{.spec.selector.matchLabels.swcp\.io/vllm-role}' 2>$null
+if ($LASTEXITCODE -eq 0 -and $existingVllmRole -ne 'primary') {
+    Write-Host 'Replacing vllm Deployment because its immutable pod selector changed.'
+    Invoke-Native kubectl @('delete', 'deployment', 'vllm', '-n', 'swcp', '--wait=true')
+}
 foreach ($manifest in $manifests) {
     Invoke-Native kubectl @('apply', '-f', $manifest)
 }

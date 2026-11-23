@@ -25,7 +25,11 @@ from pydantic import ValidationError
 
 from contracts import CompilationResult, SandboxResult, SandboxTask, SandboxTestResult
 from evaluation.evaluator import evaluate
-from sandbox.interface import Limits, PermanentSandboxError
+from sandbox.interface import (
+    Limits,
+    PermanentSandboxError,
+    SandboxConfigurationError,
+)
 from sandbox.k8s_pod import KubeSandboxProvider, PodConfig
 from sandbox.runsc_oci import RunscConfig, RunscSandboxProvider
 
@@ -39,6 +43,8 @@ MAX_CONCURRENT = int(os.getenv("SANDBOX_MAX_CONCURRENT", "8"))
 POOL_SIZE = int(os.getenv("SANDBOX_POOL_SIZE", "4"))
 POOL_WORKERS = max(1, int(os.getenv("SANDBOX_POOL_WORKERS", "3")))
 MAX_ACK_PENDING = int(os.getenv("SANDBOX_MAX_ACK_PENDING", "512"))
+MAX_DELIVERIES = 3
+MAX_RESULT_PUBLISH_ATTEMPTS = 3
 HEALTH_FILE = os.getenv("SANDBOX_HEALTH_FILE", "/tmp/healthy")
 
 
@@ -124,6 +130,28 @@ async def _fail_message(message, jetstream, task, error_text: str) -> None:
         headers={"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"},
     )
     await message.ack()
+
+
+async def publish_result_with_retry(
+    message, jetstream, payload: bytes, headers: dict[str, str]
+) -> None:
+    for attempt in range(1, MAX_RESULT_PUBLISH_ATTEMPTS + 1):
+        try:
+            await jetstream.publish(RESULT_SUBJECT, payload, headers=headers)
+            return
+        except Exception:
+            logger.exception(
+                "Could not publish sandbox result (attempt %d/%d)",
+                attempt,
+                MAX_RESULT_PUBLISH_ATTEMPTS,
+            )
+            if attempt == MAX_RESULT_PUBLISH_ATTEMPTS:
+                raise
+            try:
+                await message.in_progress()
+            except Exception:
+                logger.exception("Could not extend sandbox message acknowledgement")
+            await asyncio.sleep(min(2 ** (attempt - 1), 8))
 
 
 def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
@@ -265,29 +293,8 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
             duration_ms = round((time.perf_counter() - stage_started) * 1000)
             eval_span.set_attribute("duration_ms", duration_ms)
             eval_span.set_attribute("outcome", result.errorClassification or "unknown")
-
-            result_headers = {"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"}
-            if trace_parent:
-                result_headers["traceparent"] = trace_parent
-            await jetstream.publish(
-                RESULT_SUBJECT,
-                result.model_dump_json().encode("utf-8"),
-                headers=result_headers,
-            )
-            await message.ack()
-            logger.info(
-                "Sandbox evaluation completed",
-                extra={
-                    "event_name": "pipeline.stage.completed",
-                    "stage": "sandbox",
-                    "submission_id": str(task.submissionId),
-                    "traceparent": trace_parent,
-                    "duration_ms": duration_ms,
-                    "attempt": attempt,
-                    "status": "completed",
-                    "outcome": result.errorClassification,
-                },
-            )
+    except SandboxConfigurationError:
+        raise
     except PermanentSandboxError as exception:
         error_text = str(exception)
         logger.exception(
@@ -307,7 +314,7 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
         return
     except Exception:
         delivered = getattr(getattr(message, "metadata", None), "num_delivered", 1)
-        if delivered >= 3:
+        if delivered >= MAX_DELIVERIES:
             error_text = "sandbox worker retries exhausted"
             logger.exception(
                 "Sandbox evaluation retries exhausted",
@@ -345,6 +352,44 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
         )
         await asyncio.sleep(delay)
         await message.nak()
+        return
+
+    result_headers = {"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"}
+    if trace_parent:
+        result_headers["traceparent"] = trace_parent
+    result_payload = result.model_dump_json().encode("utf-8")
+    try:
+        await publish_result_with_retry(
+            message, jetstream, result_payload, result_headers
+        )
+    except Exception:
+        logger.exception(
+            "Could not publish sandbox result; leaving message unacknowledged",
+            extra={
+                "event_name": "pipeline.result.publish_failed",
+                "stage": "sandbox",
+                "submission_id": str(task.submissionId),
+                "traceparent": trace_parent,
+                "attempt": attempt,
+                "status": "retrying",
+            },
+        )
+        return
+
+    await message.ack()
+    logger.info(
+        "Sandbox evaluation completed",
+        extra={
+            "event_name": "pipeline.stage.completed",
+            "stage": "sandbox",
+            "submission_id": str(task.submissionId),
+            "traceparent": trace_parent,
+            "duration_ms": duration_ms,
+            "attempt": attempt,
+            "status": "completed",
+            "outcome": result.errorClassification,
+        },
+    )
 
 
 async def run_worker() -> None:
@@ -355,7 +400,7 @@ async def run_worker() -> None:
         ack_policy=AckPolicy.EXPLICIT,
         filter_subject=TASK_SUBJECT,
         ack_wait=120,
-        max_deliver=3,
+        max_deliver=MAX_DELIVERIES,
         max_ack_pending=MAX_ACK_PENDING,
     )
     try:
@@ -366,12 +411,21 @@ async def run_worker() -> None:
         )
     consumer = await jetstream.pull_subscribe_bind(TASK_DURABLE, stream=TASK_STREAM)
 
-    if SANDBOX_BACKEND == "k8s":
-        provider = KubeSandboxProvider(
-            PodConfig.from_env(), pool_size=POOL_SIZE, pool_workers=POOL_WORKERS
-        )
-    else:
-        provider = RunscSandboxProvider(RunscConfig.from_env())
+    provider: KubeSandboxProvider | RunscSandboxProvider
+    try:
+        if SANDBOX_BACKEND == "k8s":
+            provider = KubeSandboxProvider(
+                PodConfig.from_env(), pool_size=POOL_SIZE, pool_workers=POOL_WORKERS
+            )
+        elif SANDBOX_BACKEND == "runsc":
+            provider = RunscSandboxProvider(RunscConfig.from_env())
+        else:
+            raise SandboxConfigurationError(
+                f"Unsupported sandbox backend: {SANDBOX_BACKEND}"
+            )
+    except Exception:
+        await connection.close()
+        raise
 
     executor = ThreadPoolExecutor(
         max_workers=MAX_CONCURRENT, thread_name_prefix="sandbox"
@@ -390,6 +444,11 @@ async def run_worker() -> None:
     async def process(message) -> None:
         try:
             await handle_message(message, connection, jetstream, provider, executor)
+        except SandboxConfigurationError:
+            logger.exception(
+                "Sandbox backend configuration failed; stopping worker without acknowledging task"
+            )
+            shutdown.set()
         except Exception:
             logger.exception("Unhandled error while processing sandbox message")
         finally:

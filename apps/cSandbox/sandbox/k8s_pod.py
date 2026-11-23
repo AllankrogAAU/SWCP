@@ -78,6 +78,7 @@ def build_pod_manifest(
     # Prefer the owning worker's node so normal load stays on control-node while spilled
     # workers keep sandboxes local; overflow_to_worker shifts excess pods onto worker nodes
     # before the headroom node approaches its pod limit.
+    affinity_expr: dict[str, str | list[str]]
     if overflow_to_worker:
         affinity_expr = {
             "key": "node-role.kubernetes.io/control-plane",
@@ -264,7 +265,7 @@ class KubePodSandbox:
 
         report = parse_report("".join(chunks))
         if report.compile is None:
-            raise SandboxError("sandbox produced no report")
+            raise PermanentSandboxError("sandbox produced no report")
         return report
 
     def destroy(self) -> None:
@@ -349,6 +350,9 @@ class KubeSandboxProvider:
                 build_pod_manifest(self._cfg, name, overflow_to_worker=overflow),  # type: ignore[arg-type]
             )
             self._wait_running(name)
+        except PermanentSandboxError:
+            sandbox.destroy()
+            raise
         except ApiException as exception:
             sandbox.destroy()
             raise _api_sandbox_error(
@@ -400,12 +404,17 @@ class KubeSandboxProvider:
     def _wait_running(self, name: str) -> None:
         deadline = time.monotonic() + self._cfg.ready_timeout_s
         while time.monotonic() < deadline:
-            pod = self._api.read_namespaced_pod_status(name, self._cfg.namespace)
+            try:
+                pod = self._api.read_namespaced_pod_status(name, self._cfg.namespace)
+            except ApiException as exception:
+                raise _api_sandbox_error(
+                    "could not read sandbox pod status", exception
+                ) from exception
             phase = pod.status.phase if pod.status else None
             if phase == "Running":
                 return
             if phase in ("Failed", "Succeeded"):
-                raise SandboxStartError(
+                raise PermanentSandboxError(
                     f"pod entered phase {phase}: {self._diagnose(name)}"
                 )
             time.sleep(0.1)

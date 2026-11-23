@@ -181,7 +181,9 @@ jobs:
           LLM_MODEL_NAME=ci-model
           EOF
       - name: Start deterministic Compose stack
-        run: docker compose --profile frontend --profile sandbox up --build -d --wait
+        run: docker compose --profile frontend --profile sandbox up --build -d
+      - name: Wait for API and frontend
+        run: docker compose --profile frontend --profile sandbox up -d --wait api frontend
       - name: Check API and frontend
         run: |
           curl --fail --retry 12 --retry-delay 5 http://127.0.0.1:5170/health

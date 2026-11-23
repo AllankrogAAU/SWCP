@@ -84,7 +84,12 @@ jobs:
         run: docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile frontend --profile sandbox config --quiet
 
       - name: Start staging
-        run: docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile frontend --profile sandbox up -d --wait
+        run: docker compose -f docker-compose.yml -f docker-compose.staging.yml --profile frontend --profile sandbox up -d
+
+      - name: Wait for API and frontend
+        run: >-
+          docker compose -f docker-compose.yml -f docker-compose.staging.yml
+          --profile frontend --profile sandbox up -d --wait api frontend
 
       - name: Set staging URL
         id: staging-url
