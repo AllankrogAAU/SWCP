@@ -1,8 +1,5 @@
-using api.Endpoints;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
-using NATS.Client.Core;
-using NATS.Client.Serializers.Json;
 using System.Security.Cryptography;
 using System.Text.Json.Serialization;
 
@@ -31,25 +28,6 @@ builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
-        options.Events = new JwtBearerEvents
-        {
-            OnMessageReceived = context =>
-            {
-                if (context.Request.Path.StartsWithSegments("/ws"))
-                {
-                    var bearerProtocol = context.Request.Headers.SecWebSocketProtocol
-                        .ToString()
-                        .Split(',', StringSplitOptions.TrimEntries)
-                        .FirstOrDefault(protocol => protocol.StartsWith("bearer.", StringComparison.Ordinal));
-                    if (bearerProtocol is not null)
-                    {
-                        context.Token = bearerProtocol["bearer.".Length..];
-                    }
-                }
-
-                return Task.CompletedTask;
-            }
-        };
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
@@ -69,12 +47,6 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("TeacherOnly", policy => policy.RequireRole("Teacher"));
 });
 
-builder.Services.AddSingleton(_ => new NatsConnection(new NatsOpts
-{
-    Url = builder.Configuration["Nats:Url"] ?? "nats://localhost:4222",
-    RetryOnInitialConnect = true,
-    SerializerRegistry = NatsJsonSerializerRegistry.Default
-}));
 builder.Services.AddHttpClient("CoreApi", client =>
 {
     client.BaseAddress = new Uri(builder.Configuration["CoreApi:Url"] ?? "http://localhost:8081");
@@ -99,12 +71,10 @@ if (app.Environment.IsDevelopment())
 app.MapGet("/health", () => Results.Ok());
 
 app.UseCors();
-app.UseWebSockets();
 
 app.UseAuthentication();
 app.UseAuthorization();
 
-app.MapSubmissionNotificationWebSocket();
 app.MapReverseProxy();
 
 app.Run();

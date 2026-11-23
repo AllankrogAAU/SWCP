@@ -105,7 +105,7 @@ else:
 tracer = trace.get_tracer("c-sandbox-worker")
 
 
-async def fail_terminal_message(message, jetstream, task, error_text: str) -> None:
+async def _fail_message(message, jetstream, task, error_text: str) -> None:
     await jetstream.publish(
         "sandbox.tasks.dlq",
         message.data,
@@ -310,7 +310,7 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
                 "error_type": type(exception).__name__,
             },
         )
-        await fail_terminal_message(message, jetstream, task, error_text)
+        await _fail_message(message, jetstream, task, error_text)
         return
     except Exception:
         delivered = getattr(getattr(message, "metadata", None), "num_delivered", 1)
@@ -329,7 +329,7 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
                     "error_type": "RetriesExhausted",
                 },
             )
-            await fail_terminal_message(message, jetstream, task, error_text)
+            await _fail_message(message, jetstream, task, error_text)
             logger.error(
                 "Sandbox retries exhausted for submission %s; sent to DLQ",
                 task.submissionId,

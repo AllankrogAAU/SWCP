@@ -28,7 +28,7 @@ CREATED_AT_ANNOTATION = "swcp.io/created-at"
 PERMANENT_API_STATUSES = {400, 401, 403, 404, 422}
 
 
-def classify_api_error(action: str, exception: ApiException) -> SandboxError:
+def _api_sandbox_error(action: str, exception: ApiException) -> SandboxError:
     error_type = (
         PermanentSandboxError
         if exception.status in PERMANENT_API_STATUSES
@@ -258,7 +258,7 @@ class KubePodSandbox:
         except SandboxError:
             raise
         except ApiException as exception:
-            raise classify_api_error("exec failed", exception) from exception
+            raise _api_sandbox_error("exec failed", exception) from exception
         except Exception as exception:
             raise SandboxError(f"exec failed: {exception}") from exception
 
@@ -354,7 +354,7 @@ class KubeSandboxProvider:
             raise
         except ApiException as exception:
             sandbox.destroy()
-            raise classify_api_error(
+            raise _api_sandbox_error(
                 "could not start sandbox pod", exception
             ) from exception
         except Exception as exception:
@@ -406,7 +406,7 @@ class KubeSandboxProvider:
             try:
                 pod = self._api.read_namespaced_pod_status(name, self._cfg.namespace)
             except ApiException as exception:
-                raise classify_api_error(
+                raise _api_sandbox_error(
                     "could not read sandbox pod status", exception
                 ) from exception
             phase = pod.status.phase if pod.status else None

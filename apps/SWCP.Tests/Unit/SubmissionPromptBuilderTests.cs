@@ -47,7 +47,7 @@ public sealed class SubmissionPromptBuilderTests
         Assert.Equal("submit", prompt.EvaluationMode);
         Assert.False(prompt.SandboxFailed);
         Assert.Contains("Focus on recursive stack efficiency", prompt.SystemPrompt);
-        Assert.Contains("Review the code for significant non-crashing quality issues first", prompt.SystemPrompt);
+        Assert.Contains("Review the submission in priority order: compilation", prompt.SystemPrompt);
         Assert.Contains("int main()", prompt.UserPrompt);
         Assert.Contains("Fibonacci", prompt.UserPrompt);
     }
@@ -62,7 +62,7 @@ public sealed class SubmissionPromptBuilderTests
         var prompt = SubmissionPromptBuilder.Build(assignment, submission, sandboxResult);
 
         Assert.Equal("hint", prompt.EvaluationMode);
-        Assert.Contains("The student requested a hint. Give one concise next step", prompt.SystemPrompt);
+        Assert.Contains("The student requested a hint. Use the assignment, source", prompt.SystemPrompt);
     }
 
     [Fact]

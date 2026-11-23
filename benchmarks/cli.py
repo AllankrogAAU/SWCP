@@ -43,6 +43,8 @@ def setup_logging(verbose: bool = False) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 async def _run_warmup(config: BenchmarkConfig, count: int = 3) -> int:
@@ -229,7 +231,7 @@ def _store_submission_and_step_metrics(
             "p95_llm_exec_overflow_ms": float(np.percentile(overflow_exec_vals, 95)) if overflow_exec_vals else 0.0,
             "p95_orchestration_overhead_ms": float(np.percentile([rec["orchestration_overhead_ms"] for rec in step_recs], 95)) if step_recs else 0.0,
             "p95_delivery_overhead_ms": float(np.percentile([rec["delivery_overhead_ms"] for rec in step_recs], 95)) if step_recs else 0.0,
-            "ws_completion_rate": (sum(1 for s in step_subs if s.terminal_via == "websocket") / n_subs) if n_subs else 1.0,
+            "ws_completion_rate": (sum(1 for s in step_subs if s.terminal_via in ("websocket", "sse")) / n_subs) if n_subs else 1.0,
             "peak_kv_cache_pct": prom_snap.peak_kv_cache_pct,
             "primary_kv_cache_pct": prom_snap.primary_kv_cache_pct,
             "overflow_kv_cache_pct": prom_snap.overflow_kv_cache_pct,

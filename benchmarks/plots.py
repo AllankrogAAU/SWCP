@@ -142,10 +142,8 @@ def plot_obj1_bottleneck_stacked(
     llm_wait = grouped.get("llm_queue_wait_ms", grouped.get("p95_llm_wait_ms", pd.Series([0.0] * len(steps)))).fillna(0).to_numpy()
     llm_exec = grouped.get("llm_exec_ms", grouped.get("p95_llm_exec_ms", pd.Series([0.0] * len(steps)))).fillna(0).to_numpy()
     orch = grouped.get("orchestration_overhead_ms", pd.Series([0.0] * len(steps))).fillna(0).to_numpy()
-    edge_delivery = (
-        grouped.get("submit_edge_network_ms", pd.Series([0.0] * len(steps))).fillna(0).to_numpy()
-        + grouped.get("delivery_overhead_ms", pd.Series([0.0] * len(steps))).fillna(0).to_numpy()
-    )
+    ingress_queue = grouped.get("submit_edge_network_ms", pd.Series([0.0] * len(steps))).fillna(0).to_numpy()
+    delivery = grouped.get("delivery_overhead_ms", pd.Series([0.0] * len(steps))).fillna(0).to_numpy()
 
     ax.bar(x, enqueue, width, label="API Enqueue", color="#94a3b8")
     ax.bar(x, sb_wait, width, bottom=enqueue, label="Sandbox Queue Wait", color="#38bdf8")
@@ -156,8 +154,12 @@ def plot_obj1_bottleneck_stacked(
     if np.any(orch > 0):
         ax.bar(x, orch, width, bottom=top, label="Bus / Orchestration", color="#a855f7")
         top = top + orch
-    if np.any(edge_delivery > 0):
-        ax.bar(x, edge_delivery, width, bottom=top, label="Edge Network + Delivery", color="#475569")
+    if np.any(delivery > 0):
+        ax.bar(x, delivery, width, bottom=top, label="Event Delivery (SSE)", color="#64748b")
+        top = top + delivery
+    if np.any(ingress_queue > 0):
+        ax.bar(x, ingress_queue, width, bottom=top, label="Ingress / Gateway Queue", color="#334155")
+        top = top + ingress_queue
 
     ax.set_ylabel("Mean Latency (ms)")
     ax.set_xticks(x)

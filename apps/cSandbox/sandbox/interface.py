@@ -10,7 +10,7 @@ class SandboxError(Exception):
 
 
 class PermanentSandboxError(SandboxError):
-    """A sandbox failure that cannot be resolved by retrying."""
+    """A sandbox failure that cannot be fixed by retrying the same task."""
 
 
 class SandboxConfigurationError(RuntimeError):
