@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS submissions (
   feedback TEXT, sandbox_output TEXT, error TEXT, client_e2e_ms REAL,
   http_accepted_ms REAL, pipeline_total_ms REAL, sandbox_queue_ms REAL,
   sandbox_exec_ms REAL, llm_queue_ms REAL, llm_exec_ms REAL,
-  orchestration_ms REAL, delivery_ms REAL, confidence_json TEXT,
+  orchestration_ms REAL, delivery_ms REAL, confidence_score_percent REAL,
   sandbox_acquire_ms REAL, sandbox_acquire_source TEXT,
   sandbox_compile_ms REAL, sandbox_run_ms REAL,
   sandbox_backend TEXT, sandbox_runtime TEXT,
@@ -33,6 +33,15 @@ CREATE TABLE IF NOT EXISTS judge_results (
   score_json TEXT NOT NULL, PRIMARY KEY (run_id, model_name, record_id)
 );
 """
+
+SUBMISSION_COLUMNS = (
+    "run_id,model_name,backend,record_id,assignment_title,category,normalized_category,"
+    "submission_id,status,feedback,sandbox_output,error,client_e2e_ms,http_accepted_ms,"
+    "pipeline_total_ms,sandbox_queue_ms,sandbox_exec_ms,llm_queue_ms,llm_exec_ms,"
+    "orchestration_ms,delivery_ms,confidence_score_percent,"
+    "sandbox_acquire_ms,sandbox_acquire_source,sandbox_compile_ms,sandbox_run_ms,"
+    "sandbox_backend,sandbox_runtime,sandbox_worker_node,sandbox_worker_pod,warmup"
+)
 
 
 class Store:
@@ -54,6 +63,7 @@ class Store:
                 "sandbox_runtime": "TEXT",
                 "sandbox_worker_node": "TEXT",
                 "sandbox_worker_pod": "TEXT",
+                "confidence_score_percent": "REAL",
             }
             for column, column_type in new_columns.items():
                 if column not in existing:
@@ -77,21 +87,13 @@ class Store:
             connection.execute("UPDATE runs SET ended_at=datetime('now') WHERE run_id=?", (run_id,))
 
     def submission(self, run_id: str, model: str, backend: str, item: dict[str, Any]) -> None:
-        columns = (
-            "run_id,model_name,backend,record_id,assignment_title,category,normalized_category,"
-            "submission_id,status,feedback,sandbox_output,error,client_e2e_ms,http_accepted_ms,"
-            "pipeline_total_ms,sandbox_queue_ms,sandbox_exec_ms,llm_queue_ms,llm_exec_ms,"
-            "orchestration_ms,delivery_ms,confidence_json,"
-            "sandbox_acquire_ms,sandbox_acquire_source,sandbox_compile_ms,sandbox_run_ms,"
-            "sandbox_backend,sandbox_runtime,sandbox_worker_node,sandbox_worker_pod,warmup"
-        )
         values = (
             run_id, model, backend, item["record_id"], item["assignment_title"], item["category"],
             item["normalized_category"], item.get("submission_id"), item["status"], item.get("feedback"),
             item.get("sandbox_output"), item.get("error"), item.get("client_e2e_ms"),
             item.get("http_accepted_ms"), item.get("pipeline_total_ms"), item.get("sandbox_queue_ms"),
             item.get("sandbox_exec_ms"), item.get("llm_queue_ms"), item.get("llm_exec_ms"),
-            item.get("orchestration_ms"), item.get("delivery_ms"), item.get("confidence_json"),
+            item.get("orchestration_ms"), item.get("delivery_ms"), item.get("confidence_score_percent"),
             item.get("sandbox_acquire_ms"), item.get("sandbox_acquire_source"),
             item.get("sandbox_compile_ms"), item.get("sandbox_run_ms"),
             item.get("sandbox_backend"), item.get("sandbox_runtime"),
@@ -100,7 +102,7 @@ class Store:
         )
         with sqlite3.connect(self.path) as connection:
             connection.execute(
-                f"INSERT OR REPLACE INTO submissions ({columns}) VALUES ({','.join('?' for _ in values)})",
+                f"INSERT OR REPLACE INTO submissions ({SUBMISSION_COLUMNS}) VALUES ({','.join('?' for _ in values)})",
                 values,
             )
 
@@ -121,8 +123,9 @@ class Store:
                 ("submissions", "submissions.csv"),
                 ("judge_results", "judge_results.csv"),
             ):
+                columns = SUBMISSION_COLUMNS if table == "submissions" else "*"
                 rows = connection.execute(
-                    f"SELECT * FROM {table}" + (" WHERE run_id=?" if table != "runs" else " WHERE run_id=?"),
+                    f"SELECT {columns} FROM {table} WHERE run_id=?",
                     (run_id,),
                 ).fetchall()
                 if table == "runs":

@@ -50,6 +50,14 @@ python -m benchmarking_2 latency
 python -m benchmarking_2 test-test --models local:qwen2.5-coder-14b-instruct-awq
 ```
 
+Run the benchmark using only Qwen3 14B without contacting the cloud judge:
+
+```bash
+python -m benchmarking_2 latency --models local:qwen3-14b-awq
+```
+
+`latency` records submissions and timings but skips cloud judging.
+
 Benchmark runs detach from the terminal by default, so you can close the VS Code window
 without stopping `complete`, `latency`, `test-test`, or `judge`. Their output is written to
 `benchmarking_2/<mode>.log` and the process ID is stored in `benchmarking_2/<mode>.pid`.
@@ -106,6 +114,8 @@ watch -n 15 python3 -m benchmarking_2 status
 
 Results are SQLite files under `benchmarking_2/results/`. Loki stage timings are collected when
 `LOKI_URL` is configured; client timing remains available without monitoring access.
+The submissions CSV includes `confidence_score_percent`, read from the submission API's
+`confidenceScorePercent` field when the target API provides it.
 
 The sandbox telemetry is backend-aware. When Loki is configured, each submission stores:
 

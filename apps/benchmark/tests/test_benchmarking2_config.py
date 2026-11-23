@@ -1,14 +1,17 @@
+import asyncio
+import base64
+import csv
 import json
 import sqlite3
-import base64
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
 
-from benchmarking_2.cli import launch_detached
+from benchmarking_2.cli import launch_detached, result_dict
 from benchmarking_2.config import Config
-from benchmarking_2.pipeline import PipelineClient
+from benchmarking_2.pipeline import PipelineClient, Result
 from benchmarking_2.storage import Store
 from benchmarking_2.cluster_switch import switch_local_model
 
@@ -60,7 +63,6 @@ def test_pipeline_refreshes_expired_benchmark_token(monkeypatch):
         ) as http_client:
             return await client._refresh_token(token, http_client)
 
-    import asyncio
     refreshed = asyncio.run(refresh())
 
     assert refreshed == "refreshed-token"
@@ -88,6 +90,87 @@ def test_store_does_not_persist_judge_api_key(tmp_path):
 
     assert "secret" not in config_json
     assert json.loads(config_json)["judge_model"] == "gpt-6-sol"
+
+
+def test_pipeline_collects_and_exports_confidence_score(tmp_path, monkeypatch):
+    monkeypatch.setenv("TARGET_URL", "http://example.test")
+    config = Config()
+    model = SimpleNamespace(name="test-model", backend="local")
+    client = PipelineClient(config, model, ["token"], {})
+    client.telemetry.collect = lambda *_args: None
+    result = Result(
+        item=SimpleNamespace(
+            record_id=1,
+            assignment_title="Example",
+            category="category",
+            normalized_category="category",
+        ),
+        model=model,
+    )
+    payload = {"assignmentId": "assignment-id"}
+
+    def handler(request):
+        if request.method == "POST":
+            return httpx.Response(200, json={"submissionId": "submission-id"})
+        return httpx.Response(
+            200,
+            json={
+                "status": "COMPLETED",
+                "llmFeedback": "Feedback",
+                "sandboxOutput": None,
+                "confidenceScorePercent": 87.5,
+            },
+        )
+
+    async def execute_submission():
+        async def wait(*_args):
+            return "COMPLETED"
+
+        with patch.object(client, "_wait", side_effect=wait):
+            async with httpx.AsyncClient(
+                base_url="http://example.test",
+                transport=httpx.MockTransport(handler),
+            ) as http_client:
+                await client._execute_submission(
+                    http_client,
+                    payload,
+                    0,
+                    "token",
+                    result,
+                    time.perf_counter(),
+                    time.time(),
+                )
+
+    asyncio.run(execute_submission())
+
+    assert result.confidence_score_percent == 87.5
+
+    database = tmp_path / "run.sqlite"
+    store = Store(database)
+    store.submission("test-run", model.name, model.backend, result_dict(result))
+    exported = store.export("test-run") / "submissions.csv"
+    with exported.open(newline="", encoding="utf-8") as source:
+        row = next(csv.DictReader(source))
+
+    assert row["confidence_score_percent"] == "87.5"
+
+
+def test_store_adds_confidence_score_to_existing_database(tmp_path):
+    database = tmp_path / "existing.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE submissions (run_id TEXT, confidence_json TEXT)"
+        )
+
+    Store(database)
+
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(submissions)")
+        }
+
+    assert "confidence_score_percent" in columns
 
 
 def test_local_model_switch_does_not_require_overflow(tmp_path):

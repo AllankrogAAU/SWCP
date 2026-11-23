@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -32,6 +33,7 @@ class Result:
     error: str | None = None
     client_e2e_ms: float = 0.0
     http_accepted_ms: float = 0.0
+    confidence_score_percent: float | None = None
     timings: Any = None
 
 
@@ -157,6 +159,18 @@ class PipelineClient:
                 if data.get("sandboxOutput")
                 else None
             )
+            confidence_score = data.get("confidenceScorePercent")
+            if confidence_score is not None:
+                if (
+                    isinstance(confidence_score, bool)
+                    or not isinstance(confidence_score, (int, float))
+                    or not math.isfinite(confidence_score)
+                    or not 0 <= confidence_score <= 100
+                ):
+                    raise ValueError(
+                        "Submission API returned an invalid confidenceScorePercent."
+                    )
+                result.confidence_score_percent = float(confidence_score)
             if not result.feedback and str(data.get("status", "")).upper() in {"COMPLETED", "FAILED"}:
                 result.status = str(data.get("status", "")).upper()
         result.client_e2e_ms = (completed_perf - started) * 1000

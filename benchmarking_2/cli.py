@@ -575,7 +575,7 @@ def result_dict(result: Result, warmup: bool = False) -> dict:
         "llm_exec_ms": getattr(timings, "llm_exec_ms", 0),
         "orchestration_ms": getattr(timings, "orchestration_ms", 0),
         "delivery_ms": max(0.0, result.client_e2e_ms - getattr(timings, "pipeline_total_ms", 0)),
-        "confidence_json": None,
+        "confidence_score_percent": result.confidence_score_percent,
         "sandbox_acquire_ms": getattr(timings, "sandbox_acquire_ms", 0),
         "sandbox_acquire_source": getattr(timings, "sandbox_acquire_source", "unknown"),
         "sandbox_compile_ms": getattr(timings, "sandbox_compile_ms", 0),
