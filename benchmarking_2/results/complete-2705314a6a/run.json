@@ -1,0 +1,10 @@
+{
+  "run_id": "complete-2705314a6a",
+  "mode": "complete",
+  "started_at": "2026-11-22 13:07:59",
+  "ended_at": "2026-11-23 07:51:33",
+  "dataset_hash": "c7a0f75a45d04ffee3351e56570329bb62d3ea383a278b6618bb2b646b525afa",
+  "sample_per_category": 50,
+  "judge_enabled": 1,
+  "config_json": "{\"target_url\": \"http://localhost\", \"data_path\": \"benchmarks/submissions_data_11000.jsonl\", \"dataset_db_path\": \"benchmarking_2/submissions.sqlite\", \"models_dir\": \"apps/localLLM/models\", \"results_dir\": \"benchmarking_2/results\", \"user_count\": 24, \"user_prefix\": \"bench2_user_\", \"password\": \"BenchPass123!\", \"sample_per_category\": 50, \"target_rpm\": 100.0, \"max_concurrency\": 10, \"judge_batch_size\": 8, \"warmup_count\": 2, \"timeout_s\": 300, \"seed\": 20261118, \"models\": [{\"name\": \"meta-llama-3.1-8b-instruct-awq-int4\", \"backend\": \"local\"}, {\"name\": \"mistral-nemo-instruct-2407-awq\", \"backend\": \"local\"}, {\"name\": \"qwen2.5-coder-14b-instruct-awq\", \"backend\": \"local\"}, {\"name\": \"qwen2.5-coder-3b-instruct-awq\", \"backend\": \"local\"}, {\"name\": \"qwen2.5-coder-7b-instruct-awq\", \"backend\": \"local\"}, {\"name\": \"qwen3-14b-awq\", \"backend\": \"local\"}, {\"name\": \"gemma-2-9b-it-awq-int4\", \"backend\": \"local\"}, {\"name\": \"qwen35-9b-awq-4bit\", \"backend\": \"local\"}, {\"name\": \"deepseek-r1-distill-llama-8b-awq\", \"backend\": \"local\"}, {\"name\": \"GPT-6-sol\", \"backend\": \"azure\"}], \"switch_command\": null, \"prometheus_url\": \"http://10.43.136.190:9090\", \"loki_url\": \"http://10.43.90.91:3100\", \"judge_url\": null, \"judge_model\": \"gpt-6-sol\", \"judge_api_version\": \"2024-10-21\"}"
+}

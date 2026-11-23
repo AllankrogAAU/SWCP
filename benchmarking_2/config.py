@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 def load_benchmark_env(path: Path = Path(".env")) -> None:
@@ -13,8 +14,8 @@ def load_benchmark_env(path: Path = Path(".env")) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
+        key = key.split("#", 1)[0].strip() if "#" in key else key.strip()
+        value = value.split("#", 1)[0].strip().strip('"').strip("'")
         if key and key not in os.environ:
             os.environ[key] = value
 
@@ -33,6 +34,32 @@ if not os.getenv("AZURE_OPENAI_DEPLOYMENT"):
     os.environ["AZURE_OPENAI_DEPLOYMENT"] = "gpt-6-sol"
 
 
+def _discover_monitoring_service_url(service_name: str, port: int) -> str | None:
+    try:
+        completed = subprocess.run(
+            [
+                "kubectl",
+                "get",
+                "svc",
+                service_name,
+                "-n",
+                "monitoring",
+                "-o",
+                "jsonpath={.spec.clusterIP}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        ip = completed.stdout.strip()
+        if completed.returncode == 0 and ip and ip != "None":
+            return f"http://{ip}:{port}"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     name: str
@@ -46,18 +73,28 @@ class Config:
     dataset_db_path: Path = Path("benchmarking_2/submissions.sqlite")
     models_dir: Path = Path("apps/localLLM/models")
     results_dir: Path = Path("benchmarking_2/results")
-    user_count: int = 20
+    user_count: int = 24
     user_prefix: str = "bench2_user_"
     password: str = "BenchPass123!"
-    sample_per_category: int = 100
+    sample_per_category: int = 50
+    target_rpm: float = field(
+        default_factory=lambda: float(os.getenv("BENCHMARK_RPM", "100.0"))
+    )
+    max_concurrency: int = field(
+        default_factory=lambda: int(os.getenv("VLLM_MAX_NUM_SEQS", "10"))
+    )
     judge_batch_size: int = 8
     warmup_count: int = 2
     timeout_s: float = 300.0
     seed: int = 20261118
     models: list[ModelSpec] = field(default_factory=list)
     switch_command: str | None = field(default_factory=lambda: os.getenv("MODEL_SWITCH_COMMAND"))
-    prometheus_url: str | None = field(default_factory=lambda: os.getenv("PROMETHEUS_URL"))
-    loki_url: str | None = field(default_factory=lambda: os.getenv("LOKI_URL"))
+    prometheus_url: str | None = field(
+        default_factory=lambda: os.getenv("PROMETHEUS_URL") or _discover_monitoring_service_url("prometheus", 9090)
+    )
+    loki_url: str | None = field(
+        default_factory=lambda: os.getenv("LOKI_URL") or _discover_monitoring_service_url("loki", 3100)
+    )
     judge_url: str | None = field(default_factory=lambda: os.getenv("JUDGE_URL"))
     judge_api_key: str | None = field(
         default_factory=lambda: os.getenv("JUDGE_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY")

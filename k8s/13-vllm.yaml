@@ -121,15 +121,15 @@ spec:
             initialDelaySeconds: 40
             periodSeconds: 10
             timeoutSeconds: 5
-            failureThreshold: 30
+            failureThreshold: 36
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
-            initialDelaySeconds: 60
+            initialDelaySeconds: 240
             periodSeconds: 15
             timeoutSeconds: 5
-            failureThreshold: 5
+            failureThreshold: 12
           volumeMounts:
             - name: models
               mountPath: /models
@@ -221,15 +221,15 @@ spec:
             initialDelaySeconds: 40
             periodSeconds: 10
             timeoutSeconds: 5
-            failureThreshold: 30
+            failureThreshold: 36
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
-            initialDelaySeconds: 60
+            initialDelaySeconds: 240
             periodSeconds: 15
             timeoutSeconds: 5
-            failureThreshold: 5
+            failureThreshold: 12
           volumeMounts:
             - name: models
               mountPath: /models

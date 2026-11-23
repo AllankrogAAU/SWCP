@@ -19,21 +19,34 @@ cd /home/test/SWCP
 . .venv-benchmarking2/bin/activate
 ```
 
+## Single-Command Complete Benchmark
+
+Run the entire benchmark (all 9 local models + `azure:GPT-6-sol`, 50 submissions across each of the 14 submission categories = 700 submissions per model at 100 submissions/minute with `VLLM_MAX_NUM_SEQS=10`, cloud judging via Azure GPT-6-sol, CSV export, and `fig1`–`fig10` rendering) with a single command:
+
+```bash
+python -m benchmarking_2 complete
+```
+
+Or use the self-contained helper script (which automatically selects `.venv-benchmarking2` or `~/.venvs/swcp-benchmark`):
+
+```bash
+bash scripts/run-benchmarking-2.sh
+```
+
 ## Commands
 
-Prepare the persistent normalized dataset first:
+Prepare or refresh the persistent normalized 14-category dataset first (also done automatically by `complete`, `latency`, and `test-test`):
 
 ```bash
 python -m benchmarking_2 prepare
 ```
 
 This creates [`benchmarking_2/submissions.sqlite`](C:/Users/allan/source/repos/AllankrogAAU/SWCP/benchmarking_2/submissions.sqlite)
-with `category_folders`, `assignments`, and `submissions` tables. The benchmark rebuilds
-or refreshes this database automatically when it runs.
+with `category_folders`, `assignments`, and `submissions` tables across 14 categories (`correct` plus 13 error categories).
 
 ```bash
-python -m benchmarking_2 latency --models local:qwen2.5-coder-14b-instruct-awq,azure:GPT-6-sol
-python -m benchmarking_2 complete --models local:qwen2.5-coder-14b-instruct-awq,azure:GPT-6-sol
+python -m benchmarking_2 complete
+python -m benchmarking_2 latency
 python -m benchmarking_2 test-test --models local:qwen2.5-coder-14b-instruct-awq
 ```
 
@@ -46,9 +59,7 @@ Use `--foreground` to keep a benchmark attached to the current terminal instead:
 python -m benchmarking_2 test-test --models local:qwen2.5-coder-14b-instruct-awq --foreground
 ```
 
-`complete` and `latency` use 100 records from every category. `test-test` uses 50 records from
-every category, judges every response, and is intended to validate the result format and cloud
-judge configuration.
+`complete`, `latency`, and `test-test` use 50 records from every category (700 submissions per model across the 14 categories).
 
 The same deterministic sample is used for every model. Two ordinary pipeline submissions are
 sent after each model switch and stored as warm-up records, excluded from measured results.

@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-COLORS = ["#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E9", "#D55E00", "#F0E442", "#000000"]
+COLORS = ["#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E9", "#D55E00", "#F0E442", "#000000", "#7F7F7F", "#8C564B"]
 
 
 def _read_results(database: Path, run_id: str) -> tuple[list[dict], list[dict]]:
@@ -76,37 +76,43 @@ def _model_name(name: str) -> str:
         "qwen2.5-coder-3b-instruct-awq": "Qwen2.5-Coder-3B",
         "qwen3-14b-awq": "Qwen3-14B",
         "qwen35-9b-awq-4bit": "Qwen3.5-9B-4bit",
+        "deepseek-r1-distill-llama-8b-awq": "DeepSeek-R1-Llama-8B",
+        "deepseek-r1-distill-qwen-7b-awq": "DeepSeek-R1-Qwen-7B",
+        "gemma-2-9b-it-awq-int4": "Gemma-2-9B-IT",
+        "meta-llama-3.1-8b-instruct-awq-int4": "Llama-3.1-8B-IT",
+        "mistral-nemo-instruct-2407-awq": "Mistral-Nemo-12B",
+        "GPT-6-sol": "Azure GPT-6-sol",
     }
-    return replacements.get(name, name)
+    return replacements.get(name, replacements.get(name.lower(), name))
 
 
 def generate_reports(database: Path, run_id: str, output_dir: Path) -> list[Path]:
     submissions, judgments = _read_results(database, run_id)
     scores = _scores(judgments)
     output_dir.mkdir(parents=True, exist_ok=True)
-    for legacy in output_dir.glob("overall_best_model.png"):
-        legacy.unlink()
-    for legacy in output_dir.glob("technical_*.png"):
-        legacy.unlink()
-    for legacy in output_dir.glob("educational_*.png"):
-        legacy.unlink()
-    for legacy in output_dir.glob("generation_*.png"):
-        legacy.unlink()
-    for legacy in output_dir.glob("quality_vs_latency.png"):
-        legacy.unlink()
-    for legacy in output_dir.glob("end_to_end_latency.png"):
-        legacy.unlink()
-    for legacy in output_dir.glob("pipeline_stage_spans.png"):
-        legacy.unlink()
+    for pattern in (
+        "overall_best_model.png",
+        "technical_*.png",
+        "educational_*.png",
+        "generation_*.png",
+        "quality_vs_latency.png",
+        "end_to_end_latency.png",
+        "pipeline_stage_spans.png",
+    ):
+        for legacy in output_dir.glob(pattern):
+            legacy.unlink()
     generated: list[Path] = []
 
-    model_names = sorted({_model_name(row["model_name"]) for row in submissions})
-    if not model_names:
-        model_names = ["Unknown"]
+    all_model_names = sorted({_model_name(row["model_name"]) for row in submissions})
+    if not all_model_names:
+        all_model_names = ["Unknown"]
+
+    judged_model_names = sorted({_model_name(score["_model_name"]) for score in scores})
+    quality_model_names = judged_model_names if judged_model_names else all_model_names
 
     overall_by_model = {}
-    for model in model_names:
-        raw = model_names and [
+    for model in quality_model_names:
+        raw = [
             float(score["overall"])
             for score in scores
             if _model_name(score["_model_name"]) == model
@@ -137,18 +143,18 @@ def generate_reports(database: Path, run_id: str, output_dir: Path) -> list[Path
         ("Non-hallucination", "non_hallucination"),
     ]
     fig, ax = plt.subplots(figsize=(10.5, 6.2))
-    x = np.arange(len(model_names))
+    x = np.arange(len(quality_model_names))
     width = 0.25
     for i, (label, field) in enumerate(fields):
         values = [
             _pct_5(_mean(score.get(field) for score in scores if _model_name(score["_model_name"]) == model))
-            for model in model_names
+            for model in quality_model_names
         ]
         bars = ax.bar(x + (i - 1) * width, values, width, label=label)
         ax.bar_label(bars, fmt="%.1f", padding=2)
     ax.set_title("Technical code evaluation")
     ax.set_ylabel("Percent")
-    ax.set_xticks(x, model_names, rotation=20, ha="right")
+    ax.set_xticks(x, quality_model_names, rotation=20, ha="right")
     ax.set_ylim(0, 105)
     ax.grid(axis="y", linestyle="--", alpha=0.6)
     ax.legend(ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.18), frameon=False)
@@ -162,19 +168,19 @@ def generate_reports(database: Path, run_id: str, output_dir: Path) -> list[Path
         (axes[0], "(a) Compliance and checklist", compliance_fields + checklist_fields),
         (axes[1], "(b) Pedagogical Likert scores", [("Socratic guidance", "socratic_guidance"), ("Actionability", "actionability")]),
     ):
-        x = np.arange(len(model_names))
+        x = np.arange(len(quality_model_names))
         width = 0.38 if len(field_list) == 2 else 0.25
         for i, (label, field) in enumerate(field_list):
             values = [
                 _pct_5(_mean(score.get(field) for score in scores if _model_name(score["_model_name"]) == model))
                 if title.startswith("(a)")
                 else _mean(score.get(field) for score in scores if _model_name(score["_model_name"]) == model)
-                for model in model_names
+                for model in quality_model_names
             ]
             bars = ax.bar(x + (i - (len(field_list) - 1) / 2) * width, values, width, label=label)
             ax.bar_label(bars, fmt="%.1f", padding=2)
         ax.set_title(title)
-        ax.set_xticks(x, model_names, rotation=20, ha="right")
+        ax.set_xticks(x, quality_model_names, rotation=20, ha="right")
         ax.set_ylim(0, 105 if title.startswith("(a)") else 5.5)
         ax.set_ylabel("Percent" if title.startswith("(a)") else "Likert score")
         ax.grid(axis="y", linestyle="--", alpha=0.6)
@@ -184,50 +190,57 @@ def generate_reports(database: Path, run_id: str, output_dir: Path) -> list[Path
 
     # fig4 - Feedback quality by submission status/category
     categories = sorted({row["normalized_category"] for row in submissions})
-    fig, ax = plt.subplots(figsize=(11, 6.2))
+    fig, ax = plt.subplots(figsize=(max(12.0, len(categories) * 1.15), 6.8))
     x = np.arange(len(categories))
-    width = 0.8 / max(1, len(model_names))
-    for i, model in enumerate(model_names):
+    width = 0.82 / max(1, len(quality_model_names))
+    for i, model in enumerate(quality_model_names):
         values = []
         for category in categories:
             ids = {
                 row["record_id"] for row in submissions
                 if row["normalized_category"] == category and _model_name(row["model_name"]) == model
             }
-            values.append(_mean(score["overall"] for score in scores if score["_record_id"] in ids))
-        bars = ax.bar(x + i * width - 0.4 + width / 2, values, width, label=model)
-        ax.bar_label(bars, fmt="%.1f", padding=2)
-    ax.set_title("(a) Feedback quality by CodeNet status")
+            values.append(
+                _mean(
+                    score["overall"]
+                    for score in scores
+                    if score["_record_id"] in ids and _model_name(score["_model_name"]) == model
+                )
+            )
+        bars = ax.bar(x + i * width - 0.41 + width / 2, values, width, label=model)
+        if len(quality_model_names) <= 4:
+            ax.bar_label(bars, fmt="%.1f", padding=2, fontsize=7)
+    ax.set_title("(a) Feedback quality by submission category")
     ax.set_ylabel("Unified quality score (0-100)")
-    ax.set_xticks(x, categories)
+    ax.set_xticks(x, categories, rotation=30, ha="right")
     ax.set_ylim(0, 105)
     ax.grid(axis="y", linestyle="--", alpha=0.6)
-    ax.legend(ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.18), frameon=False)
+    ax.legend(ncol=min(4, max(2, len(quality_model_names))), loc="upper center", bbox_to_anchor=(0.5, -0.28), frameon=False)
     generated += _save(fig, output_dir / "fig4_codenet_status_breakdown")
 
-    # fig5 - QoS TTFT/e2e/pipeline
+    # fig5 - QoS TTFT/e2e/pipeline (uses all_model_names with measured latency data)
     fig, axes = plt.subplots(1, 3, figsize=(15, 5.8))
     p50 = lambda values: float(np.percentile(values, 50)) if values else 0.0
     p95 = lambda values: float(np.percentile(values, 95)) if values else 0.0
     p99 = lambda values: float(np.percentile(values, 99)) if values else 0.0
-    x = np.arange(len(model_names))
-    ttft = [p50([row["http_accepted_ms"] or 0 for row in submissions if _model_name(row["model_name"]) == model]) / 1000 for model in model_names]
-    ttft95 = [p95([row["http_accepted_ms"] or 0 for row in submissions if _model_name(row["model_name"]) == model]) / 1000 for model in model_names]
+    x = np.arange(len(all_model_names))
+    ttft = [p50([row["http_accepted_ms"] or 0 for row in submissions if _model_name(row["model_name"]) == model]) / 1000 for model in all_model_names]
+    ttft95 = [p95([row["http_accepted_ms"] or 0 for row in submissions if _model_name(row["model_name"]) == model]) / 1000 for model in all_model_names]
     axes[0].bar(x - 0.18, ttft, 0.36, label="P50")
     axes[0].bar(x + 0.18, ttft95, 0.36, label="P95")
     axes[0].set_title("(a) Frontend time-to-first-token")
-    axes[0].set_xticks(x, model_names, rotation=20, ha="right")
+    axes[0].set_xticks(x, all_model_names, rotation=20, ha="right")
     axes[0].set_ylabel("Seconds")
     axes[0].legend(frameon=False)
 
-    e50 = [p50([row["client_e2e_ms"] or 0 for row in submissions if _model_name(row["model_name"]) == model]) / 1000 for model in model_names]
-    e95 = [p95([row["client_e2e_ms"] or 0 for row in submissions if _model_name(row["model_name"]) == model]) / 1000 for model in model_names]
-    e99 = [p99([row["client_e2e_ms"] or 0 for row in submissions if _model_name(row["model_name"]) == model]) / 1000 for model in model_names]
+    e50 = [p50([row["client_e2e_ms"] or 0 for row in submissions if _model_name(row["model_name"]) == model]) / 1000 for model in all_model_names]
+    e95 = [p95([row["client_e2e_ms"] or 0 for row in submissions if _model_name(row["model_name"]) == model]) / 1000 for model in all_model_names]
+    e99 = [p99([row["client_e2e_ms"] or 0 for row in submissions if _model_name(row["model_name"]) == model]) / 1000 for model in all_model_names]
     axes[1].bar(x - 0.27, e50, 0.27, label="P50")
     axes[1].bar(x, e95, 0.27, label="P95")
     axes[1].bar(x + 0.27, e99, 0.27, label="P99")
     axes[1].set_title("(b) End-to-end latency")
-    axes[1].set_xticks(x, model_names, rotation=20, ha="right")
+    axes[1].set_xticks(x, all_model_names, rotation=20, ha="right")
     axes[1].set_ylabel("Seconds")
     axes[1].legend(frameon=False)
 
@@ -237,42 +250,48 @@ def generate_reports(database: Path, run_id: str, output_dir: Path) -> list[Path
         ("LLM generation", "llm_exec_ms"),
         ("Queue/transport/other", "delivery_ms"),
     ]
-    left = np.zeros(len(model_names))
+    left = np.zeros(len(all_model_names))
     colors = ["#0072B2", "#E69F00", "#009E73", "#D55E00"]
     for (label, field), color in zip(stage_fields, colors):
         values = [
             p50([row[field] or 0 for row in submissions if _model_name(row["model_name"]) == model]) / 1000
-            for model in model_names
+            for model in all_model_names
         ]
-        axes[2].barh(model_names, values, left=left, label=label, color=color)
+        axes[2].barh(all_model_names, values, left=left, label=label, color=color)
         left += np.array(values)
     axes[2].set_title("(c) Pipeline stage spans (median)")
     axes[2].set_xlabel("Median seconds")
     axes[2].legend(ncol=2, loc="lower center", bbox_to_anchor=(0.5, -0.45), frameon=False)
-    fig.suptitle("Quality of service (sequential, with context transfer)")
+    fig.suptitle("Quality of service (100 RPM paced, VLLM_MAX_NUM_SEQS=10)")
     generated += _save(fig, output_dir / "fig5_qos_ttft_and_e2e_latency")
 
     # fig6 - Throughput and quality vs latency, with no cost panel
     fig, axes = plt.subplots(1, 2, figsize=(12, 5.8))
     throughput = []
-    for model in model_names:
-        exec_ms = [row["llm_exec_ms"] or 0 for row in submissions if _model_name(row["model_name"]) == model]
+    for model in all_model_names:
+        exec_ms = [row["llm_exec_ms"] or 0 for row in submissions if _model_name(row["model_name"]) == model and (row["llm_exec_ms"] or 0) > 0]
         mean_ms = _mean(exec_ms)
         throughput.append(1000.0 / mean_ms if mean_ms > 0 else 0.0)
-    axes[0].bar(model_names, throughput, color="#0072B2")
-    axes[0].set_title("(a) Generation throughput")
-    axes[0].set_ylabel("Output tokens / s (P50)")
+    axes[0].bar(all_model_names, throughput, color="#0072B2")
+    axes[0].set_title("(a) Generation rate (completions / s)")
+    axes[0].set_ylabel("Completions / s (mean)")
     axes[0].tick_params(axis="x", rotation=20)
 
     latencies = []
     quality = []
-    for model in model_names:
+    for model in quality_model_names:
         rows = [row for row in submissions if _model_name(row["model_name"]) == model]
         latencies.append(p50([row["client_e2e_ms"] or 0 for row in rows]) / 1000)
         ids = {row["record_id"] for row in rows}
-        quality.append(_mean(score["overall"] for score in scores if score["_record_id"] in ids))
+        quality.append(
+            _mean(
+                score["overall"]
+                for score in scores
+                if score["_record_id"] in ids and _model_name(score["_model_name"]) == model
+            )
+        )
     axes[1].scatter(latencies, quality, s=90, color="#009E73")
-    for xv, yv, model in zip(latencies, quality, model_names):
+    for xv, yv, model in zip(latencies, quality, quality_model_names):
         axes[1].annotate(model, (xv, yv), xytext=(4, 4), textcoords="offset points")
     axes[1].set_title("(b) Quality vs. latency")
     axes[1].set_xlabel("E2E latency P50 (s)")
@@ -290,7 +309,7 @@ def generate_reports(database: Path, run_id: str, output_dir: Path) -> list[Path
     ax = fig.add_subplot(111, polar=True)
     angles = np.linspace(0, 2 * np.pi, len(radar_fields), endpoint=False).tolist()
     angles += angles[:1]
-    for i, model in enumerate(model_names):
+    for i, model in enumerate(quality_model_names):
         values = [_mean(score.get(field) for score in scores if _model_name(score["_model_name"]) == model) for _, field in radar_fields]
         values += values[:1]
         ax.plot(angles, values, color=COLORS[i % len(COLORS)], linewidth=2, label=model)
@@ -303,17 +322,17 @@ def generate_reports(database: Path, run_id: str, output_dir: Path) -> list[Path
 
     # fig8 - Actionability breakdown
     fig, ax = plt.subplots(figsize=(10.5, 6.2))
-    x = np.arange(len(model_names))
+    x = np.arange(len(quality_model_names))
     width = 0.38
-    jargon = [_mean(score.get("actionability") for score in scores if _model_name(score["_model_name"]) == model) for model in model_names]
-    next_step = [_mean(score.get("socratic_guidance") for score in scores if _model_name(score["_model_name"]) == model) for model in model_names]
+    jargon = [_mean(score.get("actionability") for score in scores if _model_name(score["_model_name"]) == model) for model in quality_model_names]
+    next_step = [_mean(score.get("socratic_guidance") for score in scores if _model_name(score["_model_name"]) == model) for model in quality_model_names]
     bars1 = ax.bar(x - width / 2, jargon, width, label="Jargon suitability (1-5)")
     bars2 = ax.bar(x + width / 2, next_step, width, label="Next-step clarity (1-5)", color="#E69F00")
     ax.bar_label(bars1, fmt="%.2f", padding=2)
     ax.bar_label(bars2, fmt="%.2f", padding=2)
     ax.set_title("Actionability breakdown")
     ax.set_ylabel("Likert score")
-    ax.set_xticks(x, model_names, rotation=20, ha="right")
+    ax.set_xticks(x, quality_model_names, rotation=20, ha="right")
     ax.set_ylim(1, 5.5)
     ax.grid(axis="y", linestyle="--", alpha=0.6)
     ax.legend(ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.18), frameon=False)
@@ -321,68 +340,74 @@ def generate_reports(database: Path, run_id: str, output_dir: Path) -> list[Path
 
     # fig9 - Technical precision split
     fig, ax = plt.subplots(figsize=(10.5, 6.2))
-    line_precision = [_pct_5(_mean(score.get("technical_correctness") for score in scores if _model_name(score["_model_name"]) == model)) for model in model_names]
-    concept_precision = [_pct_5(_mean(score.get("diagnosis") for score in scores if _model_name(score["_model_name"]) == model)) for model in model_names]
-    x = np.arange(len(model_names))
+    line_precision = [_pct_5(_mean(score.get("technical_correctness") for score in scores if _model_name(score["_model_name"]) == model)) for model in quality_model_names]
+    concept_precision = [_pct_5(_mean(score.get("diagnosis") for score in scores if _model_name(score["_model_name"]) == model)) for model in quality_model_names]
+    x = np.arange(len(quality_model_names))
     bars1 = ax.bar(x - 0.19, line_precision, 0.38, label="Line precision (%)")
     bars2 = ax.bar(x + 0.19, concept_precision, 0.38, label="Concept precision (%)", color="#E69F00")
     ax.bar_label(bars1, fmt="%.1f", padding=2)
     ax.bar_label(bars2, fmt="%.1f", padding=2)
     ax.set_title("Technical precision: exact line vs. correct C concept")
     ax.set_ylabel("Percent")
-    ax.set_xticks(x, model_names, rotation=20, ha="right")
+    ax.set_xticks(x, quality_model_names, rotation=20, ha="right")
     ax.set_ylim(0, 105)
     ax.grid(axis="y", linestyle="--", alpha=0.6)
     ax.legend(ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.18), frameon=False)
     generated += _save(fig, output_dir / "fig9_technical_precision_split")
 
-    # fig10 - Hallucination proxy, aligned with the original report's AC focus
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5.8))
-    accepted_ids = {
-        row["record_id"] for row in submissions
-        if row["normalized_category"] == "correct"
-    }
+    # fig10 - Hallucination rate (%) by category and on accepted (correct) code by model
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 6.2))
     category_hallucination = []
     for category in categories:
         ids = {
             row["record_id"] for row in submissions
             if row["normalized_category"] == category
-            and row["record_id"] in accepted_ids
         }
-        hallucinated = sum(
-            float(score.get("non_hallucination", 0) or 0) < 3.0
-            for score in scores if score["_record_id"] in ids
+        cat_scores = [
+            score for score in scores
+            if score["_record_id"] in ids and _model_name(score["_model_name"]) in quality_model_names
+        ]
+        halluc_rate = (
+            100.0 * sum(float(score.get("non_hallucination", 0) or 0) < 3.0 for score in cat_scores) / len(cat_scores)
+            if cat_scores
+            else 0.0
         )
-        category_hallucination.append(("AC", hallucinated))
+        category_hallucination.append((category, halluc_rate))
     category_hallucination.sort(key=lambda item: item[1], reverse=True)
     axes[0].barh(
         [item[0] for item in category_hallucination],
         [item[1] for item in category_hallucination],
         color="#D55E00",
     )
-    axes[0].set_title("(a) Hallucinations on accepted code")
-    axes[0].set_xlabel("Low non-hallucination scores")
+    axes[0].set_title("(a) Hallucination rate by category (%)")
+    axes[0].set_xlabel("Responses with non-hallucination < 3/5 (%)")
+    axes[0].set_xlim(0, 105)
     axes[0].invert_yaxis()
 
-    matrix = np.zeros((1, len(model_names)))
-    for j, model in enumerate(model_names):
+    matrix = np.zeros((1, len(quality_model_names)))
+    for j, model in enumerate(quality_model_names):
         ids = {
             row["record_id"] for row in submissions
             if row["normalized_category"] == "correct"
             and _model_name(row["model_name"]) == model
         }
-        matrix[0, j] = sum(
-            float(score.get("non_hallucination", 0) or 0) < 3.0
-            for score in scores if score["_record_id"] in ids
+        model_corr_scores = [
+            score for score in scores
+            if score["_record_id"] in ids and _model_name(score["_model_name"]) == model
+        ]
+        matrix[0, j] = (
+            100.0 * sum(float(score.get("non_hallucination", 0) or 0) < 3.0 for score in model_corr_scores) / len(model_corr_scores)
+            if model_corr_scores
+            else 0.0
         )
-    image = axes[1].imshow(matrix, aspect="auto", cmap="OrRd")
-    axes[1].set_title("(b) Accepted-code hallucination proxy by model")
-    axes[1].set_xticks(np.arange(len(model_names)), model_names, rotation=20, ha="right")
-    axes[1].set_yticks([0], ["AC"])
-    fig.colorbar(image, ax=axes[1], label="Count")
-    for j, model in enumerate(model_names):
-        axes[1].text(j, 0, str(int(matrix[0, j])), ha="center", va="center", fontsize=8)
-    fig.suptitle("Hallucination proxy: non-hallucination score below 3/5")
+    image = axes[1].imshow(matrix, aspect="auto", cmap="OrRd", vmin=0, vmax=100)
+    axes[1].set_title("(b) False-positive rate on correct code (%)")
+    axes[1].set_xticks(np.arange(len(quality_model_names)), quality_model_names, rotation=20, ha="right")
+    axes[1].set_yticks([0], ["correct"])
+    fig.colorbar(image, ax=axes[1], label="Hallucination rate (%)")
+    for j, model in enumerate(quality_model_names):
+        axes[1].text(j, 0, f"{matrix[0, j]:.0f}%", ha="center", va="center", fontsize=8)
+    fig.suptitle("Hallucination proxy: non-hallucination score below 3/5 (%)")
     generated += _save(fig, output_dir / "fig10_hallucination_distribution")
 
     return generated
