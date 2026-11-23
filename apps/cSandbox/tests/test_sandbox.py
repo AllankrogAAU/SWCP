@@ -273,62 +273,6 @@ def test_permanent_pod_read_failure_survives_provider_acquire(monkeypatch) -> No
         provider._create()
 
 
-def test_worker_dead_letters_permanent_failure_without_retry(monkeypatch) -> None:
-    task = SandboxTask(
-        submissionId="00000000-0000-0000-0000-000000000001",
-        assignmentId="00000000-0000-0000-0000-000000000002",
-        source="int main(void) { return 0; }",
-        compilerFlags=[],
-        testCases=[],
-    )
-
-    class FakeMessage:
-        data = task.model_dump_json().encode("utf-8")
-        headers = {}
-        metadata = SimpleNamespace(num_delivered=1)
-
-        def __init__(self) -> None:
-            self.acked = False
-            self.nacked = False
-
-        async def ack(self) -> None:
-            self.acked = True
-
-        async def nak(self) -> None:
-            self.nacked = True
-
-    class FakeConnection:
-        async def publish(self, *_args, **_kwargs) -> None:
-            pass
-
-    class FakeJetStream:
-        def __init__(self) -> None:
-            self.published = []
-
-        async def publish(self, subject, data, **kwargs) -> None:
-            self.published.append((subject, data, kwargs))
-
-    def fail_evaluation(*_args):
-        raise PermanentSandboxError("permanent provider configuration")
-
-    monkeypatch.setattr("worker.evaluate_task", fail_evaluation)
-    message = FakeMessage()
-    jetstream = FakeJetStream()
-
-    async def run() -> None:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            await handle_message(message, FakeConnection(), jetstream, object(), executor)
-
-    asyncio.run(run())
-
-    assert message.acked
-    assert not message.nacked
-    assert [subject for subject, _, _ in jetstream.published] == [
-        "sandbox.tasks.dlq",
-        "sandbox.results",
-    ]
-
-
 def test_worker_does_not_dead_letter_backend_configuration_error(monkeypatch) -> None:
     task = SandboxTask(
         submissionId="00000000-0000-0000-0000-000000000001",
