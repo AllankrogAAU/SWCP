@@ -1,20 +1,31 @@
+import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+from unittest.mock import Mock
 
+from kubernetes.client.rest import ApiException
 import pytest
 
 from contracts import SandboxTask, SandboxTestCase
 from evaluation.evaluator import evaluate
 from evaluation.result import EvaluationResult, PhaseResult, SandboxReport, Status
-from sandbox.interface import Limits, SandboxError, SandboxStartError
+from sandbox.interface import (
+    Limits,
+    PermanentSandboxError,
+    SandboxError,
+    SandboxStartError,
+)
 from sandbox.k8s_pod import (
     KubePodSandbox,
     KubeSandboxProvider,
     PodConfig,
     build_pod_manifest,
+    classify_api_error,
 )
 from sandbox.report import parse_report
 from sandbox.runsc_oci import RunscConfig, RunscSandbox, build_oci_spec
-from worker import evaluate_task
+from worker import evaluate_task, handle_message
 
 
 def b64(text: str) -> str:
@@ -133,13 +144,12 @@ def test_test_case_timeout_is_reported() -> None:
     assert result.test_runs == report.test_runs
 
 
-def test_test_case_count_mismatch_retries_as_sandbox_error() -> None:
+def test_test_case_count_mismatch_is_permanent() -> None:
     cases = [SandboxTestCase(stdin="", expectedStdout="ok\n", timeoutMilliseconds=2000, memoryLimitMegabytes=64)]
     provider = FakeProvider(
         SandboxReport(phase(), phase(), None),
-        SandboxReport(phase(), phase(), None),
     )
-    with pytest.raises(SandboxError, match="returned 0 test results"):
+    with pytest.raises(PermanentSandboxError, match="returned 0 test results"):
         evaluate("x", provider, test_cases=cases)
 
 
@@ -216,18 +226,179 @@ def test_worker_passes_assignment_harness_and_run_stdin(monkeypatch) -> None:
     assert result.testResults[0].stdout == "5\n"
 
 
-def test_retries_once_with_fresh_sandbox_and_always_destroys() -> None:
-    good = SandboxReport(phase(), phase(), phase())
-    provider = FakeProvider(SandboxError("exec died"), good)
+def test_evaluator_leaves_transient_retry_to_worker() -> None:
+    provider = FakeProvider(
+        SandboxError("exec died"), SandboxReport(phase(), phase(), phase())
+    )
     first, second = provider.sandboxes
-    assert evaluate("x", provider).status is Status.SUCCESS
-    assert first.destroyed and second.destroyed
 
-
-def test_gives_up_after_second_failure() -> None:
-    provider = FakeProvider(SandboxError("a"), SandboxError("b"))
-    with pytest.raises(SandboxError):
+    with pytest.raises(SandboxError, match="exec died"):
         evaluate("x", provider)
+
+    assert first.destroyed
+    assert provider.sandboxes == [second]
+
+
+def test_permanent_failure_is_not_retried() -> None:
+    provider = FakeProvider(PermanentSandboxError("invalid provider state"))
+
+    with pytest.raises(PermanentSandboxError, match="invalid provider state"):
+        evaluate("x", provider)
+
+    assert provider.sandboxes == []
+
+
+def test_kubernetes_api_status_is_classified() -> None:
+    permanent = classify_api_error(
+        "create pod", ApiException(status=403, reason="Forbidden")
+    )
+    transient = classify_api_error(
+        "create pod", ApiException(status=503, reason="Unavailable")
+    )
+
+    assert isinstance(permanent, PermanentSandboxError)
+    assert type(transient) is SandboxError
+
+
+def test_permanent_pod_read_failure_survives_provider_acquire(monkeypatch) -> None:
+    class FakeApi:
+        def create_namespaced_pod(self, *_args, **_kwargs) -> None:
+            pass
+
+        def delete_namespaced_pod(self, *_args, **_kwargs) -> None:
+            pass
+
+    provider = make_provider(FakeApi())
+    monkeypatch.setattr(provider, "_should_spill_from_headroom_node", lambda: False)
+
+    def fail_waiting(_name: str) -> None:
+        raise PermanentSandboxError("forbidden")
+
+    monkeypatch.setattr(provider, "_wait_running", fail_waiting)
+    with pytest.raises(PermanentSandboxError, match="forbidden"):
+        provider._create()
+
+
+def test_worker_dead_letters_permanent_failure_without_retry(monkeypatch) -> None:
+    task = SandboxTask(
+        submissionId="00000000-0000-0000-0000-000000000001",
+        assignmentId="00000000-0000-0000-0000-000000000002",
+        source="int main(void) { return 0; }",
+        compilerFlags=[],
+        testCases=[],
+    )
+
+    class FakeMessage:
+        data = task.model_dump_json().encode("utf-8")
+        headers = {}
+        metadata = SimpleNamespace(num_delivered=1)
+
+        def __init__(self) -> None:
+            self.acked = False
+            self.nacked = False
+
+        async def ack(self) -> None:
+            self.acked = True
+
+        async def nak(self) -> None:
+            self.nacked = True
+
+    class FakeConnection:
+        async def publish(self, *_args, **_kwargs) -> None:
+            pass
+
+    class FakeJetStream:
+        def __init__(self) -> None:
+            self.published = []
+
+        async def publish(self, subject, data, **kwargs) -> None:
+            self.published.append((subject, data, kwargs))
+
+    def fail_evaluation(*_args):
+        raise PermanentSandboxError("permanent provider configuration")
+
+    monkeypatch.setattr("worker.evaluate_task", fail_evaluation)
+    message = FakeMessage()
+    jetstream = FakeJetStream()
+
+    async def run() -> None:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            await handle_message(message, FakeConnection(), jetstream, object(), executor)
+
+    asyncio.run(run())
+
+    assert message.acked
+    assert not message.nacked
+    assert [subject for subject, _, _ in jetstream.published] == [
+        "sandbox.tasks.dlq",
+        "sandbox.results",
+    ]
+
+
+def test_result_publish_retries_without_rerunning_sandbox(monkeypatch) -> None:
+    task = SandboxTask(
+        submissionId="00000000-0000-0000-0000-000000000001",
+        assignmentId="00000000-0000-0000-0000-000000000002",
+        source="int main(void) { return 0; }",
+        compilerFlags=[],
+        testCases=[],
+    )
+
+    class FakeResult:
+        errorClassification = "success"
+
+        def model_dump_json(self) -> str:
+            return "{}"
+
+    class FakeMessage:
+        data = task.model_dump_json().encode("utf-8")
+        headers = {}
+        metadata = SimpleNamespace(num_delivered=1)
+
+        def __init__(self) -> None:
+            self.acked = False
+            self.in_progress_count = 0
+
+        async def ack(self) -> None:
+            self.acked = True
+
+        async def in_progress(self) -> None:
+            self.in_progress_count += 1
+
+    class FakeConnection:
+        async def publish(self, *_args, **_kwargs) -> None:
+            pass
+
+    class FakeJetStream:
+        def __init__(self) -> None:
+            self.result_publish_count = 0
+
+        async def publish(self, subject, *_args, **_kwargs) -> None:
+            if subject == "sandbox.results":
+                self.result_publish_count += 1
+                if self.result_publish_count == 1:
+                    raise RuntimeError("temporary NATS error")
+
+    evaluate_mock = Mock(return_value=FakeResult())
+    monkeypatch.setattr("worker.evaluate_task", evaluate_mock)
+
+    async def no_sleep(_delay: float) -> None:
+        pass
+
+    monkeypatch.setattr("worker.asyncio.sleep", no_sleep)
+    message = FakeMessage()
+    jetstream = FakeJetStream()
+
+    async def run() -> None:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            await handle_message(message, FakeConnection(), jetstream, object(), executor)
+
+    asyncio.run(run())
+
+    evaluate_mock.assert_called_once()
+    assert jetstream.result_publish_count == 2
+    assert message.in_progress_count == 1
+    assert message.acked
 
 
 def test_pod_manifest_is_hardened_and_gvisor() -> None:
@@ -404,7 +575,7 @@ def test_wait_running_failed_phase_surfaces_container_wait_reason() -> None:
     container_statuses = [FakeContainerStatus(FakeWaiting("ImagePullBackOff", "manifest unknown"))]
     api = FakeKubeApi(FakePod(FakePodStatus("Failed", container_statuses=container_statuses)))
     provider = make_provider(api)
-    with pytest.raises(SandboxStartError) as excinfo:
+    with pytest.raises(PermanentSandboxError) as excinfo:
         provider._wait_running("sbx-failed")
     message = str(excinfo.value)
     assert "pod entered phase Failed" in message

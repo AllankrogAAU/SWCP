@@ -13,13 +13,28 @@ from kubernetes.stream import stream
 
 from contracts import SandboxTestCase
 from evaluation.result import SandboxReport
-from sandbox.interface import Limits, SandboxError, SandboxStartError
+from sandbox.interface import (
+    Limits,
+    PermanentSandboxError,
+    SandboxError,
+    SandboxStartError,
+)
 from sandbox.report import parse_report
 
 logger = logging.getLogger("c-sandbox-worker")
 
 JOB_LABEL = {"app.kubernetes.io/name": "c-sandbox-job"}
 CREATED_AT_ANNOTATION = "swcp.io/created-at"
+PERMANENT_API_STATUSES = {400, 401, 403, 404, 422}
+
+
+def classify_api_error(action: str, exception: ApiException) -> SandboxError:
+    error_type = (
+        PermanentSandboxError
+        if exception.status in PERMANENT_API_STATUSES
+        else SandboxError
+    )
+    return error_type(f"{action}: {exception}")
 
 
 @dataclass(frozen=True)
@@ -242,12 +257,14 @@ class KubePodSandbox:
                 ws.close()
         except SandboxError:
             raise
+        except ApiException as exception:
+            raise classify_api_error("exec failed", exception) from exception
         except Exception as exception:
             raise SandboxError(f"exec failed: {exception}") from exception
 
         report = parse_report("".join(chunks))
         if report.compile is None:
-            raise SandboxError("sandbox produced no report")
+            raise PermanentSandboxError("sandbox produced no report")
         return report
 
     def destroy(self) -> None:
@@ -332,6 +349,14 @@ class KubeSandboxProvider:
                 build_pod_manifest(self._cfg, name, overflow_to_worker=overflow),  # type: ignore[arg-type]
             )
             self._wait_running(name)
+        except PermanentSandboxError:
+            sandbox.destroy()
+            raise
+        except ApiException as exception:
+            sandbox.destroy()
+            raise classify_api_error(
+                "could not start sandbox pod", exception
+            ) from exception
         except Exception as exception:
             sandbox.destroy()
             raise SandboxStartError(
@@ -378,12 +403,17 @@ class KubeSandboxProvider:
     def _wait_running(self, name: str) -> None:
         deadline = time.monotonic() + self._cfg.ready_timeout_s
         while time.monotonic() < deadline:
-            pod = self._api.read_namespaced_pod_status(name, self._cfg.namespace)
+            try:
+                pod = self._api.read_namespaced_pod_status(name, self._cfg.namespace)
+            except ApiException as exception:
+                raise classify_api_error(
+                    "could not read sandbox pod status", exception
+                ) from exception
             phase = pod.status.phase if pod.status else None
             if phase == "Running":
                 return
             if phase in ("Failed", "Succeeded"):
-                raise SandboxStartError(
+                raise PermanentSandboxError(
                     f"pod entered phase {phase}: {self._diagnose(name)}"
                 )
             time.sleep(0.1)

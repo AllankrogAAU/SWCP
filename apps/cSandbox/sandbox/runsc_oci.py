@@ -11,7 +11,7 @@ from pathlib import Path
 
 from contracts import SandboxTestCase
 from evaluation.result import SandboxReport
-from sandbox.interface import Limits, SandboxError
+from sandbox.interface import Limits, PermanentSandboxError, SandboxError
 from sandbox.report import parse_report
 
 logger = logging.getLogger("c-sandbox-worker")
@@ -237,7 +237,7 @@ class RunscSandbox:
         report = parse_report(stdout_text)
         if report.compile is None:
             stderr_text = proc.stderr.decode("utf-8", errors="replace").strip()
-            raise SandboxError(
+            raise PermanentSandboxError(
                 f"sandbox produced no report (rc={proc.returncode}, stderr={stderr_text[:500]})"
             )
         return report

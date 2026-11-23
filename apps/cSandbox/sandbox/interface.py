@@ -9,6 +9,10 @@ class SandboxError(Exception):
     """Execution inside the sandbox failed for infrastructure reasons."""
 
 
+class PermanentSandboxError(SandboxError):
+    """A sandbox failure that cannot be resolved by retrying."""
+
+
 class SandboxStartError(SandboxError):
     """The sandbox could not be created or never became ready."""
 

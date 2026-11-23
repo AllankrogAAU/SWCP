@@ -1,13 +1,15 @@
-import logging
 import re
 from collections.abc import Sequence
 from typing import Any
 
 from contracts import SandboxTestCase, StaticAnalysisWarning
 from evaluation.result import EvaluationResult, SandboxReport, Status
-from sandbox.interface import Limits, SandboxError, SandboxProvider
+from sandbox.interface import (
+    Limits,
+    PermanentSandboxError,
+    SandboxProvider,
+)
 
-logger = logging.getLogger("c-sandbox-worker")
 _STATIC_ANALYSIS_PATTERN = re.compile(
     r"^(?P<line>\d+):(?P<column>\d+):\s+(?P<severity>[^:]+):\s+"
     r"(?P<message>.*?)(?:\s+\[[^]]+\])?$"
@@ -33,7 +35,7 @@ def parse_static_analysis(output: str) -> tuple[StaticAnalysisWarning, ...]:
 def to_result(report: SandboxReport) -> EvaluationResult:
     compile_ = report.compile
     if compile_ is None:
-        raise SandboxError("sandbox report contained no compile phase")
+        raise PermanentSandboxError("sandbox report contained no compile phase")
 
     base: dict[str, Any] = {
         "compile_stdout": compile_.stdout,
@@ -67,7 +69,9 @@ def to_result(report: SandboxReport) -> EvaluationResult:
 
     run = report.run
     if run is None:
-        raise SandboxError("sandbox produced neither a run phase nor test results")
+        raise PermanentSandboxError(
+            "sandbox produced neither a run phase nor test results"
+        )
     run_fields: dict[str, Any] = {
         "lint_output": lint_output,
         "stdout": run.stdout,
@@ -99,26 +103,20 @@ def evaluate(
     run_stdin: str = "",
 ) -> EvaluationResult:
     limits = limits or Limits()
-    last_error: SandboxError | None = None
-    for attempt in (1, 2):
-        sandbox = provider.acquire()
-        try:
-            report = sandbox.run(source, limits, test_cases, harness_source, run_stdin)
-            if (
-                test_cases
-                and report.compile is not None
-                and not report.compile.timed_out
-                and report.compile.rc == 0
-                and len(report.test_runs) != len(test_cases)
-            ):
-                raise SandboxError(
-                    f"sandbox returned {len(report.test_runs)} test results "
-                    f"for {len(test_cases)} test cases"
-                )
-            return to_result(report)
-        except SandboxError as exception:
-            last_error = exception
-            logger.warning("Sandbox attempt %d failed: %s", attempt, exception)
-        finally:
-            sandbox.destroy()
-    raise SandboxError(f"sandbox failed after retry: {last_error}")
+    sandbox = provider.acquire()
+    try:
+        report = sandbox.run(source, limits, test_cases, harness_source, run_stdin)
+        if (
+            test_cases
+            and report.compile is not None
+            and not report.compile.timed_out
+            and report.compile.rc == 0
+            and len(report.test_runs) != len(test_cases)
+        ):
+            raise PermanentSandboxError(
+                f"sandbox returned {len(report.test_runs)} test results "
+                f"for {len(test_cases)} test cases"
+            )
+        return to_result(report)
+    finally:
+        sandbox.destroy()

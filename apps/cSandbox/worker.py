@@ -25,7 +25,7 @@ from pydantic import ValidationError
 
 from contracts import CompilationResult, SandboxResult, SandboxTask, SandboxTestResult
 from evaluation.evaluator import evaluate
-from sandbox.interface import Limits
+from sandbox.interface import Limits, PermanentSandboxError
 from sandbox.k8s_pod import KubeSandboxProvider, PodConfig
 from sandbox.runsc_oci import RunscConfig, RunscSandboxProvider
 
@@ -39,6 +39,8 @@ MAX_CONCURRENT = int(os.getenv("SANDBOX_MAX_CONCURRENT", "8"))
 POOL_SIZE = int(os.getenv("SANDBOX_POOL_SIZE", "4"))
 POOL_WORKERS = max(1, int(os.getenv("SANDBOX_POOL_WORKERS", "3")))
 MAX_ACK_PENDING = int(os.getenv("SANDBOX_MAX_ACK_PENDING", "512"))
+MAX_DELIVERIES = 3
+MAX_RESULT_PUBLISH_ATTEMPTS = 3
 HEALTH_FILE = os.getenv("SANDBOX_HEALTH_FILE", "/tmp/healthy")
 
 
@@ -97,6 +99,55 @@ else:
     trace.set_tracer_provider(tracer_provider)
 
 tracer = trace.get_tracer("c-sandbox-worker")
+
+
+async def fail_terminal_message(message, jetstream, task, error_text: str) -> None:
+    await jetstream.publish(
+        "sandbox.tasks.dlq",
+        message.data,
+        headers={"Nats-Msg-Id": f"{task.submissionId}-sandbox-dlq"},
+    )
+    failed_result = SandboxResult(
+        submissionId=task.submissionId,
+        compilation=CompilationResult(
+            success=False,
+            stdout="",
+            stderr=error_text,
+            exitCode=None,
+            durationMilliseconds=None,
+        ),
+        staticAnalysis=[],
+        testResults=[],
+        errorClassification=f"worker-error:{error_text}",
+    )
+    await jetstream.publish(
+        RESULT_SUBJECT,
+        failed_result.model_dump_json().encode("utf-8"),
+        headers={"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"},
+    )
+    await message.ack()
+
+
+async def publish_result_with_retry(
+    message, jetstream, payload: bytes, headers: dict[str, str]
+) -> None:
+    for attempt in range(1, MAX_RESULT_PUBLISH_ATTEMPTS + 1):
+        try:
+            await jetstream.publish(RESULT_SUBJECT, payload, headers=headers)
+            return
+        except Exception:
+            logger.exception(
+                "Could not publish sandbox result (attempt %d/%d)",
+                attempt,
+                MAX_RESULT_PUBLISH_ATTEMPTS,
+            )
+            if attempt == MAX_RESULT_PUBLISH_ATTEMPTS:
+                raise
+            try:
+                await message.in_progress()
+            except Exception:
+                logger.exception("Could not extend sandbox message acknowledgement")
+            await asyncio.sleep(min(2 ** (attempt - 1), 8))
 
 
 def evaluate_task(task: SandboxTask, provider, ctx=None) -> SandboxResult:
@@ -238,32 +289,26 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
             duration_ms = round((time.perf_counter() - stage_started) * 1000)
             eval_span.set_attribute("duration_ms", duration_ms)
             eval_span.set_attribute("outcome", result.errorClassification or "unknown")
-
-            result_headers = {"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"}
-            if trace_parent:
-                result_headers["traceparent"] = trace_parent
-            await jetstream.publish(
-                RESULT_SUBJECT,
-                result.model_dump_json().encode("utf-8"),
-                headers=result_headers,
-            )
-            await message.ack()
-            logger.info(
-                "Sandbox evaluation completed",
-                extra={
-                    "event_name": "pipeline.stage.completed",
-                    "stage": "sandbox",
-                    "submission_id": str(task.submissionId),
-                    "traceparent": trace_parent,
-                    "duration_ms": duration_ms,
-                    "attempt": attempt,
-                    "status": "completed",
-                    "outcome": result.errorClassification,
-                },
-            )
+    except PermanentSandboxError as exception:
+        error_text = str(exception)
+        logger.exception(
+            "Sandbox evaluation failed permanently",
+            extra={
+                "event_name": "pipeline.stage.failed",
+                "stage": "sandbox",
+                "submission_id": str(task.submissionId),
+                "traceparent": trace_parent,
+                "duration_ms": round((time.perf_counter() - stage_started) * 1000),
+                "attempt": attempt,
+                "status": "failed",
+                "error_type": type(exception).__name__,
+            },
+        )
+        await fail_terminal_message(message, jetstream, task, error_text)
+        return
     except Exception:
         delivered = getattr(getattr(message, "metadata", None), "num_delivered", 1)
-        if delivered >= 3:
+        if delivered >= MAX_DELIVERIES:
             error_text = "sandbox worker retries exhausted"
             logger.exception(
                 "Sandbox evaluation retries exhausted",
@@ -278,30 +323,7 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
                     "error_type": "RetriesExhausted",
                 },
             )
-            await jetstream.publish(
-                "sandbox.tasks.dlq",
-                message.data,
-                headers={"Nats-Msg-Id": f"{task.submissionId}-sandbox-dlq"},
-            )
-            failed_result = SandboxResult(
-                submissionId=task.submissionId,
-                compilation=CompilationResult(
-                    success=False,
-                    stdout="",
-                    stderr=error_text,
-                    exitCode=None,
-                    durationMilliseconds=None,
-                ),
-                staticAnalysis=[],
-                testResults=[],
-                errorClassification=f"worker-error:{error_text}",
-            )
-            await jetstream.publish(
-                RESULT_SUBJECT,
-                failed_result.model_dump_json().encode("utf-8"),
-                headers={"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"},
-            )
-            await message.ack()
+            await fail_terminal_message(message, jetstream, task, error_text)
             logger.error(
                 "Sandbox retries exhausted for submission %s; sent to DLQ",
                 task.submissionId,
@@ -324,6 +346,44 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
         )
         await asyncio.sleep(delay)
         await message.nak()
+        return
+
+    result_headers = {"Nats-Msg-Id": f"{task.submissionId}-sandbox-result"}
+    if trace_parent:
+        result_headers["traceparent"] = trace_parent
+    result_payload = result.model_dump_json().encode("utf-8")
+    try:
+        await publish_result_with_retry(
+            message, jetstream, result_payload, result_headers
+        )
+    except Exception:
+        logger.exception(
+            "Could not publish sandbox result; leaving message unacknowledged",
+            extra={
+                "event_name": "pipeline.result.publish_failed",
+                "stage": "sandbox",
+                "submission_id": str(task.submissionId),
+                "traceparent": trace_parent,
+                "attempt": attempt,
+                "status": "retrying",
+            },
+        )
+        return
+
+    await message.ack()
+    logger.info(
+        "Sandbox evaluation completed",
+        extra={
+            "event_name": "pipeline.stage.completed",
+            "stage": "sandbox",
+            "submission_id": str(task.submissionId),
+            "traceparent": trace_parent,
+            "duration_ms": duration_ms,
+            "attempt": attempt,
+            "status": "completed",
+            "outcome": result.errorClassification,
+        },
+    )
 
 
 async def run_worker() -> None:
@@ -334,7 +394,7 @@ async def run_worker() -> None:
         ack_policy=AckPolicy.EXPLICIT,
         filter_subject=TASK_SUBJECT,
         ack_wait=120,
-        max_deliver=3,
+        max_deliver=MAX_DELIVERIES,
         max_ack_pending=MAX_ACK_PENDING,
     )
     try:
