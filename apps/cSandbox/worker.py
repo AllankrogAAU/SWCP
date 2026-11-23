@@ -25,7 +25,11 @@ from pydantic import ValidationError
 
 from contracts import CompilationResult, SandboxResult, SandboxTask, SandboxTestResult
 from evaluation.evaluator import evaluate
-from sandbox.interface import Limits, PermanentSandboxError
+from sandbox.interface import (
+    Limits,
+    PermanentSandboxError,
+    SandboxConfigurationError,
+)
 from sandbox.k8s_pod import KubeSandboxProvider, PodConfig
 from sandbox.runsc_oci import RunscConfig, RunscSandboxProvider
 
@@ -289,6 +293,8 @@ async def handle_message(message, connection, jetstream, provider, executor) -> 
             duration_ms = round((time.perf_counter() - stage_started) * 1000)
             eval_span.set_attribute("duration_ms", duration_ms)
             eval_span.set_attribute("outcome", result.errorClassification or "unknown")
+    except SandboxConfigurationError:
+        raise
     except PermanentSandboxError as exception:
         error_text = str(exception)
         logger.exception(
@@ -405,12 +411,20 @@ async def run_worker() -> None:
         )
     consumer = await jetstream.pull_subscribe_bind(TASK_DURABLE, stream=TASK_STREAM)
 
-    if SANDBOX_BACKEND == "k8s":
-        provider = KubeSandboxProvider(
-            PodConfig.from_env(), pool_size=POOL_SIZE, pool_workers=POOL_WORKERS
-        )
-    else:
-        provider = RunscSandboxProvider(RunscConfig.from_env())
+    try:
+        if SANDBOX_BACKEND == "k8s":
+            provider = KubeSandboxProvider(
+                PodConfig.from_env(), pool_size=POOL_SIZE, pool_workers=POOL_WORKERS
+            )
+        elif SANDBOX_BACKEND == "runsc":
+            provider = RunscSandboxProvider(RunscConfig.from_env())
+        else:
+            raise SandboxConfigurationError(
+                f"Unsupported sandbox backend: {SANDBOX_BACKEND}"
+            )
+    except Exception:
+        await connection.close()
+        raise
 
     executor = ThreadPoolExecutor(
         max_workers=MAX_CONCURRENT, thread_name_prefix="sandbox"
@@ -429,6 +443,11 @@ async def run_worker() -> None:
     async def process(message) -> None:
         try:
             await handle_message(message, connection, jetstream, provider, executor)
+        except SandboxConfigurationError:
+            logger.exception(
+                "Sandbox backend configuration failed; stopping worker without acknowledging task"
+            )
+            shutdown.set()
         except Exception:
             logger.exception("Unhandled error while processing sandbox message")
         finally:

@@ -13,6 +13,10 @@ class PermanentSandboxError(SandboxError):
     """A sandbox failure that cannot be resolved by retrying."""
 
 
+class SandboxConfigurationError(RuntimeError):
+    """The worker's sandbox backend is misconfigured and cannot process tasks."""
+
+
 class SandboxStartError(SandboxError):
     """The sandbox could not be created or never became ready."""
 
