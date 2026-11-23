@@ -131,6 +131,29 @@ describe('App', () => {
     expect(wrapper.html()).toContain('Task judged correctly solved')
   })
 
+  it('closes the submission event stream when unmounted', async () => {
+    const closeStream = vi.fn<() => void>()
+    let resolveSubmission: ((submission: unknown) => void) | undefined
+    api.streamSubmissionEvents.mockReturnValue(closeStream)
+    api.getSubmission.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSubmission = resolve
+      }),
+    )
+
+    const wrapper = mount(App)
+    await wrapper.find('v-form').trigger('submit')
+    await flushPromises()
+    await wrapper.get('[data-test="submit"]').trigger('click')
+    await flushPromises()
+
+    wrapper.unmount()
+
+    expect(closeStream).toHaveBeenCalledOnce()
+    resolveSubmission?.({ status: 'SANDBOX_QUEUED' })
+    await flushPromises()
+  })
+
   it('tracks Hint results as feedback and Run results as terminal output only', async () => {
     const wrapper = mount(App)
     await wrapper.find('v-form').trigger('submit')
