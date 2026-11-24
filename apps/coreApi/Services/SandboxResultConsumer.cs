@@ -14,7 +14,8 @@ public sealed class SandboxResultConsumer(
     INatsJSContext jetStream,
     IServiceScopeFactory scopeFactory,
     NatsTaskPublisher publisher,
-    SubmissionEvents events) : BackgroundService
+    SubmissionEvents events,
+    IConfiguration configuration) : BackgroundService
 {
     private const ulong MaxDeliveryAttempts = 5;
     private static readonly ActivitySource ActivitySource = new("SWCP.CoreApi");
@@ -99,7 +100,7 @@ public sealed class SandboxResultConsumer(
         }
     }
 
-    private async Task ProcessResultAsync(SandboxResult result, string? traceParent, CancellationToken cancellationToken)
+    public async Task ProcessResultAsync(SandboxResult result, string? traceParent, CancellationToken cancellationToken)
     {
         using var activity = ActivitySource.StartActivity(
             "process sandbox.results",
@@ -165,6 +166,16 @@ public sealed class SandboxResultConsumer(
             ?? throw new InvalidOperationException($"Assignment {submission.AssignmentId} was not found.");
         var prompt = SubmissionPromptBuilder.Build(assignment, submission, result);
 
+        string? routedErrorType = null;
+        var routingMethod = LocalLlmRouting.GetRoutingMethod(configuration);
+        if (submission.LlmBackend == "local" &&
+            routingMethod == LocalLlmRouting.ErrorType &&
+            LocalLlmRouting.ShouldRouteToAzureByErrorType(configuration, result, out var errorType))
+        {
+            routedErrorType = errorType;
+            submission.LlmBackend = "azure";
+        }
+
         submission.Status = SubmissionStatus.LLM_QUEUED;
         await database.SaveChangesAsync(cancellationToken);
 
@@ -178,5 +189,19 @@ public sealed class SandboxResultConsumer(
             "pipeline.stage.queued", "llm", submission.Id,
             traceParent?.Split('-') is { Length: 4 } llmTraceParts ? llmTraceParts[1] : null,
             queueTimer.ElapsedMilliseconds, "queued", submission.LlmBackend);
+
+        if (routedErrorType is not null)
+        {
+            logger.LogInformation(
+                "Routing submission {SubmissionId} to azure via {RoutingMethod}: sandbox errorType='{ErrorType}'",
+                submission.Id, routingMethod, routedErrorType);
+            await events.PublishAsync(
+                submission,
+                "llm_queued",
+                $"Sandbox error type '{routedErrorType}'; routing to cloud LLM",
+                50,
+                cancellationToken,
+                traceParent);
+        }
     }
 }

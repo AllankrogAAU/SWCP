@@ -59,6 +59,7 @@ services:
       LocalLlm__AzureFallbackThreshold: ${LOCAL_LLM_AZURE_FALLBACK_THRESHOLD:-0}
       LocalLlm__EscalateDiagnosisConfidence: ${LOCAL_LLM_ESCALATE_DIAGNOSIS_CONFIDENCE:-uncertain,guessing}
       LocalLlm__EscalateRootCauseCategories: ${LOCAL_LLM_ESCALATE_ROOT_CAUSE_CATEGORIES:-pointer_memory}
+      LocalLlm__EscalateErrorTypes: ${LOCAL_LLM_ESCALATE_ERROR_TYPES:-wrong_output,runtime_error}
     volumes:
       - jwt-private:/private
       - jwt-public:/public

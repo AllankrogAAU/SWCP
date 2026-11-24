@@ -79,12 +79,7 @@ public sealed class LlmResultConsumer(
             ActivityKind.Consumer,
             traceParent ?? string.Empty);
 
-        var routingMethod = (configuration["LocalLlm:RoutingMethod"] ?? "confidence_score").Trim().ToLowerInvariant();
-        if (routingMethod is not ("none" or "confidence_score" or "self_evaluation"))
-        {
-            throw new InvalidOperationException(
-                $"LocalLlm:RoutingMethod '{routingMethod}' must be 'none', 'confidence_score', or 'self_evaluation'.");
-        }
+        var routingMethod = LocalLlmRouting.GetRoutingMethod(configuration);
 
         var fallbackThreshold = configuration.GetValue<double>("LocalLlm:AzureFallbackThreshold", 0);
         if (fallbackThreshold is < 0 or > 100)
@@ -205,23 +200,23 @@ public sealed class LlmResultConsumer(
             return null;
         }
 
-        if (routingMethod == "confidence_score")
+        if (routingMethod == LocalLlmRouting.ConfidenceScore)
         {
             return result.ConfidenceScorePercent is double score && score < fallbackThreshold
                 ? $"Local confidence ({score:F1}%) below threshold ({fallbackThreshold:F1}%)"
                 : null;
         }
 
-        if (routingMethod == "self_evaluation")
+        if (routingMethod == LocalLlmRouting.SelfEvaluation)
         {
-            var escalateConfidences = ParseConfiguredSet(configuration["LocalLlm:EscalateDiagnosisConfidence"] ?? "uncertain,guessing");
+            var escalateConfidences = LocalLlmRouting.ParseConfiguredSet(configuration["LocalLlm:EscalateDiagnosisConfidence"] ?? "uncertain,guessing");
             if (!string.IsNullOrWhiteSpace(result.DiagnosisConfidence) &&
                 escalateConfidences.Contains(result.DiagnosisConfidence.Trim().ToLowerInvariant()))
             {
                 return $"Local self-evaluation diagnosisConfidence='{result.DiagnosisConfidence}'";
             }
 
-            var escalateCategories = ParseConfiguredSet(configuration["LocalLlm:EscalateRootCauseCategories"] ?? "pointer_memory");
+            var escalateCategories = LocalLlmRouting.ParseConfiguredSet(configuration["LocalLlm:EscalateRootCauseCategories"] ?? "pointer_memory");
             if (!string.IsNullOrWhiteSpace(result.RootCauseCategory) &&
                 escalateCategories.Contains(result.RootCauseCategory.Trim().ToLowerInvariant()))
             {
@@ -231,13 +226,6 @@ public sealed class LlmResultConsumer(
 
         return null;
     }
-
-    private static HashSet<string> ParseConfiguredSet(string? raw) =>
-        string.IsNullOrWhiteSpace(raw)
-            ? []
-            : raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Select(value => value.ToLowerInvariant())
-                .ToHashSet(StringComparer.Ordinal);
 
     private async Task MarkSubmissionFailedAsync(
         Guid submissionId,
