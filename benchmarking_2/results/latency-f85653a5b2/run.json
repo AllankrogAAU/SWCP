@@ -1,0 +1,10 @@
+{
+  "run_id": "latency-f85653a5b2",
+  "mode": "latency",
+  "started_at": "2026-11-23 16:35:07",
+  "ended_at": "2026-11-23 16:42:13",
+  "dataset_hash": "c7a0f75a45d04ffee3351e56570329bb62d3ea383a278b6618bb2b646b525afa",
+  "sample_per_category": 50,
+  "judge_enabled": 0,
+  "config_json": "{\"target_url\": \"http://127.0.0.1:15170\", \"data_path\": \"benchmarks/submissions_data_11000.jsonl\", \"dataset_db_path\": \"benchmarking_2/submissions.sqlite\", \"models_dir\": \"apps/localLLM/models\", \"results_dir\": \"benchmarking_2/results\", \"user_count\": 24, \"user_prefix\": \"bench2_user_\", \"password\": \"BenchPass123!\", \"sample_per_category\": 50, \"target_rpm\": 100.0, \"max_concurrency\": 10, \"judge_batch_size\": 8, \"warmup_count\": 2, \"timeout_s\": 300, \"seed\": 20261118, \"models\": [{\"name\": \"qwen3-14b-awq\", \"backend\": \"local\"}], \"switch_command\": \"true\", \"prometheus_url\": \"http://127.0.0.1:1\", \"loki_url\": \"http://127.0.0.1:1\", \"judge_url\": null, \"judge_model\": \"gpt-6-sol\", \"judge_api_version\": \"2024-10-21\"}"
+}
